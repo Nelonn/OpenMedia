@@ -362,7 +362,7 @@ endif ()
 if (OPENMEDIA_EXAMPLE_PLAYER)
     if (AUI_BOOT)
         auib_import(SDL3 https://github.com/libsdl-org/SDL
-                VERSION be82f316c4745d4cf0f8c0a5e37f5390beed9542)
+                VERSION c20a058ff431d046c5806bd22aba0835b25d9904)
     elseif (NOT TARGET SDL3::SDL3)
         add_subdirectory(third_party/external/SDL)
     endif ()
