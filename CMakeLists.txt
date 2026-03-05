@@ -213,8 +213,8 @@ endif ()
 
 if (OPENMEDIA_VORBIS)
     if (AUI_BOOT)
-        auib_import(Vorbis https://github.com/xiph/vorbis
-                VERSION 2d79800b6751dddd4b8b4ad50832faa5ae2a00d9)
+        auib_import(Vorbis https://github.com/Nelonn/vorbis
+                VERSION 8de7001691d9177e30ff16a98b37b1e6fd15f7af)
     elseif (NOT TARGET Vorbis::vorbis)
         add_subdirectory(third_party/external/vorbis)
     endif ()
@@ -277,7 +277,7 @@ endif ()
 if (OPENMEDIA_PNG)
     if (AUI_BOOT)
         auib_import(png https://github.com/Nelonn/libpng
-                VERSION 6208f2063214c8551381ce6bef838a7cb4e29195)
+                VERSION dd47360484d97fd1e4925eddc8102f084f5c2ce9)
     elseif (NOT TARGET PNG::png)
         add_subdirectory(third_party/external/libpng)
     endif ()
