@@ -276,7 +276,7 @@ endif ()
 
 if (OPENMEDIA_PNG)
     if (AUI_BOOT)
-        auib_import(png https://github.com/Nelonn/libpng
+        auib_import(PNG https://github.com/Nelonn/libpng
                 VERSION dd47360484d97fd1e4925eddc8102f084f5c2ce9)
     elseif (NOT TARGET PNG::png)
         add_subdirectory(third_party/external/libpng)
@@ -289,7 +289,7 @@ endif ()
 if (OPENMEDIA_TIFF)
     if (AUI_BOOT)
         auib_import(TIFF https://github.com/libsdl-org/libtiff
-                VERSION 4ce82b57ce92f1cddcf6fb10d0dde103937170c4
+                VERSION f324415f50cb5c90f7712e9dfe69831f5d2ea88d
                 CMAKE_ARGS -Dtiff-tools=OFF -Dtiff-docs=OFF)
     elseif (NOT TARGET TIFF::tiff)
         set(tiff-tools OFF)
