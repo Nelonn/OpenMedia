@@ -107,7 +107,9 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_ALAC);
   registry->registerCodec(&CODEC_VORBIS);
   registry->registerCodec(&CODEC_OPUS);
+#if defined(_WIN32)
   registry->registerCodec(&CODEC_WMF);
+#endif
 
   // Video - Software
   //registry->registerCodec(&CODEC_OPENH264);

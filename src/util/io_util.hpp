@@ -3,6 +3,7 @@
 #include <openmedia/io.hpp>
 #include <vector>
 #include <bit>
+#include <cstring>
 
 namespace openmedia {
 

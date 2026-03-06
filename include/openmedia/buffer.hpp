@@ -5,6 +5,7 @@
 #include <openmedia/macro.h>
 #include <span>
 #include <stack>
+#include <vector>
 #include <unordered_map>
 
 namespace openmedia {

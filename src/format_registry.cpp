@@ -72,7 +72,9 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
   if (!registry) return;
 
   // Container formats
+#if defined(OPENMEDIA_FFMPEG)
   registry->registerFormat(&FORMAT_FFMPEG);
+#endif
   registry->registerFormat(&FORMAT_BMFF);
   registry->registerFormat(&FORMAT_MATROSKA);
 

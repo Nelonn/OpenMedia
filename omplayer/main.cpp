@@ -27,8 +27,16 @@ using TimePoint = std::chrono::time_point<Clock>;
 
 static constexpr auto SEEK_SETTLE = std::chrono::milliseconds(120);
 static constexpr size_t VIDEO_QUEUE_MAX = 8;
-// How many PTS units early/late we tolerate before skipping a video frame
 static constexpr double AV_SYNC_THRESHOLD = 0.05; // seconds
+
+// Audio buffering thresholds
+static constexpr double AUDIO_BUFFER_LOW_THRESHOLD = 0.25;   // 25% - start refilling
+static constexpr double AUDIO_BUFFER_HIGH_THRESHOLD = 0.75;  // 75% - stop refilling
+static constexpr double AUDIO_BUFFER_START_THRESHOLD = 0.30; // 30% - start playback
+
+// Worker loop throttling
+static constexpr auto WORKER_SLEEP_DURATION = std::chrono::milliseconds(5);
+static constexpr auto WORKER_TIMEOUT = std::chrono::milliseconds(100);
 
 static auto toSdlFormat(OMSampleFormat fmt) -> SDL_AudioFormat {
   switch (fmt) {
@@ -102,7 +110,7 @@ static auto buildPixels(const Picture& pic) -> std::vector<uint32_t> {
 }
 
 // ---------------------------------------------------------------------------
-// RingBuffer  (unchanged)
+// RingBuffer
 // ---------------------------------------------------------------------------
 class RingBuffer {
 public:
@@ -110,35 +118,49 @@ public:
       : buf_(capacity), capacity_(capacity) {}
 
   auto write(const uint8_t* data, size_t len) -> size_t {
-    const size_t n = std::min(len, availableWrite());
+    std::lock_guard lock(mutex_);
+    const size_t n = std::min(len, availableWriteUnsafe());
     for (size_t i = 0; i < n; ++i)
       buf_[(write_pos_ + i) % capacity_] = data[i];
-    write_pos_.fetch_add(n, std::memory_order_release);
+    write_pos_ += n;
     return n;
   }
 
   auto read(uint8_t* dst, size_t len) -> size_t {
-    const size_t n = std::min(len, currentSize());
+    std::lock_guard lock(mutex_);
+    const size_t n = std::min(len, currentSizeUnsafe());
     for (size_t i = 0; i < n; ++i)
       dst[i] = buf_[(read_pos_ + i) % capacity_];
-    read_pos_.fetch_add(n, std::memory_order_release);
+    read_pos_ += n;
     return n;
   }
 
   void clear() {
-    read_pos_.store(write_pos_.load(std::memory_order_acquire),
-                    std::memory_order_release);
+    std::lock_guard lock(mutex_);
+    read_pos_ = write_pos_;
   }
 
-  auto currentSize() const -> size_t { return write_pos_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire); }
+  auto currentSize() const -> size_t {
+    std::lock_guard lock(mutex_);
+    return currentSizeUnsafe();
+  }
+
   auto capacity() const -> size_t { return capacity_; }
-  auto availableWrite() const -> size_t { return capacity_ - currentSize(); }
+
+  auto availableWrite() const -> size_t {
+    std::lock_guard lock(mutex_);
+    return availableWriteUnsafe();
+  }
 
 private:
+  auto currentSizeUnsafe() const -> size_t { return write_pos_ - read_pos_; }
+  auto availableWriteUnsafe() const -> size_t { return capacity_ - currentSizeUnsafe(); }
+
   std::vector<uint8_t> buf_;
   size_t capacity_;
-  std::atomic<size_t> read_pos_ {0};
-  std::atomic<size_t> write_pos_ {0};
+  mutable std::mutex mutex_;
+  size_t read_pos_ = 0;
+  size_t write_pos_ = 0;
 };
 
 struct VideoFrame {
@@ -163,7 +185,6 @@ public:
     cond_not_empty_.notify_one();
   }
 
-  // Returns false if queue was flushed / empty after timeout
   auto pop(VideoFrame& out) -> bool {
     std::unique_lock lock(mutex_);
     if (!cond_not_empty_.wait_for(lock, std::chrono::milliseconds(20),
@@ -177,7 +198,6 @@ public:
     return true;
   }
 
-  // Peek at front PTS without consuming
   auto frontPts() -> std::optional<int64_t> {
     std::lock_guard lock(mutex_);
     if (queue_.empty()) return std::nullopt;
@@ -248,6 +268,7 @@ public:
     }
 
     audio_ready_ = false;
+    audio_started_ = false;
     has_image_ = false;
     has_video_ = false;
     seek_pending_ = false;
@@ -256,7 +277,8 @@ public:
     video_stream_index_ = -1;
     image_stream_index_ = -1;
     current_pts_ = 0;
-    video_start_time_ = Clock::now();
+    audio_clock_ = 0;
+    playback_start_time_ = Clock::now();
   }
 
   auto play(const std::string& path) -> bool {
@@ -337,27 +359,17 @@ public:
     return {image_width_, image_height_};
   }
 
-  // Called each render tick from the main thread to upload the next video frame
   void tickVideo() {
     if (!has_video_ || !renderer_) return;
 
-    // Determine master clock in time-base units
+    // Use audio clock as master if available
     const int64_t master_pts = current_pts_.load();
 
-    // For video-only, drive clock from wall time
-    const bool audio_driving = audio_ready_.load();
-    int64_t display_pts = master_pts;
-    if (!audio_driving && time_base_.den != 0) {
-      const auto elapsed = std::chrono::duration<double>(Clock::now() - video_start_time_).count();
-      display_pts = static_cast<int64_t>(elapsed * time_base_.den / time_base_.num);
-    }
-
-    // Peek and decide whether to present
     auto front_pts_opt = video_queue_.frontPts();
     if (!front_pts_opt) return;
 
     const double frame_pts_sec = static_cast<double>(*front_pts_opt) * time_base_.num / time_base_.den;
-    const double clock_sec = static_cast<double>(display_pts) * time_base_.num / time_base_.den;
+    const double clock_sec = static_cast<double>(master_pts) * time_base_.num / time_base_.den;
     const double diff = frame_pts_sec - clock_sec;
 
     // Too far in the future – wait
@@ -366,8 +378,8 @@ public:
     VideoFrame vf;
     if (!video_queue_.pop(vf)) return;
 
-    // Update video clock for video-only mode
-    if (!audio_driving) current_pts_.store(vf.pts);
+    // Update clock only if audio is not driving
+    if (!audio_ready_) current_pts_.store(vf.pts);
 
     // Upload pixels to texture
     std::lock_guard lock(video_texture_mutex_);
@@ -382,7 +394,7 @@ public:
                                          static_cast<int>(vf.height));
       video_texture_w_ = vf.width;
       video_texture_h_ = vf.height;
-        }
+    }
     if (video_texture_) {
       SDL_UpdateYUVTexture(video_texture_, nullptr,
                            vf.y_plane.data(), vf.y_stride,
@@ -405,15 +417,31 @@ private:
                                     int additional_amount, int) {
     auto* self = static_cast<MediaPlayer*>(userdata);
     if (!self->ring_buffer_) return;
-    std::vector<uint8_t> tmp(static_cast<size_t>(additional_amount), 0);
-    self->ring_buffer_->read(tmp.data(), tmp.size());
-    SDL_PutAudioStreamData(stream, tmp.data(), additional_amount);
-    self->seek_cv_.notify_one();
+
+    const size_t available = self->ring_buffer_->currentSize();
+    const size_t to_read = std::min(available, static_cast<size_t>(additional_amount));
+
+    if (to_read > 0) {
+      std::vector<uint8_t> tmp(to_read);
+      const size_t actually_read = self->ring_buffer_->read(tmp.data(), to_read);
+      SDL_PutAudioStreamData(stream, tmp.data(), static_cast<int>(actually_read));
+
+      // Update audio clock based on bytes consumed
+      if (self->audio_sample_rate_ > 0 && self->audio_frame_size_ > 0) {
+        const int64_t samples_consumed = actually_read / self->audio_frame_size_;
+        const double time_consumed = static_cast<double>(samples_consumed) / self->audio_sample_rate_;
+        const int64_t pts_delta = static_cast<int64_t>(time_consumed * self->time_base_.den / self->time_base_.num);
+
+        self->audio_clock_.fetch_add(pts_delta, std::memory_order_relaxed);
+        self->current_pts_.store(self->audio_clock_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      }
+    } else {
+      // Buffer empty – send silence
+      std::vector<uint8_t> silence(static_cast<size_t>(additional_amount), 0);
+      SDL_PutAudioStreamData(stream, silence.data(), additional_amount);
+    }
   }
 
-  // ---------------------------------------------------------------------------
-  // Stream setup
-  // ---------------------------------------------------------------------------
   void onDemuxerOpen() {
     const auto& tracks = demuxer_->tracks();
     for (size_t i = 0; i < tracks.size(); ++i) {
@@ -458,7 +486,7 @@ private:
   }
 
   void setupImageDecoder(const Track& track) {
-    if (!makeDecoder(track, audio_decoder_)) return; // reuse slot; images are single-shot
+    if (!makeDecoder(track, audio_decoder_)) return;
     image_width_ = track.format.image.width;
     image_height_ = track.format.image.height;
     total_duration_ = track.duration;
@@ -468,12 +496,12 @@ private:
 
   void setupAudioDecoder(const Track& track) {
     if (!makeDecoder(track, audio_decoder_)) return;
-    // Duration / time base prefer video track if present; otherwise audio
     if (video_stream_index_ < 0) {
       total_duration_ = track.duration;
       time_base_ = track.time_base;
     }
     current_pts_ = 0;
+    audio_clock_ = 0;
     SDL_Log("Audio codec: %s", getCodecMeta(track.format.codec_id).name.data());
   }
 
@@ -484,7 +512,6 @@ private:
     video_width_ = track.format.image.width;
     video_height_ = track.format.image.height;
     has_video_ = true;
-    video_start_time_ = Clock::now();
     SDL_Log("Video: %dx%d, codec: %s",
             video_width_, video_height_,
             getCodecMeta(track.format.codec_id).name.data());
@@ -498,6 +525,11 @@ private:
 
     const size_t bps = getBytesPerSample(samples.format.sample_format);
     const size_t frame_size = bps * static_cast<size_t>(spec.channels);
+
+    // Store for audio clock calculation
+    audio_sample_rate_ = spec.freq;
+    audio_frame_size_ = frame_size;
+
     ring_buffer_ = std::make_unique<RingBuffer>(static_cast<size_t>(spec.freq) * 2 * frame_size);
 
     audio_device_ = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
@@ -518,8 +550,10 @@ private:
       return false;
     }
     SDL_SetAudioDeviceGain(audio_device_, volume_);
+
     audio_ready_ = true;
-    SDL_Log("Audio: %d Hz, %d ch", spec.freq, spec.channels);
+    audio_started_ = false;
+    SDL_Log("Audio: %d Hz, %d ch (buffering...)", spec.freq, spec.channels);
     return true;
   }
 
@@ -533,6 +567,7 @@ private:
       audio_device_ = 0;
     }
     audio_ready_ = false;
+    audio_started_ = false;
   }
 
   void startWorker() {
@@ -547,7 +582,7 @@ private:
       stop_requested_ = true;
     }
     seek_cv_.notify_one();
-    video_queue_.flush(); // unblock any waiting push
+    video_queue_.flush();
     if (worker_.joinable()) worker_.join();
   }
 
@@ -558,6 +593,7 @@ private:
     if (video_decoder_) video_decoder_->flush();
     video_queue_.flush();
     video_queue_.resetFlush();
+    audio_started_ = false;
 
     const int32_t ref_stream = (audio_stream_index_ >= 0) ? audio_stream_index_ : video_stream_index_;
     const auto target_pts = static_cast<int64_t>(progress * static_cast<float>(total_duration_));
@@ -566,38 +602,52 @@ private:
       target_ns = static_cast<int64_t>(
           static_cast<double>(target_pts) * time_base_.num / time_base_.den * 1'000'000'000.0);
 
-    if (demuxer_->seek(target_ns, ref_stream) == OM_SUCCESS)
+    if (demuxer_->seek(target_ns, ref_stream) == OM_SUCCESS) {
       current_pts_ = target_pts;
+      audio_clock_ = target_pts;
+    }
 
     // Prime with a few packets
-    for (int i = 0; i < 8 && !stop_requested_; ++i) {
+    for (int i = 0; i < 10 && !stop_requested_; ++i) {
       auto res = demuxer_->readPacket();
       if (res.isErr()) break;
       processPacket(res.unwrap(), false);
     }
-
-    if (audio_device_) SDL_ResumeAudioDevice(audio_device_);
   }
 
   void workerLoop() {
     while (true) {
       {
         std::unique_lock lock(seek_mutex_);
-        seek_cv_.wait(lock, [&] {
+
+        // Wait with timeout for better responsiveness
+        const auto wait_result = seek_cv_.wait_for(lock, WORKER_TIMEOUT, [&] {
           if (stop_requested_.load()) return true;
           if (seek_pending_ && (Clock::now() - last_seek_time_) >= SEEK_SETTLE) return true;
           if (seek_pending_) return false;
-          // Throttle: don't overfill the audio ring or video queue
-          const bool audio_full = ring_buffer_ && ring_buffer_->currentSize() >= ring_buffer_->capacity() * 3 / 4;
-          const bool video_full = video_queue_.size() >= VIDEO_QUEUE_MAX;
-          return !(audio_full && video_full);
+
+          // Check if we need to decode more
+          const bool audio_needs_data = !ring_buffer_ ||
+              ring_buffer_->currentSize() < static_cast<size_t>(ring_buffer_->capacity() * AUDIO_BUFFER_HIGH_THRESHOLD);
+          const bool video_needs_data = video_queue_.size() < VIDEO_QUEUE_MAX * 3 / 4;
+
+          return audio_needs_data || video_needs_data;
         });
+
         if (stop_requested_) return;
+
         if (seek_pending_) {
           const float progress = pending_seek_progress_;
           seek_pending_ = false;
           lock.unlock();
           flushSeek(progress);
+          continue;
+        }
+
+        // If we hit timeout without being woken, sleep a bit to avoid busy-wait
+        if (!wait_result) {
+          lock.unlock();
+          std::this_thread::sleep_for(WORKER_SLEEP_DURATION);
           continue;
         }
       }
@@ -608,6 +658,9 @@ private:
         break;
       }
       processPacket(res.unwrap(), true);
+
+      // Small sleep to prevent tight loop on Linux
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
 
@@ -621,22 +674,51 @@ private:
   void processAudioPacket(const Packet& pkt, bool allow_open_device) {
     auto result = audio_decoder_->decode(pkt);
     if (result.isErr()) return;
+
     for (auto& frame : result.unwrap()) {
       if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
       const AudioSamples& samples = std::get<AudioSamples>(frame.data);
       if (samples.nb_samples == 0) continue;
-      current_pts_ = static_cast<int64_t>(frame.pts);
+
       if (!audio_ready_) {
         if (!allow_open_device || !openAudioDevice(samples)) return;
       }
+
       auto audio_data = unpackBits(interleaveAudio(samples), samples.format.bits_per_sample);
-      ring_buffer_->write(audio_data.data(), audio_data.size());
+
+      // Write to ring buffer - may block if full
+      size_t written = 0;
+      while (written < audio_data.size() && !stop_requested_) {
+        const size_t chunk = ring_buffer_->write(audio_data.data() + written,
+                                                  audio_data.size() - written);
+        written += chunk;
+        if (written < audio_data.size()) {
+          // Buffer full, wait a bit
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+      }
+
+      // Start playback after initial buffering
+      if (audio_device_ && !audio_started_) {
+        const size_t filled = ring_buffer_->currentSize();
+        const size_t threshold = static_cast<size_t>(ring_buffer_->capacity() * AUDIO_BUFFER_START_THRESHOLD);
+        if (filled >= threshold) {
+          playback_start_time_ = Clock::now();
+          audio_clock_ = static_cast<int64_t>(frame.pts);
+          current_pts_ = audio_clock_.load();
+          SDL_ResumeAudioDevice(audio_device_);
+          audio_started_ = true;
+          SDL_Log("Playback started (buffer: %zu/%zu bytes, PTS: %lld)",
+                  filled, ring_buffer_->capacity(), static_cast<long long>(frame.pts));
+        }
+      }
     }
   }
 
   void processVideoPacket(const Packet& pkt) {
     auto result = video_decoder_->decode(pkt);
     if (result.isErr()) return;
+
     for (auto& frame : result.unwrap()) {
       if (!std::holds_alternative<Picture>(frame.data)) continue;
       const Picture& pic = std::get<Picture>(frame.data);
@@ -662,7 +744,7 @@ private:
       vf.u_plane.assign(u_src, u_src + u_stride * (pic.height / 2));
       vf.v_plane.assign(v_src, v_src + v_stride * (pic.height / 2));
 
-      if (!audio_ready_) current_pts_ = vf.pts;
+      if (!audio_ready_) current_pts_.store(vf.pts);
       video_queue_.push(std::move(vf));
     }
   }
@@ -727,12 +809,17 @@ private:
   SDL_AudioStream* audio_stream_ = nullptr;
   std::unique_ptr<RingBuffer> ring_buffer_;
   std::atomic<bool> audio_ready_ {false};
+  std::atomic<bool> audio_started_ {false};
   float volume_ = 1.0f;
+  int audio_sample_rate_ = 0;
+  size_t audio_frame_size_ = 0;
 
   // Clock / progress
   int64_t total_duration_ = 0;
   std::atomic<int64_t> current_pts_ {0};
+  std::atomic<int64_t> audio_clock_ {0};
   Rational time_base_ {1, 1};
+  TimePoint playback_start_time_;
 
   // Video
   VideoFrameQueue video_queue_;
@@ -743,7 +830,6 @@ private:
   uint32_t video_texture_h_ = 0;
   uint32_t video_width_ = 0;
   uint32_t video_height_ = 0;
-  TimePoint video_start_time_;
 
   // Still image
   SDL_Texture* image_texture_ = nullptr;
@@ -840,13 +926,11 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // Upload next video frame (AV-synced)
     player.tickVideo();
 
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
-    // --- render video frame ---
     if (player.hasVideo()) {
       if (SDL_Texture* tex = player.getVideoTexture()) {
         auto [vid_w, vid_h] = player.getVideoSize();
@@ -861,7 +945,6 @@ int main(int argc, char* argv[]) {
         }
       }
     }
-    // --- render still image ---
     else if (player.hasImage()) {
       if (SDL_Texture* tex = player.getImageTexture()) {
         auto [img_w, img_h] = player.getImageSize();
@@ -877,7 +960,6 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // --- HUD ---
     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
     SDL_RenderDebugText(renderer, 20, 20,
                         player.current_file.empty() ? "Drop a video, audio, or image file here"
@@ -913,7 +995,7 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_RenderPresent(renderer);
-    SDL_Delay(8); // ~120 fps loop; video frames are rate-limited by AV sync
+    SDL_Delay(8);
   }
 
   player.stop();
