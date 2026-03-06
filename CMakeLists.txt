@@ -215,7 +215,7 @@ endif ()
 if (OPENMEDIA_VORBIS)
     if (AUI_BOOT)
         auib_import(Vorbis https://github.com/Nelonn/vorbis
-                VERSION 611de396be3edae9ba0d8e6d6352ecb1c82323ff)
+                VERSION 7d618707408992090f37a82fafbba65205ff2e05)
     elseif (NOT TARGET Vorbis::vorbis)
         add_subdirectory(third_party/external/vorbis)
     endif ()
