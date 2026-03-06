@@ -89,7 +89,6 @@
   },
   "third_party/external/zlib-ng": {
     "url": "https://github.com/Nelonn/zlib-ng",
-    "commit": "b583a325937227d7834ae541cf88c1f273da113e",
-    "patches": ["third_party/zlib-ng.patch"]
+    "commit": "381792764c59489a0c968968c1ddd8a2a6d8556c"
   }
 }

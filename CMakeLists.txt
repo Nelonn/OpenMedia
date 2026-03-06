@@ -96,7 +96,7 @@ endif ()
 if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
     if (AUI_BOOT)
         auib_import(ZLIB https://github.com/Nelonn/zlib-ng
-                VERSION b583a325937227d7834ae541cf88c1f273da113e)
+                VERSION 381792764c59489a0c968968c1ddd8a2a6d8556c)
     elseif (NOT TARGET ZLIB::ZLIB)
         add_subdirectory(third_party/external/zlib-ng)
     endif ()
