@@ -33,9 +33,15 @@ option(OPENMEDIA_EXR "EXR" OFF)
 option(OPENMEDIA_JPEG "JPEG" ON)
 option(OPENMEDIA_TGA "TGA" ON)
 
-# Video
-option(OPENMEDIA_OPENH264 "OpenH264" OFF)
-option(OPENMEDIA_DAV1D "dav1d" ON)
+# Software Video (royalty)
+option(OPENMEDIA_DAV1D "dav1d (AV1 decoder)" ON) # royalty-free
+option(OPENMEDIA_OPENH264 "OpenH264 (H264 decoder / encoder)" OFF)
+option(OPENMEDIA_VVDEC "VVDEC (VVC decoder)" OFF)
+option(OPENMEDIA_VVENC "VVENC (VVC encoder)" OFF)
+option(OPENMEDIA_XEVD "XEVD (EVC decoder)" OFF)
+option(OPENMEDIA_XEVE "XEVE (EVC encoder)" OFF)
+
+# Hardware Video (royalty-free)
 option(OPENMEDIA_VULKAN_VIDEO "Vulkan Video" ${NOT_APPLE})
 option(OPENMEDIA_DX11_VIDEO "DirectX11 Video" ${WIN32})
 option(OPENMEDIA_DX12_VIDEO "DirectX12 Video" ${WIN32})

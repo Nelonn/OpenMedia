@@ -11,12 +11,12 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_H261: return {"H.261", "H.261", OM_MEDIA_VIDEO};
     case OM_CODEC_H262: return {"H.262", "MPEG-2 Video", OM_MEDIA_VIDEO};
     case OM_CODEC_H263: return {"H.263", "H.263", OM_MEDIA_VIDEO};
-    case OM_CODEC_H264: return {"H.264", "H.264 / AVC", OM_MEDIA_VIDEO};
-    case OM_CODEC_H265: return {"H.265", "H.265 / HEVC", OM_MEDIA_VIDEO};
-    case OM_CODEC_H266: return {"H.266", "H.266 / VVC", OM_MEDIA_VIDEO};
+    case OM_CODEC_H264: return {"H.264 / AVC", "H.264 / AVC (Advanced Video Coding)", OM_MEDIA_VIDEO};
+    case OM_CODEC_H265: return {"H.265 / HEVC", "H.265 / HEVC (High Efficiency Video Coding)", OM_MEDIA_VIDEO};
+    case OM_CODEC_H266: return {"H.266 / VVC", "H.266 / VVC (Versatile Video Coding)", OM_MEDIA_VIDEO};
     case OM_CODEC_VP8: return {"VP8", "VP8", OM_MEDIA_VIDEO};
     case OM_CODEC_VP9: return {"VP9", "VP9", OM_MEDIA_VIDEO};
-    case OM_CODEC_AV1: return {"AV1", "AV1", OM_MEDIA_VIDEO};
+    case OM_CODEC_AV1: return {"AV1", "AV1 (AOMedia Video 1)", OM_MEDIA_VIDEO};
     case OM_CODEC_MPEG4: return {"MPEG-4", "MPEG-4 Video", OM_MEDIA_VIDEO};
     case OM_CODEC_THEORA:
       return {"Theora", "Theora", OM_MEDIA_VIDEO};

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <openmedia/video.hpp>
 #include <vector>
+#include <util/io_util.hpp>
 
 namespace openmedia {
 
@@ -39,14 +40,6 @@ static void dav1d_log_callback(void* cookie, const char* format, va_list ap) {
   std::string_view message(buffer.data(), static_cast<size_t>(required_size));
   logger->log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
 }
-
-static void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, ptrdiff_t stride) {
-  for (size_t y = 0; y < height; y++) {
-    memcpy(dst, src, width);
-    dst += width;
-    src += stride;
-  }
-};
 
 class Dav1dDecoder final : public Decoder {
   std::unique_ptr<Dav1dContext, Dav1dContextDeleter> ctx_;

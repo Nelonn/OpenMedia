@@ -71,6 +71,14 @@ static auto load_u32_le(const uint8_t* p) -> uint32_t {
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
+static void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, ptrdiff_t stride) {
+  for (size_t y = 0; y < height; y++) {
+    memcpy(dst, src, width);
+    dst += width;
+    src += stride;
+  }
+}
+
 class MemoryBitReader {
   const uint8_t* data_ = nullptr;
   size_t size_ = 0;
