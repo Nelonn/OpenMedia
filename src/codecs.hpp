@@ -15,11 +15,24 @@ extern const CodecDescriptor CODEC_VORBIS;
 extern const CodecDescriptor CODEC_OPUS;
 extern const CodecDescriptor CODEC_WMF;
 
+// Audio - FFmpeg
+extern const CodecDescriptor CODEC_FFMPEG_AAC;
+extern const CodecDescriptor CODEC_FFMPEG_MP3;
+extern const CodecDescriptor CODEC_FFMPEG_OPUS;
+extern const CodecDescriptor CODEC_FFMPEG_VORBIS;
+extern const CodecDescriptor CODEC_FFMPEG_FLAC;
+
 // Video - Software
 extern const CodecDescriptor CODEC_DAV1D;
 //extern const CodecDescriptor CODEC_OPENH264;
 extern const CodecDescriptor CODEC_VVDEC;
 extern const CodecDescriptor CODEC_XEVD;
+
+// Video - FFmpeg
+extern const CodecDescriptor CODEC_FFMPEG_H264;
+extern const CodecDescriptor CODEC_FFMPEG_H265;
+extern const CodecDescriptor CODEC_FFMPEG_VP9;
+extern const CodecDescriptor CODEC_FFMPEG_AV1;
 
 // Video - DirectX11
 //extern const CodecDescriptor CODEC_DX11_H264;

@@ -6,15 +6,16 @@
 OM_ENUM(OMError, int32_t) {
   OM_SUCCESS = 0,
 
-  OM_COMMON_INVALID_ARGUMENT = 1000, // Null ptr, out-of-range value, etc.
-  OM_COMMON_NOT_INITIALIZED = 1001,  // Object used before init()
-  OM_COMMON_NOT_IMPLEMENTED = 1002,  // Stub / future feature
-  OM_COMMON_NOT_SUPPORTED = 1003,    // Feature disabled at compile time
-  OM_COMMON_OUT_OF_MEMORY = 1004,
-  OM_COMMON_OVERFLOW = 1005, // Integer/buffer overflow detected
-  OM_COMMON_TIMEOUT = 1006,
-  OM_COMMON_CANCELLED = 1007, // Operation aborted by user
-  OM_COMMON_PERMISSION_DENIED = 1008,
+  OM_COMMON_UNKNOWN_ERROR = 1000,
+  OM_COMMON_INVALID_ARGUMENT = 1001, // Null ptr, out-of-range value, etc.
+  OM_COMMON_NOT_INITIALIZED = 1002,  // Object used before init()
+  OM_COMMON_NOT_IMPLEMENTED = 1003,  // Stub / future feature
+  OM_COMMON_NOT_SUPPORTED = 1004,    // Feature disabled at compile time
+  OM_COMMON_OUT_OF_MEMORY = 1005,
+  OM_COMMON_OVERFLOW = 1006, // Integer/buffer overflow detected
+  OM_COMMON_TIMEOUT = 1007,
+  OM_COMMON_CANCELLED = 1008, // Operation aborted by user
+  OM_COMMON_PERMISSION_DENIED = 1009,
 
   OM_IO_UNKNOWN_ERROR = 2000,
   OM_IO_INVALID_STREAM = 2001,  // Stream ptr is null / closed

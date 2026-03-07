@@ -123,10 +123,11 @@ if (OPENMEDIA_FFMPEG)
 
     if (FFMPEG_FOUND)
         target_include_directories(OpenMedia PRIVATE ${FFMPEG_INCLUDE_DIRS})
-
-        target_sources(OpenMedia PRIVATE src/avcodec.cpp)
-        target_sources(OpenMedia PRIVATE src/avformat.cpp)
-        target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_FFMPEG)
+        target_sources(OpenMedia PRIVATE src/avutil.cpp src/avutil.hpp)
+        target_sources(OpenMedia PRIVATE src/avcodec.cpp src/avcodec.hpp)
+        target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_AVCODEC)
+        target_sources(OpenMedia PRIVATE src/avformat.cpp src/avformat.hpp)
+        target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_AVFORMAT)
     endif ()
 endif ()
 
@@ -145,6 +146,7 @@ if (OPENMEDIA_MATROSKA)
     endif ()
     target_link_libraries(OpenMedia PRIVATE webm::webm)
     target_sources(OpenMedia PRIVATE src/matroska_demuxer.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_MATROSKA)
 endif ()
 
 if (OPENMEDIA_FDK_AAC)
