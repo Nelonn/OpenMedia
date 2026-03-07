@@ -47,15 +47,17 @@ integration while maintaining a simple, intuitive API.
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Codec       | Status | Description                                 |
-|-------------|:------:|---------------------------------------------|
-| AV1 (dav1d) |   ✅    | High-efficiency AV1 decoder by VideoLAN     |
-| OpenH264    |   🔧   | H.264/AVC codec by Cisco                    |
-| H.264/AVC   |   🔧   | Advanced Video Coding (software & hardware) |
-| H.265/HEVC  |   🔧   | High Efficiency Video Coding                |
-| H.266/VVC   |   🔧   | Versatile Video Coding                      |
-| EVC         |   🔧   | Essential Video Coding                      |
-| VP8/VP9     |   🔧   | Google's open video codecs                  |
+| Codec                           | Status | Description                             |
+|---------------------------------|:------:|-----------------------------------------|
+| dav1d (AV1)                     |   ✅    | High-efficiency AV1 decoder by VideoLAN |
+| OpenH264                        |   🔧   | H.264/AVC codec by Cisco                |
+| DirectX11/12 Video (H264, H265) |   🔧   | Hardware Coding                         |
+| Vulkan Video (H264, H265)       |   🔧   | Hardware Coding                         |
+| VVdeC (H.266/VVC)               |   🔧   | Versatile Video Coding                  |
+| VVenC (H.266/VVC)               |   🔧   | Versatile Video Coding                  |
+| xevd (EVC)                      |   🔧   | Essential Video Coding                  |
+| xeve (EVC)                      |   🔧   | Essential Video Coding                  |
+| libvpx (VP8/VP9)                |   🔧   | Google's open video codecs              |
 
 ### Image Codecs
 
@@ -135,7 +137,6 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 - CMake 3.21+
 - C++20 compatible compiler (Clang, MSVC, GCC)
 - Optional: AUI Boot for automatic dependency management
-
 
 ### Example Build
 
