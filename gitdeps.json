@@ -7,10 +7,6 @@
     "url": "https://github.com/Nelonn/dav1d",
     "commit": "0a19138e22dd996260ba680a74c20db9ba0e529f"
   },
-  "third_party/external/fdk-aac": {
-    "url": "https://github.com/mstorsjo/fdk-aac",
-    "commit": "d8e6b1a3aa606c450241632b64b703f21ea31ce3"
-  },
   "third_party/external/flac": {
     "url": "https://github.com/Nelonn/flac",
     "commit": "9b5fa29ba7532581e4b77a7ff00b59089d82ff91"
