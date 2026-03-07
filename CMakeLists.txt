@@ -5,9 +5,9 @@ include(Options.cmake)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-file(DOWNLOAD
-        https://raw.githubusercontent.com/aui-framework/aui/f7dc2fc157ff91f36bfa203f67840a5e7fed4632/aui.boot.cmake
-        ${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
+#file(DOWNLOAD
+#        https://raw.githubusercontent.com/aui-framework/aui/f7dc2fc157ff91f36bfa203f67840a5e7fed4632/aui.boot.cmake
+#        ${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 include(${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -145,6 +145,14 @@ if (OPENMEDIA_MATROSKA)
     endif ()
     target_link_libraries(OpenMedia PRIVATE webm::webm)
     target_sources(OpenMedia PRIVATE src/matroska_demuxer.cpp)
+endif ()
+
+if (OPENMEDIA_FDK_AAC)
+    auib_import(fdk-aac https://github.com/mstorsjo/fdk-aac
+            VERSION d8e6b1a3aa606c450241632b64b703f21ea31ce3)
+    target_link_libraries(OpenMedia PRIVATE FDK-AAC::fdk-aac)
+    target_sources(OpenMedia PRIVATE src/audio/fdk_aac.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_FDK_AAC)
 endif ()
 
 if (OPENMEDIA_ALAC AND NOT APPLE)

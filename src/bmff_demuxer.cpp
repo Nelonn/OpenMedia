@@ -82,6 +82,14 @@ static auto isHevcVariant(uint32_t fmt) -> bool {
   return containsAtom(kTable, fmt);
 }
 
+static auto isVvcVariant(uint32_t fmt) -> bool {
+  static constexpr uint32_t k_table[] = {
+      ATOM('v', 'v', 'c', '1'),
+      ATOM('v', 'v', 'i', '1'),
+  };
+  return containsAtom(k_table, fmt);
+}
+
 static auto isMp4aVariant(uint32_t fmt) -> bool {
   return fmt == ATOM('m', 'p', '4', 'a') || fmt == ATOM('M', 'P', '4', 'A');
 }
@@ -138,10 +146,9 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
   uint32_t bit_pos = 0;
   const uint32_t total_bits = static_cast<uint32_t>(asc.size()) * 8u;
 
-  // Returns 0 when there are not enough bits left - safe for all callers.
   auto readBits = [&](uint32_t n) -> uint32_t {
     if (n == 0 || bit_pos + n > total_bits) {
-      bit_pos = total_bits; // exhaust so bitsLeft() returns 0
+      bit_pos = total_bits;
       return 0;
     }
     uint32_t val = 0;
@@ -156,6 +163,8 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
   auto bitsLeft = [&]() -> uint32_t {
     return (bit_pos < total_bits) ? (total_bits - bit_pos) : 0u;
   };
+  auto saveBitPos    = [&]() -> uint32_t { return bit_pos; };
+  auto restoreBitPos = [&](uint32_t saved) { bit_pos = saved; };
 
   uint32_t aot = readBits(5);
   if (aot == 31) {
@@ -173,62 +182,94 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
   const uint32_t ch_cfg = readBits(4);
   uint32_t channels = (ch_cfg < std::size(AAC_CHANNELS)) ? AAC_CHANNELS[ch_cfg] : 0u;
 
-  uint32_t ext_sr = sample_rate;
-  bool sbr_found = false;
-  bool ps_found = false;
+  uint32_t ext_sr    = 0;
+  bool sbr_found     = false;
+  bool ps_found      = false;
 
   if ((aot == 5 || aot == 29) && bitsLeft() >= 4) {
     if (aot == 29) ps_found = true;
+
     const uint32_t ext_sr_idx = readBits(4);
-    if (ext_sr_idx == 0xF) {
-      ext_sr = readBits(24);
+    uint32_t candidate_ext_sr = 0;
+    if (ext_sr_idx == 0xF && bitsLeft() >= 24) {
+      candidate_ext_sr = readBits(24);
     } else if (ext_sr_idx < std::size(AAC_SAMPLE_RATES)) {
-      ext_sr = AAC_SAMPLE_RATES[ext_sr_idx];
+      candidate_ext_sr = AAC_SAMPLE_RATES[ext_sr_idx];
     }
+
+    uint32_t core_aot = readBits(5);
+    if (core_aot == 31) core_aot = 32u + readBits(6);
+
     sbr_found = true;
-    aot = readBits(5);
-    if (aot == 31) aot = 32u + readBits(6);
+    ext_sr    = candidate_ext_sr;
+    aot       = core_aot;
   }
 
+  // --- GASpecificConfig — must be consumed before the 0x2B7 extension scan ---
+  // Applies to AOT 1 (AAC-Main), 2 (AAC-LC), 3 (AAC-SSR), 4 (AAC-LTP),
+  //            6 (AAC-Scalable), 7 (TwinVQ).
+  //frameLengthFlag (1) + dependsOnCoreCoder (1) [+ coreCoderDelay (14)] + extensionFlag (1)
+
+  if (aot >= 1 && aot <= 7) {
+    readBits(1); // frameLengthFlag
+    if (readBits(1)) readBits(14); // dependsOnCoreCoder → coreCoderDelay
+    readBits(1); // extensionFlag
+  }
+
+  // --- Implicit backwards-compatible SBR/PS signaling via 0x2B7 sync word ---
+
   if (!sbr_found && bitsLeft() >= 11) {
-    if (readBits(11) == 0x2B7) {
+    const uint32_t saved = saveBitPos();
+    if (readBits(11) == 0x2B7u) {
       uint32_t ext_aot = readBits(5);
       if (ext_aot == 31) ext_aot = 32u + readBits(6);
 
       if (ext_aot == 5 && bitsLeft() >= 1 && readBits(1)) {
         sbr_found = true;
-        const uint32_t ext_sr_idx = readBits(4);
-        if (ext_sr_idx == 0xF && bitsLeft() >= 24) {
-          ext_sr = readBits(24);
-        } else if (ext_sr_idx < std::size(AAC_SAMPLE_RATES)) {
-          ext_sr = AAC_SAMPLE_RATES[ext_sr_idx];
-        }
-      }
 
-      if (sbr_found && bitsLeft() >= 12 && readBits(11) == 0x2B7) {
-        uint32_t ext_aot2 = readBits(5);
-        if (ext_aot2 == 31) ext_aot2 = 32u + readBits(6);
-        if (ext_aot2 == 29 && bitsLeft() >= 1 && readBits(1)) {
-          ps_found = true;
-          if (channels == 1) channels = 2;
+        const uint32_t ext_sr_idx = readBits(4);
+        uint32_t candidate_ext_sr = 0;
+        if (ext_sr_idx == 0xF && bitsLeft() >= 24) {
+          candidate_ext_sr = readBits(24);
+        } else if (ext_sr_idx < std::size(AAC_SAMPLE_RATES)) {
+          candidate_ext_sr = AAC_SAMPLE_RATES[ext_sr_idx];
         }
+        ext_sr = candidate_ext_sr;
+
+        // Check further for PS inside the same extension block
+        if (bitsLeft() >= 12) {
+          const uint32_t saved2 = saveBitPos();
+          if (readBits(11) == 0x2B7u) {
+            uint32_t ext_aot2 = readBits(5);
+            if (ext_aot2 == 31) ext_aot2 = 32u + readBits(6);
+            if (ext_aot2 == 29 && bitsLeft() >= 1 && readBits(1)) {
+              ps_found = true;
+            } else {
+              restoreBitPos(saved2);
+            }
+          } else {
+            restoreBitPos(saved2);
+          }
+        }
+      } else {
+        restoreBitPos(saved);
       }
+    } else {
+      restoreBitPos(saved);
     }
   }
 
-  if (sample_rate) out_sample_rate = sample_rate;
-  if (sbr_found && ext_sr) out_sample_rate = ext_sr;
-  if (channels) out_channels = channels;
+  // --- Write outputs ---
+
+  if (sample_rate)            out_sample_rate = sample_rate;
+  if (sbr_found && ext_sr)   out_sample_rate = ext_sr;
+  if (channels)               out_channels    = channels;
+  if (ps_found && out_channels == 1) out_channels = 2; // PS always upmixes mono → stereo
 
   uint32_t final_aot = aot;
-  if (ps_found) {
-    final_aot = 29;
-  } else if (sbr_found) {
-    final_aot = 5;
-  }
-  if (final_aot > 0) {
-    out_profile = static_cast<OMProfile>(final_aot);
-  }
+  if (ps_found)       final_aot = 29;
+  else if (sbr_found) final_aot = 5;
+  if (final_aot > 0)  out_profile = static_cast<OMProfile>(final_aot);
 
   return true;
 }
@@ -418,6 +459,37 @@ inline void parseHvcc(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.extradata.assign(body.begin(), body.end());
 }
 
+inline void parseVvcc(std::span<const uint8_t> body, BMFFTrack& track) {
+  if (body.size() < 2) return;
+
+  const uint8_t flags_byte = body[1];
+  const uint8_t nalu_len_size = ((flags_byte >> 1) & 0x3u) + 1u;
+  const bool ptl_present = (flags_byte & 0x01u) != 0;
+
+  track.track.extradata.assign(body.begin(), body.end());
+
+  (void) nalu_len_size;
+
+  if (ptl_present) {
+    return;
+  }
+}
+
+inline void parseEvcc(std::span<const uint8_t> body, BMFFTrack& track) {
+  if (body.size() < 12) return;
+
+  const uint8_t profile_idc = body[1];
+
+  const uint8_t bit_depth_luma = ((body[5] >> 3) & 0x07u) + 8u;
+
+  track.track.format.audio.bit_depth = 0;
+  (void) bit_depth_luma;
+
+  track.track.format.profile = static_cast<OMProfile>(profile_idc);
+
+  track.track.extradata.assign(body.begin(), body.end());
+}
+
 inline void parseVpcc(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 5) return;
   track.track.format.profile = static_cast<OMProfile>(body[4]);
@@ -442,7 +514,6 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
   BufReader r(body.data(), body.size());
   r.skip(4); // version + flags
 
-  // MPEG-4 descriptor length uses variable-length encoding.
   auto readDescLen = [&]() -> uint32_t {
     uint32_t len = 0;
     for (int i = 0; i < 4; ++i) {
@@ -460,9 +531,9 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
 
   r.skip(2); // ES_ID
   const uint8_t es_flags = r.read_u8();
-  if (es_flags & 0x80u) { r.skip(2); }
-  if (es_flags & 0x40u) { r.skip(r.read_u8()); }
-  if (es_flags & 0x20u) { r.skip(2); }
+  if (es_flags & 0x80u) { r.skip(2); }           // streamDependenceFlag → dependsOn_ES_ID
+  if (es_flags & 0x40u) { r.skip(r.read_u8()); } // URL_Flag → URL_length + URL_string
+  if (es_flags & 0x20u) { r.skip(2); }           // OCRstreamFlag → OCR_ES_Id
 
   while (r.tell() < es_end) {
     const uint8_t tag = r.read_u8();
@@ -471,7 +542,10 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
     if (next > r.size()) break;
 
     if (tag == 0x04 && len >= 13) {
-      r.skip(9); // objectTypeIndication + streamType + bufferSizeDB
+      // DecoderConfigDescriptor
+      r.skip(1); // objectTypeIndication
+      r.skip(1); // streamType (6 bits) + upStream (1 bit) + reserved (1 bit)
+      r.skip(3); // bufferSizeDB
       r.skip(4); // maxBitrate
       if (const uint32_t avg = r.read_u32_be(); avg) {
         track.track.bitrate = avg;
@@ -481,29 +555,27 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
         const uint8_t sub_tag = r.read_u8();
         const uint32_t sub_len = readDescLen();
         if (sub_tag == 0x05 && sub_len > 0) {
-          std::vector<uint8_t> asc = r.read_bytes(sub_len);
-          // Strip trailing zero bytes (some encoders pad the ASC).
-          while (asc.size() > 2 && asc.back() == 0) {
-            asc.pop_back();
+          // DecoderSpecificInfo — read raw then strip trailing zeros down to 2-byte minimum
+          auto raw = r.read_bytes(sub_len);
+          while (raw.size() > 2 && raw.back() == 0x00) {
+            raw.pop_back();
           }
-          track.track.extradata = std::move(asc);
+          track.track.extradata = raw;
+
+          uint32_t sr = track.track.format.audio.sample_rate;
+          uint32_t channels = track.track.format.audio.channels;
+          OMProfile prof = track.track.format.profile;
+          if (parseAudioSpecificConfig(raw, sr, channels, prof)) {
+            track.track.format.audio.sample_rate = sr;
+            track.track.format.audio.channels = channels;
+            track.track.format.profile = prof;
+          }
         } else {
           r.skip(sub_len);
         }
       }
     }
     r.seek(next);
-  }
-
-  if (track.track.extradata.empty()) return;
-
-  uint32_t sr = track.track.format.audio.sample_rate;
-  uint32_t channels = track.track.format.audio.channels;
-  OMProfile prof = track.track.format.profile;
-  if (parseAudioSpecificConfig(track.track.extradata, sr, channels, prof)) {
-    track.track.format.audio.sample_rate = sr;
-    track.track.format.audio.channels = channels;
-    track.track.format.profile = prof;
   }
 }
 
@@ -988,6 +1060,8 @@ private:
       // Codec configuration boxes
       case ATOM('a', 'v', 'c', 'C'): parseAvcc(body, track); break;
       case ATOM('h', 'v', 'c', 'C'): parseHvcc(body, track); break;
+      case ATOM('V', 'v', 'c', 'C'): parseVvcc(body, track); break;
+      case ATOM('e', 'v', 'c', 'C'): parseEvcc(body, track); break;
       case ATOM('v', 'p', 'c', 'C'): parseVpcc(body, track); break;
       case ATOM('a', 'v', '1', 'C'): parseAv1c(body, track); break;
       case ATOM('d', 'O', 'p', 's'): parseDops(body, track); break;
@@ -1134,6 +1208,26 @@ private:
       } else if (isHevcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_HEVC;
+        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+          fatal_ = true;
+          return;
+        }
+        input_->seek(entry_start + 86, Whence::BEG);
+        parseBoxes(input_->tell(), entry_end);
+
+      } else if (isVvcVariant(fmt)) {
+        st.format.type = OM_MEDIA_VIDEO;
+        st.format.codec_id = OM_CODEC_VVC;
+        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+          fatal_ = true;
+          return;
+        }
+        input_->seek(entry_start + 86, Whence::BEG);
+        parseBoxes(input_->tell(), entry_end);
+
+      } else if (fmt == ATOM('e', 'v', 'c', '1')) {
+        st.format.type = OM_MEDIA_VIDEO;
+        st.format.codec_id = OM_CODEC_EVC;
         if (!seekAndParseVideoEntry(entry_start + 8, st)) {
           fatal_ = true;
           return;

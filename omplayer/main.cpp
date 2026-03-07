@@ -479,6 +479,7 @@ private:
     opts.format = track.format;
     opts.extradata = track.extradata;
     if (dec->configure(opts) != OM_SUCCESS) {
+      dec.reset();
       SDL_Log("Decoder configure failed");
       return false;
     }

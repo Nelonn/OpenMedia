@@ -102,9 +102,12 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   // Audio codecs
   registry->registerCodec(&CODEC_PCM_S16LE);
   registry->registerCodec(&CODEC_PCM_F32LE);
+  registry->registerCodec(&CODEC_ALAC);
+#if defined(OPENMEDIA_FDK_AAC)
+  registry->registerCodec(&CODEC_FDK_AAC);
+#endif
   registry->registerCodec(&CODEC_MP3);
   registry->registerCodec(&CODEC_FLAC);
-  registry->registerCodec(&CODEC_ALAC);
   registry->registerCodec(&CODEC_VORBIS);
   registry->registerCodec(&CODEC_OPUS);
 #if defined(_WIN32)
