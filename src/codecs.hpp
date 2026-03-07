@@ -16,8 +16,10 @@ extern const CodecDescriptor CODEC_OPUS;
 extern const CodecDescriptor CODEC_WMF;
 
 // Video - Software
-//extern const CodecDescriptor CODEC_OPENH264;
 extern const CodecDescriptor CODEC_DAV1D;
+//extern const CodecDescriptor CODEC_OPENH264;
+extern const CodecDescriptor CODEC_VVDEC;
+extern const CodecDescriptor CODEC_XEVD;
 
 // Video - DirectX11
 //extern const CodecDescriptor CODEC_DX11_H264;

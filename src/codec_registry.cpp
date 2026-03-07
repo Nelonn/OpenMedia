@@ -115,8 +115,18 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #endif
 
   // Video - Software
-  //registry->registerCodec(&CODEC_OPENH264);
+#if defined(OPENMEDIA_DAV1D)
   registry->registerCodec(&CODEC_DAV1D);
+#endif
+#if defined(OPENMEDIA_OPENH264)
+  registry->registerCodec(&CODEC_OPENH264);
+#endif
+#if defined(OPENMEDIA_VVDEC)
+  registry->registerCodec(&CODEC_VVDEC);
+#endif
+#if defined(OPENMEDIA_XEVD)
+  registry->registerCodec(&CODEC_XEVD);
+#endif
 
   // Video - DirectX11 (Windows only)
   //registry->registerCodec(&CODEC_DX11_H264);

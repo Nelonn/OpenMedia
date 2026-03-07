@@ -67,15 +67,15 @@
     "url": "https://github.com/KhronosGroup/Vulkan-Headers",
     "commit": "49f1a381e2aec33ef32adf4a377b5a39ec016ec4"
   },
-  "third_party/external/vvenc": {
-    "url": "https://github.com/fraunhoferhhi/vvenc",
-    "commit": "316087e5fb43ed1be82926fcedcca1592bed6478",
-    "option": ["vvenc", "vvc_enc", "vvc_all"]
-  },
   "third_party/external/vvdec": {
     "url": "https://github.com/fraunhoferhhi/vvdec",
     "commit": "7df9d1f978433092d06537b3fe2f92a7fc33adcc",
     "option": ["vvdec", "vvc_dec", "vvc_all"]
+  },
+  "third_party/external/vvenc": {
+    "url": "https://github.com/fraunhoferhhi/vvenc",
+    "commit": "316087e5fb43ed1be82926fcedcca1592bed6478",
+    "option": ["vvenc", "vvc_enc", "vvc_all"]
   },
   "third_party/external/xevd": {
     "url": "https://github.com/mpeg5/xevd",

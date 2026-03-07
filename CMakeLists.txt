@@ -333,10 +333,6 @@ if (OPENMEDIA_MP3)
     target_sources(OpenMedia PRIVATE src/audio/mp3_demuxer.cpp)
 endif ()
 
-if (OPENMEDIA_OPENH264)
-    #target_sources(OpenMedia PRIVATE src/video/openh264.cpp)
-endif ()
-
 if (OPENMEDIA_DAV1D)
     if (AUI_BOOT)
         auib_import(dav1d https://github.com/Nelonn/dav1d
@@ -346,6 +342,39 @@ if (OPENMEDIA_DAV1D)
     endif ()
     target_link_libraries(OpenMedia PRIVATE dav1d::dav1d)
     target_sources(OpenMedia PRIVATE src/video/dav1d.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DAV1D)
+endif ()
+
+if (OPENMEDIA_OPENH264)
+    target_sources(OpenMedia PRIVATE src/video/openh264.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPENH264)
+endif ()
+
+if (OPENMEDIA_VVDEC)
+    #if (AUI_BOOT)
+    #    auib_import(vvdec https://github.com/fraunhoferhhi/vvdec
+    #            VERSION 7df9d1f978433092d06537b3fe2f92a7fc33adcc
+    #            CMAKE_ARGS -DVVDEC_ENABLE_X86_SIMD=${VVDEC_ENABLE_X86_SIMD})
+    #elseif (NOT TARGET dav1d::dav1d)
+    #    add_subdirectory(third_party/external/vvdec)
+    #endif ()
+    add_subdirectory(third_party/external/vvdec)
+    target_link_libraries(OpenMedia PRIVATE vvdec)
+    target_sources(OpenMedia PRIVATE src/video/vvdec.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VVDEC)
+endif ()
+
+if (OPENMEDIA_XEVD)
+    #if (AUI_BOOT)
+    #    auib_import(xevd https://github.com/mpeg5/xevd
+    #            VERSION 4087f635624cf4ee6ebe3f9ea165ff939b32117f)
+    #elseif (NOT TARGET dav1d::dav1d)
+    #    add_subdirectory(third_party/external/xevd)
+    #endif ()
+    add_subdirectory(third_party/external/xevd)
+    target_link_libraries(OpenMedia PRIVATE xevd)
+    target_sources(OpenMedia PRIVATE src/video/xevd.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVD)
 endif ()
 
 if (OPENMEDIA_INSTALL)
