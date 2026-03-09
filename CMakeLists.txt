@@ -5,9 +5,9 @@ include(Options.cmake)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-#file(DOWNLOAD
-#        https://raw.githubusercontent.com/aui-framework/aui/f7dc2fc157ff91f36bfa203f67840a5e7fed4632/aui.boot.cmake
-#        ${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
+file(DOWNLOAD
+        https://raw.githubusercontent.com/aui-framework/aui/b09bbf34115f55dd63a5a34948b7f62ce60b2918/aui.boot.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 include(${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -145,7 +145,7 @@ if (OPENMEDIA_MATROSKA)
         add_subdirectory(third_party/external/libwebm)
     endif ()
     target_link_libraries(OpenMedia PRIVATE webm::webm)
-    target_sources(OpenMedia PRIVATE src/matroska_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/matroska.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_MATROSKA)
 endif ()
 

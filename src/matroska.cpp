@@ -95,11 +95,11 @@ public:
       return err;
 
     if (const mkvparser::SegmentInfo* info = segment_->GetInfo()) {
+      const long long duration_ns = info->GetDuration();
+      const long long timecode_scale = info->GetTimeCodeScale();
+      int64_t duration = static_cast<int64_t>(static_cast<double>(duration_ns) / static_cast<double>(timecode_scale));
       for (Track& t : tracks_) {
-        const long long duration_ns = info->GetDuration();
-        t.duration = (duration_ns >= 0)
-                         ? duration_ns / timecode_scale_
-                         : -1;
+        t.duration = duration;
       }
     }
 
