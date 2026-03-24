@@ -71,17 +71,6 @@ auto LibAVCodec::isLoaded() const -> bool {
   return loaded_;
 }
 
-auto avErrorToOmError(int err) -> OMError {
-  if (err >= 0) return OM_SUCCESS;
-
-  if (err == AVERROR_EOF) return OM_IO_END_OF_STREAM;
-  if (err == AVERROR(EAGAIN)) return OM_COMMON_UNKNOWN_ERROR;
-  if (err == AVERROR(EINVAL)) return OM_COMMON_INVALID_ARGUMENT;
-  if (err == AVERROR(ENOMEM)) return OM_COMMON_OUT_OF_MEMORY;
-
-  return OM_COMMON_UNKNOWN_ERROR;
-}
-
 class FFmpegDecoder final : public Decoder {
 public:
   explicit FFmpegDecoder(OMCodecId codec_id)
