@@ -294,7 +294,7 @@ auto create_wmf_decoder() -> std::unique_ptr<Decoder> {
 const CodecDescriptor CODEC_WMF = {
   .codec_id = OM_CODEC_AAC,
   .type = OM_MEDIA_AUDIO,
-  .name = "wmf",
+  .name = "wmf_aac",
   .long_name = "Windows Media Foundation audio decoder",
   .vendor = "Microsoft",
   .flags = NONE,

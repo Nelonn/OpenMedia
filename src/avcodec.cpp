@@ -1,9 +1,10 @@
+#include "avcodec.hpp"
 #include <cstring>
 #include <memory>
 #include <openmedia/codec_api.hpp>
 #include <openmedia/codec_registry.hpp>
 #include <vector>
-#include "avcodec.hpp"
+#include <codecs.hpp>
 
 namespace openmedia {
 
@@ -18,34 +19,25 @@ auto LibAVCodec::load() -> bool {
   std::lock_guard<std::mutex> lock(load_mutex_);
   if (loaded_) return true;
 
-  // Ensure avutil is loaded first
   if (!LibAVUtil::getInstance().isLoaded()) {
     if (!LibAVUtil::getInstance().load()) {
       return false;
     }
   }
 
-  // Determine library name based on platform
-  const char* library_name;
 #if defined(_WIN32)
-  const char* default_lib = "avcodec";
+  const char* library_name = "avcodec-62.dll";
 #elif defined(__APPLE__)
-  const char* default_lib = "libavcodec.dylib";
+  const char* library_name = "libavcodec-62.dylib";
 #else
-  const char* default_lib = "libavcodec.so";
+  const char* library_name = "libavcodec-62.so";
 #endif
 
-  if (!library_name) {
-    library_name = default_lib;
-  }
-
-  // Load avcodec library
   library_.open(library_name);
   if (!library_.success()) {
     return false;
   }
 
-  // Load all function pointers
   avcodec_find_decoder = library_.getProcAddress<PFN<const AVCodec*(AVCodecID)>>("avcodec_find_decoder");
   avcodec_find_encoder = library_.getProcAddress<PFN<const AVCodec*(AVCodecID)>>("avcodec_find_encoder");
   avcodec_alloc_context3 = library_.getProcAddress<PFN<AVCodecContext*(const AVCodec*)>>("avcodec_alloc_context3");
@@ -57,6 +49,15 @@ auto LibAVCodec::load() -> bool {
   avcodec_receive_packet = library_.getProcAddress<PFN<int(AVCodecContext*, AVPacket*)>>("avcodec_receive_packet");
   avcodec_flush_buffers = library_.getProcAddress<PFN<void(AVCodecContext*)>>("avcodec_flush_buffers");
   avcodec_get_type = library_.getProcAddress<PFN<AVMediaType(AVCodecID)>>("avcodec_get_type");
+  av_packet_alloc = library_.getProcAddress<PFN<AVPacket*()>>("av_packet_alloc");
+  av_packet_free = library_.getProcAddress<PFN<void(AVPacket**)>>("av_packet_free");
+  av_packet_unref = library_.getProcAddress<PFN<void(AVPacket*)>>("av_packet_unref");
+  av_packet_ref = library_.getProcAddress<PFN<int(AVPacket*, const AVPacket*)>>("av_packet_ref");
+  av_packet_clone = library_.getProcAddress<PFN<AVPacket*(const AVPacket*)>>("av_packet_clone");
+  av_packet_move_ref = library_.getProcAddress<PFN<void(AVPacket*, AVPacket*)>>("av_packet_move_ref");
+  av_new_packet = library_.getProcAddress<PFN<int(AVPacket*, int)>>("av_new_packet");
+  av_grow_packet = library_.getProcAddress<PFN<int(AVPacket*, int)>>("av_grow_packet");
+  av_shrink_packet = library_.getProcAddress<PFN<void(AVPacket*, int)>>("av_shrink_packet");
 
   if (!avcodec_find_decoder || !avcodec_alloc_context3 || !avcodec_open2 ||
       !avcodec_free_context || !avcodec_send_packet || !avcodec_receive_frame) {
@@ -129,6 +130,16 @@ public:
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
+    codec_ctx_->pkt_timebase.num = options.time_base.num;
+    codec_ctx_->pkt_timebase.den = options.time_base.den;
+
+    if (options.format.type == OM_MEDIA_VIDEO) {
+      codec_ctx_->framerate.num = options.format.video.framerate.num;
+      codec_ctx_->framerate.den = options.format.video.framerate.den;
+      codec_ctx_->coded_width = options.format.video.width;
+      codec_ctx_->coded_height = options.format.video.height;
+    }
+
     if (!options.extradata.empty()) {
       codec_ctx_->extradata_size = static_cast<int>(options.extradata.size());
       codec_ctx_->extradata = static_cast<uint8_t*>(
@@ -136,8 +147,8 @@ public:
       if (!codec_ctx_->extradata) {
         return OM_COMMON_OUT_OF_MEMORY;
       }
-      std::memcpy(codec_ctx_->extradata, options.extradata.data(), options.extradata.size());
-      std::memset(codec_ctx_->extradata + options.extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      memcpy(codec_ctx_->extradata, options.extradata.data(), options.extradata.size());
+      memset(codec_ctx_->extradata + options.extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
     }
 
     int ret = codec_loader.avcodec_open2(codec_ctx_, codec, nullptr);
@@ -203,7 +214,7 @@ public:
     if (ret < 0) {
       return Err(avErrorToOmError(ret));
     }
-    std::memcpy(packet_->data, pkt_data.data(), pkt_data.size());
+    memcpy(packet_->data, pkt_data.data(), pkt_data.size());
     packet_->pts = packet.pts;
     packet_->dts = packet.dts;
     packet_->stream_index = packet.stream_index;

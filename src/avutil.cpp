@@ -13,16 +13,13 @@ auto LibAVUtil::load() -> bool {
   std::lock_guard<std::mutex> lock(load_mutex_);
   if (loaded_) return true;
 
-  const char* library_name;
 #if defined(_WIN32)
-  const char* default_lib = "avutil";
+  const char* library_name = "avutil-60.dll";
 #elif defined(__APPLE__)
-  const char* default_lib = "libavutil.dylib";
+  const char* library_name = "libavutil-60.dylib";
 #else
-  const char* default_lib = "libavutil.so";
+  const char* library_name = "libavutil-60.so";
 #endif
-
-  if (!library_name) library_name = default_lib;
 
   library_.open(library_name);
   if (!library_.success()) {
@@ -97,10 +94,12 @@ auto avPixelFormatToOmPixelFormat(AVPixelFormat av_fmt) -> OMPixelFormat {
   }
 }
 
-/*auto avColorSpaceToOmColorSpace(AVColorSpace av_cs) -> OMColorSpace {
+auto avColorSpaceToOmColorSpace(AVColorSpace av_cs) -> OMColorSpace {
   switch (av_cs) {
     case AVCOL_SPC_BT709: return OM_COLOR_SPACE_BT709;
-    case AVCOL_SPC_BT601: return OM_COLOR_SPACE_BT601;
+    case AVCOL_SPC_BT470BG:
+    case AVCOL_SPC_SMPTE170M:
+      return OM_COLOR_SPACE_BT601;
     case AVCOL_SPC_BT2020_NCL:
     case AVCOL_SPC_BT2020_CL: return OM_COLOR_SPACE_BT2020;
     case AVCOL_SPC_SMPTE240M: return OM_COLOR_SPACE_SMPTE240M;
@@ -113,7 +112,7 @@ auto avColorTransferToOmTransfer(AVColorTransferCharacteristic av_trc) -> OMTran
     case AVCOL_TRC_BT709: return OM_TRANSFER_BT709;
     case AVCOL_TRC_GAMMA22: return OM_TRANSFER_GAMMA22;
     case AVCOL_TRC_GAMMA28: return OM_TRANSFER_GAMMA28;
-    case AVCOL_TRC_BT601: return OM_TRANSFER_BT601;
+    case AVCOL_TRC_SMPTE170M: return OM_TRANSFER_BT601;
     case AVCOL_TRC_SMPTE240M: return OM_TRANSFER_SMPTE240M;
     case AVCOL_TRC_LINEAR: return OM_TRANSFER_LINEAR;
     case AVCOL_TRC_SMPTE2084: return OM_TRANSFER_SMPTE2084;
@@ -123,7 +122,7 @@ auto avColorTransferToOmTransfer(AVColorTransferCharacteristic av_trc) -> OMTran
   }
 }
 
-auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries {
+/*auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries {
   switch (av_pri) {
     case AVCOL_PRI_BT709: return OM_COLOR_PRIMARIES_BT709;
     case AVCOL_PRI_BT601: return OM_COLOR_PRIMARIES_BT601;
@@ -154,7 +153,7 @@ auto avChromaLocationToOmChroma(AVChromaLocation av_loc) -> OMChromaLocation {
     case AVCHROMA_LOC_BOTTOM: return OM_CHROMA_LOC_BOTTOM;
     default: return OM_CHROMA_LOC_UNSPECIFIED;
   }
-}
+}*/
 
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   switch (av_fmt) {
@@ -169,6 +168,6 @@ auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
     case AV_SAMPLE_FMT_DBLP: return OM_SAMPLE_F64;
     default: return OM_SAMPLE_UNKNOWN;
   }
-}*/
+}
 
 } // namespace openmedia

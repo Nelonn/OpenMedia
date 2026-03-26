@@ -477,6 +477,7 @@ private:
     }
     DecoderOptions opts;
     opts.format = track.format;
+    opts.time_base = track.time_base;
     opts.extradata = track.extradata;
     if (dec->configure(opts) != OM_SUCCESS) {
       dec.reset();
