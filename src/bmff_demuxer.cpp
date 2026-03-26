@@ -313,6 +313,9 @@ struct BMFFTrack {
   int64_t start_dts = 0;
   int64_t track_duration = 0;
   Track track = {};
+  // SHIT CODE
+  uint8_t nalu_length_size = 4;
+  // SHIT CODE
 
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
@@ -432,11 +435,12 @@ inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 12) return;
   BufReader r(body.data(), body.size());
   r.skip(8);
-  if (const uint32_t avg = r.read_u32_be(); avg)
+  if (const uint32_t avg = r.read_u32_be(); avg) {
     track.track.bitrate = avg;
+  }
 }
 
-inline auto parseAvcc(std::span<const uint8_t> body,
+/*inline auto parseAvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 4) return false;
   BufReader r(body.data(), body.size());
@@ -450,6 +454,41 @@ inline auto parseAvcc(std::span<const uint8_t> body,
           ? OM_PROFILE_H264_CONSTRAINED_BASELINE
           : static_cast<OMProfile>(profile);
   track.track.extradata.assign(body.begin(), body.end());
+  return true;
+}*/
+
+inline auto parseAvcc(std::span<const uint8_t> body,
+                      BMFFTrack& track) -> bool {
+  if (body.size() < 7) return false;
+  BufReader r(body.data(), body.size());
+
+  r.skip(4); // skip version, profile, constraints, level
+
+  // ISO/IEC 14496-15: lengthSizeMinusOne is the last 2 bits
+  track.nalu_length_size = (r.read_u8() & 0x03) + 1;
+
+  std::vector<uint8_t> annexb_extradata;
+  auto extractNals = [&](uint8_t count) {
+    for (uint8_t i = 0; i < count; ++i) {
+      uint16_t nal_size = r.read_u16_be();
+      if (r.remaining() < nal_size) break;
+
+      // Prepend Annex B Start Code
+      annexb_extradata.insert(annexb_extradata.end(), {0, 0, 0, 1});
+      const uint8_t* ptr = r.cur();
+      annexb_extradata.insert(annexb_extradata.end(), ptr, ptr + nal_size);
+      r.skip(nal_size);
+    }
+  };
+
+  uint8_t num_sps = r.read_u8() & 0x1F;
+  extractNals(num_sps);
+  if (r.remaining() > 0) {
+    uint8_t num_pps = r.read_u8();
+    extractNals(num_pps);
+  }
+
+  track.track.extradata = std::move(annexb_extradata);
   return true;
 }
 
@@ -876,13 +915,59 @@ public:
       return Err(OM_FORMAT_END_OF_FILE);
 
     const auto& sample = samples_[current_sample_index_];
+    const auto& bmff_track = bmff_tracks_[sample.stream_index];
+
+
+    // SHIT CODE
+    bool is_h264 = (bmff_track.track.format.codec_id == OM_CODEC_H264);
+    const bool prepend_extradata = (is_h264 && sample.is_keyframe && !bmff_track.track.extradata.empty());
+
+    const size_t extra_sz = prepend_extradata ? bmff_track.track.extradata.size() : 0;
+    // SHIT CODE
+
     Packet pkt;
-    pkt.allocate(sample.size);
+    pkt.allocate(sample.size + extra_sz);
+
+    // SHIT CODE
+    uint8_t* data_ptr = pkt.bytes.data();
+    if (prepend_extradata) {
+      memcpy(data_ptr, bmff_track.track.extradata.data(), extra_sz);
+      data_ptr += extra_sz;
+    }
+    // SHIT CODE
 
     input_->seek(sample.offset, Whence::BEG);
 
-    const size_t n = input_->read(std::span<uint8_t>(pkt.bytes.data(), sample.size));
+    const size_t n = input_->read(std::span<uint8_t>(data_ptr, sample.size));
     if (n < sample.size) return Err(OM_FORMAT_END_OF_FILE);
+
+    // SHIT CODE
+    if (is_h264) {
+      size_t pos = 0;
+      // Use the length_size we parsed in parseAvcc (usually 4)
+      const uint8_t len_sz = bmff_track.nalu_length_size;
+
+      while (pos + len_sz <= sample.size) {
+        uint32_t nalu_len = 0;
+        // Read the big-endian length field
+        for (int i = 0; i < len_sz; ++i) {
+          nalu_len = (nalu_len << 8) | data_ptr[pos + i];
+        }
+
+        // Overwrite that length with the 00 00 00 01 start code
+        // Note: This assumes len_sz is 4. If it's 1 or 2, you'd need to shift data,
+        // but 4 is the standard for almost all H.264 MP4s.
+        if (len_sz == 4) {
+          data_ptr[pos] = 0x00;
+          data_ptr[pos + 1] = 0x00;
+          data_ptr[pos + 2] = 0x00;
+          data_ptr[pos + 3] = 0x01;
+        }
+
+        pos += len_sz + nalu_len;
+      }
+    }
+    // SHIT CODE
 
     pkt.bytes = pkt.bytes.subspan(0, n);
     pkt.stream_index = sample.stream_index;
