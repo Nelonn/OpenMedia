@@ -12,6 +12,7 @@
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 #include <vector>
+#include <h264_annexb.hpp>
 
 namespace openmedia {
 
@@ -313,6 +314,7 @@ struct BMFFTrack {
   int64_t start_dts = 0;
   int64_t track_duration = 0;
   Track track = {};
+  std::unique_ptr<H264AnnexBFilter> h264_bsf;
 
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
@@ -432,11 +434,12 @@ inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 12) return;
   BufReader r(body.data(), body.size());
   r.skip(8);
-  if (const uint32_t avg = r.read_u32_be(); avg)
+  if (const uint32_t avg = r.read_u32_be(); avg) {
     track.track.bitrate = avg;
+  }
 }
 
-inline auto parseAvcc(std::span<const uint8_t> body,
+/*inline auto parseAvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 4) return false;
   BufReader r(body.data(), body.size());
@@ -450,6 +453,42 @@ inline auto parseAvcc(std::span<const uint8_t> body,
           ? OM_PROFILE_H264_CONSTRAINED_BASELINE
           : static_cast<OMProfile>(profile);
   track.track.extradata.assign(body.begin(), body.end());
+  return true;
+}*/
+
+inline auto parseAvcc(std::span<const uint8_t> body,
+                      BMFFTrack& track) -> bool {
+  if (body.size() < 7) return false;
+  BufReader r(body.data(), body.size());
+
+  r.skip(4); // configurationVersion, profile, constraints, level
+
+  const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
+
+  std::vector<uint8_t> annexb_extra;
+  auto extract_nals = [&](uint8_t count) {
+    for (uint8_t i = 0; i < count; ++i) {
+      uint16_t nal_size = r.read_u16_be();
+      if (r.remaining() < nal_size) break;
+      annexb_extra.insert(annexb_extra.end(),
+                          H264AnnexBFilter::START_CODE,
+                          H264AnnexBFilter::START_CODE + 4);
+      const uint8_t* ptr = r.cur();
+      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
+      r.skip(nal_size);
+    }
+  };
+
+  uint8_t num_sps = r.read_u8() & 0x1Fu;
+  extract_nals(num_sps);
+  if (r.remaining() > 0) {
+    uint8_t num_pps = r.read_u8();
+    extract_nals(num_pps);
+  }
+
+  track.track.extradata = annexb_extra; // keep for callers that inspect it
+  track.h264_bsf = std::make_unique<H264AnnexBFilter>(
+      nalu_len_sz, std::move(annexb_extra));
   return true;
 }
 
@@ -876,15 +915,25 @@ public:
       return Err(OM_FORMAT_END_OF_FILE);
 
     const auto& sample = samples_[current_sample_index_];
-    Packet pkt;
-    pkt.allocate(sample.size);
+    const auto& bmff_track = bmff_tracks_[sample.stream_index];
 
+    std::vector<uint8_t> raw(sample.size);
     input_->seek(sample.offset, Whence::BEG);
-
-    const size_t n = input_->read(std::span<uint8_t>(pkt.bytes.data(), sample.size));
+    const size_t n = input_->read(raw);
     if (n < sample.size) return Err(OM_FORMAT_END_OF_FILE);
 
-    pkt.bytes = pkt.bytes.subspan(0, n);
+    std::vector<uint8_t> converted;
+    std::span<const uint8_t> payload(raw);
+
+    if (bmff_track.h264_bsf) {
+      converted = bmff_track.h264_bsf->convert(payload, sample.is_keyframe);
+      payload = converted;
+    }
+
+    Packet pkt;
+    pkt.allocate(payload.size());
+    memcpy(pkt.bytes.data(), payload.data(), payload.size());
+
     pkt.stream_index = sample.stream_index;
     pkt.pts = sample.pts;
     pkt.dts = sample.dts;

@@ -34,24 +34,19 @@ auto LibAVFormat::load() -> bool {
     }
   }
 
-  const char* library_name;
 #if defined(_WIN32)
-  const char* default_lib = "avformat";
+  const char* library_name = "avformat-62.dll";
 #elif defined(__APPLE__)
-  const char* default_lib = "libavformat.dylib";
+  const char* library_name = "libavformat-62.dylib";
 #else
-  const char* default_lib = "libavformat.so";
+  const char* library_name = "libavformat-62.so";
 #endif
 
-  if (!library_name) library_name = default_lib;
-
-  // Load avformat library
   library_.open(library_name);
   if (!library_.success()) {
     return false;
   }
 
-  // Load all function pointers
   avformat_alloc_context = library_.getProcAddress<PFN<AVFormatContext*()>>("avformat_alloc_context");
   avformat_open_input = library_.getProcAddress<PFN<int(AVFormatContext**, const char*, const AVInputFormat*, AVDictionary**)>>("avformat_open_input");
   avformat_find_stream_info = library_.getProcAddress<PFN<int(AVFormatContext*, AVDictionary**)>>("avformat_find_stream_info");
@@ -363,7 +358,7 @@ private:
     return static_cast<int>(bytes_read);
   }
 
-  static int64_t seekCallback(void* opaque, int64_t offset, int whence) {
+  static auto seekCallback(void* opaque, int64_t offset, int whence) -> int64_t {
     auto* input = static_cast<InputStream*>(opaque);
     if (!input) return -1;
 

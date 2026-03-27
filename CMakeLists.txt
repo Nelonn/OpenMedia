@@ -31,6 +31,7 @@ target_sources(OpenMedia PRIVATE
         include/openmedia/byte.h
         include/openmedia/codec_api.hpp
         include/openmedia/codec_defs.h
+        include/openmedia/codec_extra.hpp
         include/openmedia/codec_registry.hpp
         include/openmedia/dictionary.hpp
         include/openmedia/error.h
@@ -60,6 +61,7 @@ target_sources(OpenMedia PRIVATE
         src/format_detector.cpp
         src/format_registry.cpp
         src/formats.hpp
+        src/h264_annexb.hpp
         src/io.cpp
         src/log.cpp
         src/media.cpp
@@ -104,6 +106,7 @@ endif ()
 
 if (WIN32)
     target_sources(OpenMedia PRIVATE src/audio/wmf.cpp)
+    #target_sources(OpenMedia PRIVATE src/video/wmf.cpp) # doesn't work
 endif ()
 
 if (OPENMEDIA_AMF)

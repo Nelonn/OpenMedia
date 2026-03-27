@@ -4,7 +4,8 @@
 #include <dlfcn.h>
 #elif defined(_WIN32)
 #define NOMINMAX
-#include <libloaderapi.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #endif
 #include <string>
 
