@@ -31,6 +31,7 @@ target_sources(OpenMedia PRIVATE
         include/openmedia/byte.h
         include/openmedia/codec_api.hpp
         include/openmedia/codec_defs.h
+        include/openmedia/codec_extra.hpp
         include/openmedia/codec_registry.hpp
         include/openmedia/dictionary.hpp
         include/openmedia/error.h
