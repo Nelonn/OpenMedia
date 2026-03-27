@@ -1,22 +1,21 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <span>
 #include <vector>
 
 namespace openmedia {
 
-class H264AnnexBFilter {
+class AnnexBFilter {
 public:
-  static constexpr uint8_t START_CODE[4] = {0x00, 0x00, 0x00, 0x01};
+  static constexpr uint8_t START_CODE_LONG[4] = {0x00, 0x00, 0x00, 0x01};
+  static constexpr uint8_t START_CODE_SHORT[3] = {0x00, 0x00, 0x01};
 
-  H264AnnexBFilter(uint8_t nalu_len_sz,
-                   std::vector<uint8_t> annexb_extra)
-      : nalu_len_sz_(nalu_len_sz),
-        annexb_extra_(std::move(annexb_extra)) {}
+  AnnexBFilter(uint8_t nalu_len_sz, std::vector<uint8_t> annexb_extra)
+      : nalu_len_sz_(nalu_len_sz), annexb_extra_(std::move(annexb_extra)) {}
 
-  auto convert(std::span<const uint8_t> avcc_sample, bool is_keyframe) const -> std::vector<uint8_t> {
+  auto convert(std::span<const uint8_t> avcc_sample, bool is_keyframe) const
+      -> std::vector<uint8_t> {
     std::vector<uint8_t> out;
     out.reserve(reserveSize(avcc_sample.size(), is_keyframe));
 
@@ -45,10 +44,17 @@ private:
       const uint32_t nalu_len = readLen(src, pos);
       pos += nalu_len_sz_;
 
-      if (nalu_len == 0) continue; // empty NALU - skip
-      if (pos + nalu_len > src.size()) break; // truncated - stop
+      if (nalu_len == 0) continue;
+      if (nalu_len < 2) continue;
+      if (pos + nalu_len > src.size()) break;
 
-      appendBytes(out, START_CODE);
+      if (out.empty()) { // first NALU in packet
+        appendBytes(out, START_CODE_LONG);
+      } else {
+        appendBytes(out, START_CODE_LONG);
+        //appendBytes(out, START_CODE_SHORT);
+      }
+
       appendBytes(out, src.subspan(pos, nalu_len));
       pos += nalu_len;
     }
@@ -62,14 +68,15 @@ private:
     return len;
   }
 
+  template<size_t N>
+  static void appendBytes(std::vector<uint8_t>& out,
+                          std::span<const uint8_t, N> arr) {
+    out.insert(out.end(), arr, arr + N);
+  }
+
   static void appendBytes(std::vector<uint8_t>& out,
                           std::span<const uint8_t> data) {
     out.insert(out.end(), data.begin(), data.end());
-  }
-
-  template<size_t N>
-  static void appendBytes(std::vector<uint8_t>& out, std::span<const uint8_t, N> arr) {
-    out.insert(out.end(), arr, arr + N);
   }
 };
 

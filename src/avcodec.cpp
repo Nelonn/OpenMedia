@@ -380,7 +380,7 @@ private:
 const CodecDescriptor CODEC_FFMPEG_H264 = {
     .codec_id = OM_CODEC_H264,
     .type = OM_MEDIA_VIDEO,
-    .name = "h264",
+    .name = "ffmpeg_h264",
     .long_name = "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (FFmpeg)",
     .vendor = "FFmpeg",
     .flags = CodecFlags::NONE,
@@ -390,11 +390,21 @@ const CodecDescriptor CODEC_FFMPEG_H264 = {
 const CodecDescriptor CODEC_FFMPEG_H265 = {
     .codec_id = OM_CODEC_H265,
     .type = OM_MEDIA_VIDEO,
-    .name = "hevc",
+    .name = "ffmpeg_h265",
     .long_name = "HEVC (High Efficiency Video Coding) (FFmpeg)",
     .vendor = "FFmpeg",
     .flags = CodecFlags::NONE,
     .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_H265); },
+};
+
+const CodecDescriptor CODEC_FFMPEG_H266 = {
+    .codec_id = OM_CODEC_H266,
+    .type = OM_MEDIA_VIDEO,
+    .name = "ffmpeg_h266",
+    .long_name = "HEVC (High Efficiency Video Coding) (FFmpeg)",
+    .vendor = "FFmpeg",
+    .flags = CodecFlags::NONE,
+    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_H266); },
 };
 
 const CodecDescriptor CODEC_FFMPEG_VP9 = {
