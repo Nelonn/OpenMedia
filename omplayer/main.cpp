@@ -185,6 +185,14 @@ public:
     cond_not_empty_.notify_one();
   }
 
+  auto tryPush(VideoFrame frame) -> bool {
+    std::unique_lock lock(mutex_);
+    if (queue_.size() >= VIDEO_QUEUE_MAX || flush_) return flush_ ? true : false;
+    queue_.push(std::move(frame));
+    cond_not_empty_.notify_one();
+    return true;
+  }
+
   auto pop(VideoFrame& out) -> bool {
     std::unique_lock lock(mutex_);
     if (!cond_not_empty_.wait_for(lock, std::chrono::milliseconds(20),
@@ -368,13 +376,6 @@ public:
     auto front_pts_opt = video_queue_.frontPts();
     if (!front_pts_opt) return;
 
-    const double frame_pts_sec = static_cast<double>(*front_pts_opt) * time_base_.num / time_base_.den;
-    const double clock_sec = static_cast<double>(master_pts) * time_base_.num / time_base_.den;
-    const double diff = frame_pts_sec - clock_sec;
-
-    // Too far in the future – wait
-    if (diff > AV_SYNC_THRESHOLD) return;
-
     VideoFrame vf;
     if (!video_queue_.pop(vf)) return;
 
@@ -488,7 +489,7 @@ private:
   }
 
   void setupImageDecoder(const Track& track) {
-    if (!makeDecoder(track, audio_decoder_)) return;
+    if (!makeDecoder(track, video_decoder_)) return;
     image_width_ = track.format.image.width;
     image_height_ = track.format.image.height;
     total_duration_ = track.duration;
@@ -604,6 +605,10 @@ private:
       target_ns = static_cast<int64_t>(
           static_cast<double>(target_pts) * time_base_.num / time_base_.den * 1'000'000'000.0);
 
+    audio_clock_.store(0);
+    current_pts_.store(0);
+    if (audio_decoder_) audio_decoder_->flush();
+
     if (demuxer_->seek(target_ns, ref_stream) == OM_SUCCESS) {
       current_pts_ = target_pts;
       audio_clock_ = target_pts;
@@ -667,10 +672,11 @@ private:
   }
 
   void processPacket(const Packet& pkt, bool allow_open_device) {
-    if (pkt.stream_index == audio_stream_index_ && audio_decoder_)
+    if (pkt.stream_index == audio_stream_index_ && audio_decoder_) {
       processAudioPacket(pkt, allow_open_device);
-    else if (pkt.stream_index == video_stream_index_ && video_decoder_)
+    } else if (pkt.stream_index == video_stream_index_ && video_decoder_) {
       processVideoPacket(pkt);
+    }
   }
 
   void processAudioPacket(const Packet& pkt, bool allow_open_device) {
@@ -747,7 +753,11 @@ private:
       vf.v_plane.assign(v_src, v_src + v_stride * (pic.height / 2));
 
       if (!audio_ready_) current_pts_.store(vf.pts);
-      video_queue_.push(std::move(vf));
+      while (!stop_requested_) {
+        if (video_queue_.tryPush(std::move(vf))) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      //video_queue_.push(std::move(vf));
     }
   }
 
