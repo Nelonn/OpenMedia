@@ -281,44 +281,20 @@ private:
           av_frame->width, av_frame->height, 1);
 
       if (buffer_size > 0) {
-        HostPicture host_picture;
-        host_picture.buffer = BufferPool::getInstance().get(static_cast<size_t>(buffer_size));
-        uint8_t* dst_data[4] = {nullptr};
-        int dst_linesize[4] = {0};
-
-        int ret = util.av_image_fill_arrays(
-            dst_data, dst_linesize,
-            host_picture.buffer->bytes().data(),
-            static_cast<AVPixelFormat>(av_frame->format),
-            av_frame->width, av_frame->height, 1);
-
-        if (ret >= 0) {
-          int num_planes = Picture::getNumPlanes(picture.format);
-          for (int i = 0; i < num_planes && i < 4; ++i) {
-            if (av_frame->data[i] && dst_data[i]) {
-              int plane_height = picture.getPlaneDimensions(i).second;
-              int bytes_per_row = std::min(av_frame->linesize[i], dst_linesize[i]);
-              if (bytes_per_row > 0 && plane_height > 0) {
-                for (int y = 0; y < plane_height; ++y) {
-                  std::memcpy(
-                      dst_data[i] + static_cast<size_t>(y) * dst_linesize[i],
-                      av_frame->data[i] + static_cast<size_t>(y) * av_frame->linesize[i],
-                      static_cast<size_t>(bytes_per_row));
-                }
+        int num_planes = Picture::getNumPlanes(picture.format);
+        for (int i = 0; i < num_planes && i < 4; ++i) {
+          if (av_frame->data[i] && picture.planes.getData(i)) {
+            uint32_t plane_height = picture.getPlaneDimensions(i).second;
+            int bytes_per_row = std::min(static_cast<uint32_t>(av_frame->linesize[i]), picture.planes.getLinesize(i));
+            if (bytes_per_row > 0 && plane_height > 0) {
+              for (uint32_t y = 0; y < plane_height; ++y) {
+                memcpy(
+                    picture.planes.getData(i) + static_cast<size_t>(y) * picture.planes.getLinesize(i),
+                    av_frame->data[i] + static_cast<size_t>(y) * av_frame->linesize[i],
+                    static_cast<size_t>(bytes_per_row));
               }
             }
           }
-
-          /*picture.buffer = std::move(host_picture);
-
-          uint8_t* raw_ptr = picture.buffer.get<HostPicture>().buffer->bytes().data();
-          int num_planes = Picture::getNumPlanes(picture.format);
-          for (int i = 0; i < num_planes && i < 4; ++i) {
-            auto [plane_width, plane_height] = picture.getPlaneDimensions(i);
-            auto [bpp, plane_stride] = picture.getPlaneInfo(i, plane_width);
-            picture.planes.setData(i, raw_ptr, static_cast<uint32_t>(plane_stride));
-            raw_ptr += static_cast<size_t>(plane_stride) * plane_height;
-          }*/
         }
       }
 
