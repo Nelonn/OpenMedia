@@ -370,37 +370,69 @@ public:
   void tickVideo() {
     if (!has_video_ || !renderer_) return;
 
-    // Use audio clock as master if available
-    const int64_t master_pts = current_pts_.load();
-
-    auto front_pts_opt = video_queue_.frontPts();
-    if (!front_pts_opt) return;
-
-    VideoFrame vf;
-    if (!video_queue_.pop(vf)) return;
-
-    // Update clock only if audio is not driving
-    if (!audio_ready_) current_pts_.store(vf.pts);
-
-    // Upload pixels to texture
-    std::lock_guard lock(video_texture_mutex_);
-    if (!video_texture_ ||
-        video_texture_w_ != vf.width ||
-        video_texture_h_ != vf.height) {
-      if (video_texture_) SDL_DestroyTexture(video_texture_);
-      video_texture_ = SDL_CreateTexture(renderer_,
-                                         SDL_PIXELFORMAT_IYUV,
-                                         SDL_TEXTUREACCESS_STREAMING,
-                                         static_cast<int>(vf.width),
-                                         static_cast<int>(vf.height));
-      video_texture_w_ = vf.width;
-      video_texture_h_ = vf.height;
+    if (!audio_ready_ && video_clock_running_) {
+      const double elapsed = std::chrono::duration<double>(
+          Clock::now() - video_playback_start_).count();
+      // Convert elapsed seconds → PTS units
+      const double pts_per_sec = (time_base_.num != 0)
+          ? static_cast<double>(time_base_.den) / time_base_.num
+          : 1.0;
+      current_pts_.store(video_start_pts_ +
+          static_cast<int64_t>(elapsed * pts_per_sec));
     }
-    if (video_texture_) {
-      SDL_UpdateYUVTexture(video_texture_, nullptr,
-                           vf.y_plane.data(), vf.y_stride,
-                           vf.u_plane.data(), vf.u_stride,
-                           vf.v_plane.data(), vf.v_stride);
+
+    const double master_sec = (time_base_.den != 0)
+        ? static_cast<double>(current_pts_.load()) * time_base_.num / time_base_.den
+        : 0.0;
+
+    while (true) {
+      auto front_pts_opt = video_queue_.frontPts();
+      if (!front_pts_opt) return;
+
+      const double frame_sec = (time_base_.den != 0)
+          ? static_cast<double>(*front_pts_opt) * time_base_.num / time_base_.den
+          : 0.0;
+
+      const double diff = frame_sec - master_sec;
+
+      //if (diff > AV_SYNC_THRESHOLD) {
+      //  // Frame is in the future — don't show yet
+      //  return;
+      //}
+
+      // Pop the frame (it's due or late)
+      VideoFrame vf;
+      if (!video_queue_.pop(vf)) return;
+
+      if (diff < -AV_SYNC_THRESHOLD * 4) {
+        // Frame is very late — drop it, try the next one
+        if (!audio_ready_) current_pts_.store(vf.pts);
+        continue;
+      }
+
+      // Frame is on time — upload and display
+      if (!audio_ready_) current_pts_.store(vf.pts);
+
+      std::lock_guard lock(video_texture_mutex_);
+      if (!video_texture_ ||
+          video_texture_w_ != vf.width ||
+          video_texture_h_ != vf.height) {
+        if (video_texture_) SDL_DestroyTexture(video_texture_);
+        video_texture_ = SDL_CreateTexture(renderer_,
+                                           SDL_PIXELFORMAT_IYUV,
+                                           SDL_TEXTUREACCESS_STREAMING,
+                                           static_cast<int>(vf.width),
+                                           static_cast<int>(vf.height));
+        video_texture_w_ = vf.width;
+        video_texture_h_ = vf.height;
+          }
+      if (video_texture_) {
+        SDL_UpdateYUVTexture(video_texture_, nullptr,
+                             vf.y_plane.data(), vf.y_stride,
+                             vf.u_plane.data(), vf.u_stride,
+                             vf.v_plane.data(), vf.v_stride);
+      }
+      return; // Displayed one frame — done for this tick
     }
   }
 
@@ -753,6 +785,11 @@ private:
       vf.v_plane.assign(v_src, v_src + v_stride * (pic.height / 2));
 
       if (!audio_ready_) current_pts_.store(vf.pts);
+      if (!audio_ready_ && !video_clock_running_) {
+        video_playback_start_ = Clock::now();
+        video_start_pts_ = vf.pts;
+        video_clock_running_ = true;
+      }
       while (!stop_requested_) {
         if (video_queue_.tryPush(std::move(vf))) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -833,6 +870,10 @@ private:
   Rational time_base_ {1, 1};
   TimePoint playback_start_time_;
 
+  TimePoint video_playback_start_;
+  int64_t   video_start_pts_ = 0;
+  bool      video_clock_running_ = false;
+
   // Video
   VideoFrameQueue video_queue_;
   std::atomic<bool> has_video_ {false};
@@ -873,6 +914,7 @@ int main(int argc, char* argv[]) {
   if (!window) return 1;
   SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
   if (!renderer) return 1;
+  SDL_SetRenderVSync(renderer, 1);
 
   MediaPlayer player;
   player.setRenderer(renderer);
@@ -1007,7 +1049,6 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_RenderPresent(renderer);
-    SDL_Delay(8);
   }
 
   player.stop();
