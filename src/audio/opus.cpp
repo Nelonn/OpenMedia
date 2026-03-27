@@ -150,28 +150,20 @@ public:
     if (options.format.type != OM_MEDIA_AUDIO) {
       return OM_CODEC_INVALID_PARAMS;
     }
-    
+
     sample_rate_ = static_cast<int>(options.format.audio.sample_rate);
     channels_ = static_cast<int>(options.format.audio.channels);
-    
+
     input_format_.sample_rate = options.format.audio.sample_rate;
     input_format_.channels = options.format.audio.channels;
     input_format_.sample_format = OM_SAMPLE_F32;
     input_format_.bits_per_sample = 32;
     input_format_.planar = false;
 
-    // Validate sample rate (Opus supports: 8000, 12000, 16000, 24000, 48000)
-    if (sample_rate_ != 8000 && sample_rate_ != 12000 && sample_rate_ != 16000 &&
-        sample_rate_ != 24000 && sample_rate_ != 48000) {
-      // Opus encoder internally uses 48kHz, input is resampled
-      // We'll let libopus handle it
-    }
-
     if (channels_ < 1 || channels_ > 255) {
       return OM_CODEC_INVALID_PARAMS;
     }
 
-    // Determine frame size based on sample rate (default 20ms)
     frame_size_ = sample_rate_ / 50; // 20ms
 
     int error = 0;
@@ -181,105 +173,83 @@ public:
     }
 
     const auto& extra = options.extra;
-    
-    // Application mode
+
     if (extra.contains(OPUS_ENC_APPLICATION)) {
       int32_t app = extra.getInt32(OPUS_ENC_APPLICATION);
       opus_encoder_ctl(encoder_, OPUS_SET_APPLICATION(app));
     }
 
-    // Bitrate
-    if (hasOpusEncOption(extra, OpusEncKey::BITRATE)) {
-      int32_t bitrate = getOpusEncOption(extra, OpusEncKey::BITRATE);
+    if (extra.contains(OPUS_ENC_BITRATE)) {
+      int32_t bitrate = extra.getInt32(OPUS_ENC_BITRATE);
       opus_encoder_ctl(encoder_, OPUS_SET_BITRATE(bitrate));
     }
 
-    // VBR mode
-    if (hasOpusEncOption(extra, OpusEncKey::VBR)) {
-      int32_t vbr = getOpusEncOption(extra, OpusEncKey::VBR);
+    if (extra.contains(OPUS_ENC_VBR)) {
+      int32_t vbr = extra.getInt32(OPUS_ENC_VBR);
       opus_encoder_ctl(encoder_, OPUS_SET_VBR(vbr != 0));
     }
 
-    // Complexity
-    if (hasOpusEncOption(extra, OpusEncKey::COMPLEXITY)) {
-      int32_t complexity = getOpusEncOption(extra, OpusEncKey::COMPLEXITY);
+    if (extra.contains(OPUS_ENC_COMPLEXITY)) {
+      int32_t complexity = extra.getInt32(OPUS_ENC_COMPLEXITY);
       opus_encoder_ctl(encoder_, OPUS_SET_COMPLEXITY(complexity));
     }
 
-    // Frame size (affects lookahead)
-    if (hasOpusEncOption(extra, OpusEncKey::FRAME_SIZE)) {
-      int32_t frame_size = getOpusEncOption(extra, OpusEncKey::FRAME_SIZE);
+    if (extra.contains(OPUS_ENC_FRAME_SIZE)) {
+      int32_t frame_size = extra.getInt32(OPUS_ENC_FRAME_SIZE);
       frame_size_ = frame_size;
     }
 
-    // Force channels
-    if (hasOpusEncOption(extra, OpusEncKey::FORCE_CHANNELS)) {
-      int32_t force_ch = getOpusEncOption(extra, OpusEncKey::FORCE_CHANNELS);
+    if (extra.contains(OPUS_ENC_FORCE_CHANNELS)) {
+      int32_t force_ch = extra.getInt32(OPUS_ENC_FORCE_CHANNELS);
       opus_encoder_ctl(encoder_, OPUS_SET_FORCE_CHANNELS(force_ch));
     }
 
-    // Signal type
-    if (hasOpusEncOption(extra, OpusEncKey::SIGNAL_TYPE)) {
-      int32_t signal = getOpusEncOption(extra, OpusEncKey::SIGNAL_TYPE);
+    if (extra.contains(OPUS_ENC_SIGNAL_TYPE)) {
+      int32_t signal = extra.getInt32(OPUS_ENC_SIGNAL_TYPE);
       opus_encoder_ctl(encoder_, OPUS_SET_SIGNAL(signal));
     }
 
-    // Bandwidth
-    if (hasOpusEncOption(extra, OpusEncKey::BANDWIDTH)) {
-      int32_t bandwidth = getOpusEncOption(extra, OpusEncKey::BANDWIDTH);
+    if (extra.contains(OPUS_ENC_BANDWIDTH)) {
+      int32_t bandwidth = extra.getInt32(OPUS_ENC_BANDWIDTH);
       opus_encoder_ctl(encoder_, OPUS_SET_BANDWIDTH(bandwidth));
     }
 
-    // Packet loss percentage
-    if (hasOpusEncOption(extra, OpusEncKey::PACKET_LOSS_PERC)) {
-      int32_t loss = getOpusEncOption(extra, OpusEncKey::PACKET_LOSS_PERC);
+    if (extra.contains(OPUS_ENC_PACKET_LOSS_PERC)) {
+      int32_t loss = extra.getInt32(OPUS_ENC_PACKET_LOSS_PERC);
       opus_encoder_ctl(encoder_, OPUS_SET_PACKET_LOSS_PERC(loss));
     }
 
-    // FEC
-    if (hasOpusEncOption(extra, OpusEncKey::FEC)) {
-      int32_t fec = getOpusEncOption(extra, OpusEncKey::FEC);
+    if (extra.contains(OPUS_ENC_FEC)) {
+      int32_t fec = extra.getInt32(OPUS_ENC_FEC);
       opus_encoder_ctl(encoder_, OPUS_SET_INBAND_FEC(fec));
     }
 
-    // DTX
-    if (hasOpusEncOption(extra, OpusEncKey::DTX)) {
-      int32_t dtx = getOpusEncOption(extra, OpusEncKey::DTX);
+    if (extra.contains(OPUS_ENC_DTX)) {
+      int32_t dtx = extra.getInt32(OPUS_ENC_DTX);
       opus_encoder_ctl(encoder_, OPUS_SET_DTX(dtx != 0));
     }
 
-    // LSB depth
-    if (hasOpusEncOption(extra, OpusEncKey::LSB_DEPTH)) {
-      int32_t lsb = getOpusEncOption(extra, OpusEncKey::LSB_DEPTH);
+    if (extra.contains(OPUS_ENC_LSB_DEPTH)) {
+      int32_t lsb = extra.getInt32(OPUS_ENC_LSB_DEPTH);
       opus_encoder_ctl(encoder_, OPUS_SET_LSB_DEPTH(lsb));
     }
 
-    // Get lookahead
     int lookahead = 0;
     opus_encoder_ctl(encoder_, OPUS_GET_LOOKAHEAD(&lookahead));
 
-    // Build extradata (OpusHead)
-    // OpusHead structure:
-    // 0-7: "OpusHead" magic
-    // 8: version (1)
-    // 9: channels
-    // 10-11: pre-skip (little-endian)
-    // 12-15: input sample rate (little-endian, usually 48000)
-    // 16-17: output gain (little-endian)
-    // 18: channel mapping family
     extradata_.resize(19);
     std::memcpy(extradata_.data(), "OpusHead", 8);
-    extradata_[8] = 1;  // version
+    extradata_[8] = 1;
     extradata_[9] = static_cast<uint8_t>(channels_);
-    extradata_[10] = 0; // pre-skip low byte
-    extradata_[11] = 0; // pre-skip high byte
-    extradata_[12] = 48000 & 0xFF;        // sample rate low
-    extradata_[13] = (48000 >> 8) & 0xFF; // sample rate mid
+    extradata_[10] = 0;
+    extradata_[11] = 0;
+    extradata_[12] = 48000 & 0xFF;
+    extradata_[13] = (48000 >> 8) & 0xFF;
     extradata_[14] = (48000 >> 16) & 0xFF;
     extradata_[15] = (48000 >> 24) & 0xFF;
-    extradata_[16] = 0; // output gain low
-    extradata_[17] = 0; // output gain high
-    extradata_[18] = 0; // channel mapping family (0 = mono/stereo)
+    extradata_[16] = 0;
+    extradata_[17] = 0;
+    extradata_[18] = 0;
 
     return OM_SUCCESS;
   }
@@ -306,12 +276,10 @@ public:
 
     std::vector<Packet> packets;
 
-    // Encode in chunks of frame_size samples
     const float* input = reinterpret_cast<const float*>(audio_data->planes.data[0]);
     int total_samples = static_cast<int>(audio_data->nb_samples);
     int samples_per_channel = total_samples;
 
-    // Maximum packet size (1275 bytes for Opus)
     std::vector<uint8_t> packet_buffer(4000);
 
     int offset = 0;
@@ -322,7 +290,7 @@ public:
       int encoded_bytes;
       if (channels_ == 1) {
         encoded_bytes = opus_encode_float(encoder_, input + offset, to_encode,
-                                          packet_buffer.data(), 
+                                          packet_buffer.data(),
                                           static_cast<opus_int32>(packet_buffer.size()));
       } else {
         encoded_bytes = opus_encode_float(encoder_, input + offset * channels_, to_encode,
