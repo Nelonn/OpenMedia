@@ -61,6 +61,7 @@ target_sources(OpenMedia PRIVATE
         src/format_detector.cpp
         src/format_registry.cpp
         src/formats.hpp
+        src/h264_annexb.hpp
         src/io.cpp
         src/log.cpp
         src/media.cpp

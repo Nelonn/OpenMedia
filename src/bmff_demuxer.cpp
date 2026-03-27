@@ -12,6 +12,7 @@
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 #include <vector>
+#include <h264_annexb.hpp>
 
 namespace openmedia {
 
@@ -313,9 +314,7 @@ struct BMFFTrack {
   int64_t start_dts = 0;
   int64_t track_duration = 0;
   Track track = {};
-  // SHIT CODE
-  uint8_t nalu_length_size = 4;
-  // SHIT CODE
+  std::unique_ptr<H264AnnexBFilter> h264_bsf;
 
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
@@ -462,33 +461,34 @@ inline auto parseAvcc(std::span<const uint8_t> body,
   if (body.size() < 7) return false;
   BufReader r(body.data(), body.size());
 
-  r.skip(4); // skip version, profile, constraints, level
+  r.skip(4); // configurationVersion, profile, constraints, level
 
-  // ISO/IEC 14496-15: lengthSizeMinusOne is the last 2 bits
-  track.nalu_length_size = (r.read_u8() & 0x03) + 1;
+  const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
 
-  std::vector<uint8_t> annexb_extradata;
-  auto extractNals = [&](uint8_t count) {
+  std::vector<uint8_t> annexb_extra;
+  auto extract_nals = [&](uint8_t count) {
     for (uint8_t i = 0; i < count; ++i) {
       uint16_t nal_size = r.read_u16_be();
       if (r.remaining() < nal_size) break;
-
-      // Prepend Annex B Start Code
-      annexb_extradata.insert(annexb_extradata.end(), {0, 0, 0, 1});
+      annexb_extra.insert(annexb_extra.end(),
+                          H264AnnexBFilter::START_CODE,
+                          H264AnnexBFilter::START_CODE + 4);
       const uint8_t* ptr = r.cur();
-      annexb_extradata.insert(annexb_extradata.end(), ptr, ptr + nal_size);
+      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
       r.skip(nal_size);
     }
   };
 
-  uint8_t num_sps = r.read_u8() & 0x1F;
-  extractNals(num_sps);
+  uint8_t num_sps = r.read_u8() & 0x1Fu;
+  extract_nals(num_sps);
   if (r.remaining() > 0) {
     uint8_t num_pps = r.read_u8();
-    extractNals(num_pps);
+    extract_nals(num_pps);
   }
 
-  track.track.extradata = std::move(annexb_extradata);
+  track.track.extradata = annexb_extra; // keep for callers that inspect it
+  track.h264_bsf = std::make_unique<H264AnnexBFilter>(
+      nalu_len_sz, std::move(annexb_extra));
   return true;
 }
 
@@ -917,59 +917,23 @@ public:
     const auto& sample = samples_[current_sample_index_];
     const auto& bmff_track = bmff_tracks_[sample.stream_index];
 
-
-    // SHIT CODE
-    bool is_h264 = (bmff_track.track.format.codec_id == OM_CODEC_H264);
-    const bool prepend_extradata = (is_h264 && sample.is_keyframe && !bmff_track.track.extradata.empty());
-
-    const size_t extra_sz = prepend_extradata ? bmff_track.track.extradata.size() : 0;
-    // SHIT CODE
-
-    Packet pkt;
-    pkt.allocate(sample.size + extra_sz);
-
-    // SHIT CODE
-    uint8_t* data_ptr = pkt.bytes.data();
-    if (prepend_extradata) {
-      memcpy(data_ptr, bmff_track.track.extradata.data(), extra_sz);
-      data_ptr += extra_sz;
-    }
-    // SHIT CODE
-
+    std::vector<uint8_t> raw(sample.size);
     input_->seek(sample.offset, Whence::BEG);
-
-    const size_t n = input_->read(std::span<uint8_t>(data_ptr, sample.size));
+    const size_t n = input_->read(raw);
     if (n < sample.size) return Err(OM_FORMAT_END_OF_FILE);
 
-    // SHIT CODE
-    if (is_h264) {
-      size_t pos = 0;
-      // Use the length_size we parsed in parseAvcc (usually 4)
-      const uint8_t len_sz = bmff_track.nalu_length_size;
+    std::vector<uint8_t> converted;
+    std::span<const uint8_t> payload(raw);
 
-      while (pos + len_sz <= sample.size) {
-        uint32_t nalu_len = 0;
-        // Read the big-endian length field
-        for (int i = 0; i < len_sz; ++i) {
-          nalu_len = (nalu_len << 8) | data_ptr[pos + i];
-        }
-
-        // Overwrite that length with the 00 00 00 01 start code
-        // Note: This assumes len_sz is 4. If it's 1 or 2, you'd need to shift data,
-        // but 4 is the standard for almost all H.264 MP4s.
-        if (len_sz == 4) {
-          data_ptr[pos] = 0x00;
-          data_ptr[pos + 1] = 0x00;
-          data_ptr[pos + 2] = 0x00;
-          data_ptr[pos + 3] = 0x01;
-        }
-
-        pos += len_sz + nalu_len;
-      }
+    if (bmff_track.h264_bsf) {
+      converted = bmff_track.h264_bsf->convert(payload, sample.is_keyframe);
+      payload = converted;
     }
-    // SHIT CODE
 
-    pkt.bytes = pkt.bytes.subspan(0, n);
+    Packet pkt;
+    pkt.allocate(payload.size());
+    memcpy(pkt.bytes.data(), payload.data(), payload.size());
+
     pkt.stream_index = sample.stream_index;
     pkt.pts = sample.pts;
     pkt.dts = sample.dts;
