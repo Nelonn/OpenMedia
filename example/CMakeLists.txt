@@ -1,5 +1,5 @@
 
-add_executable(omplayer WIN32
+add_executable(OpenMediaExample WIN32
         audio_sink.hpp
         av_clock.hpp
         frame_queue.hpp
@@ -9,4 +9,4 @@ add_executable(omplayer WIN32
         ui.hpp
         video_renderer.hpp
 )
-target_link_libraries(omplayer PRIVATE SDL3::SDL3 OpenMedia::OpenMedia)
+target_link_libraries(OpenMediaExample PRIVATE SDL3::SDL3 OpenMedia::OpenMedia)

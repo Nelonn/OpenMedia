@@ -53,7 +53,7 @@
   "third_party/external/SDL": {
     "url": "https://github.com/libsdl-org/SDL",
     "commit": "225fb12ae13b70689bcb8c0b42bf061120fefcc4",
-    "option": ["omplayer"]
+    "option": ["examples"]
   },
   "third_party/external/tga": {
     "url": "https://github.com/Nelonn/tga",
