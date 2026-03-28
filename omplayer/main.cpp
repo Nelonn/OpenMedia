@@ -42,7 +42,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
-    ui.render(renderer);
+    ui.render(renderer, window);
 
     SDL_RenderPresent(renderer);
   }
