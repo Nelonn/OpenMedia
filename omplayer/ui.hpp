@@ -6,6 +6,18 @@
 #include <cstdio>
 #include <string>
 
+namespace {
+
+auto formatTime(double seconds) -> std::string {
+    if (seconds < 0) return "00:00";
+    const int total_s = static_cast<int>(seconds);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d", total_s / 60, total_s % 60);
+    return buf;
+}
+
+}
+
 // ---------------------------------------------------------------------------
 // PlayerUI
 //
@@ -25,6 +37,7 @@ public:
   static constexpr float kHitExpand = 14.0f;
   static constexpr float kVolumeStep = 0.05f;
   static constexpr Uint32 kFadeDelayMs = 1000;  // 1 second idle timeout
+  static constexpr float kTimeWidth = 55.0f;  // Space for time text on each side
 
   explicit PlayerUI(MediaPlayer& player)
       : player_(player) {
@@ -179,16 +192,20 @@ private:
   }
 
   void drawProgressBar(SDL_Renderer* r, int win_w, int /*win_h*/, Uint8 alpha) const {
-    const SDL_FRect& bar = bar_cache_;
+    // Progress bar with space for time text on both sides
+    const float bar_x = bar_cache_.x + kTimeWidth;
+    const float bar_w = bar_cache_.w - kTimeWidth * 2.0f;
+    
     const float progress = player_.getProgress();
 
     // Track background
+    SDL_FRect track {bar_x, bar_cache_.y, bar_w, bar_cache_.h};
     SDL_SetRenderDrawColor(r, 80, 80, 80, alpha);
-    SDL_RenderFillRect(r, &bar);
+    SDL_RenderFillRect(r, &track);
 
     // Filled portion
     if (progress > 0.0f) {
-      SDL_FRect fill {bar.x, bar.y, bar.w * progress, bar.h};
+      SDL_FRect fill {bar_x, bar_cache_.y, bar_w * progress, bar_cache_.h};
       SDL_SetRenderDrawColor(r, 255, 255, 255, alpha);
       SDL_RenderFillRect(r, &fill);
     }
@@ -196,8 +213,8 @@ private:
     // Playhead dot when hovered or dragging
     const bool hovered = dragging_ || isNearBar(mouse_x_, mouse_y_);
     if (hovered && progress > 0.0f && progress < 1.0f) {
-      const float cx = bar.x + bar.w * progress;
-      const float cy = bar.y + bar.h * 0.5f;
+      const float cx = bar_x + bar_w * progress;
+      const float cy = bar_cache_.y + bar_cache_.h * 0.5f;
       const float r2 = 6.0f;
       SDL_FRect dot {cx - r2, cy - r2, r2 * 2, r2 * 2};
       SDL_SetRenderDrawColor(r, 255, 255, 255, alpha);
@@ -207,13 +224,17 @@ private:
 
   void drawTimeInfo(SDL_Renderer* r, int win_w, int /*win_h*/, Uint8 alpha) const {
     SDL_SetRenderDrawColor(r, 255, 255, 255, alpha);
-    
-    // Position text above the progress bar
-    const float text_y = bar_cache_.y - 25.0f;
-    
-    // Current time / duration
-    std::string time_str = player_.getProgressString();
-    SDL_RenderDebugText(r, kBarMarginX, text_y, time_str.c_str());
+
+    // Position text on the same line as the progress bar
+    const float text_y = bar_cache_.y + 1.0f;
+
+    // Current time on the LEFT
+    std::string current_time = formatTime(player_.getClockSeconds());
+    SDL_RenderDebugText(r, bar_cache_.x, text_y, current_time.c_str());
+
+    // Total time on the RIGHT
+    std::string total_time = formatTime(player_.getDurationSeconds());
+    SDL_RenderDebugText(r, bar_cache_.x + bar_cache_.w - kTimeWidth, text_y, total_time.c_str());
   }
 
   // -----------------------------------------------------------------------
@@ -251,15 +272,19 @@ private:
 
   auto isNearBar(float x, float y) const -> bool {
     if (!player_.isActive()) return false;
-    return x >= bar_cache_.x &&
-           x <= bar_cache_.x + bar_cache_.w &&
+    // Account for time text space on both sides
+    const float bar_x = bar_cache_.x + kTimeWidth;
+    const float bar_w = bar_cache_.w - kTimeWidth * 2.0f;
+    return x >= bar_x &&
+           x <= bar_x + bar_w &&
            y >= bar_cache_.y - kHitExpand &&
            y <= bar_cache_.y + bar_cache_.h + kHitExpand;
   }
 
   auto progressFromX(float x) const -> float {
-    return std::clamp(
-        (x - bar_cache_.x) / bar_cache_.w, 0.0f, 1.0f);
+    const float bar_x = bar_cache_.x + kTimeWidth;
+    const float bar_w = bar_cache_.w - kTimeWidth * 2.0f;
+    return std::clamp((x - bar_x) / bar_w, 0.0f, 1.0f);
   }
 
   // -----------------------------------------------------------------------

@@ -327,6 +327,9 @@ public:
                detail::formatTime(total_duration_secs_);
     }
 
+    auto getClockSeconds() const -> double { return clock_.masterSeconds(); }
+    auto getDurationSeconds() const -> double { return total_duration_secs_; }
+
     auto getVideoTexture() -> SDL_Texture* { return video_renderer_.texture(); }
     auto getVideoSize() const -> std::pair<uint32_t, uint32_t> {
         return {video_renderer_.textureWidth(), video_renderer_.textureHeight()};
