@@ -20,12 +20,81 @@
 #include <openmedia/format_detector.hpp>
 #include <openmedia/format_registry.hpp>
 #include <openmedia/io.hpp>
+#include <queue>
 #include <string>
 #include <thread>
 #include <variant>
 #include <vector>
 
 using namespace openmedia;
+
+// ---------------------------------------------------------------------------
+// PacketQueue — ffplay-style bounded, CV-driven packet queue.
+//
+// The demux thread pushes; per-stream decoder threads pop.
+// abort() unblocks all waiters immediately (used on seek / stop).
+// ---------------------------------------------------------------------------
+class PacketQueue {
+public:
+    explicit PacketQueue(size_t capacity = 64) : capacity_(capacity) {}
+
+    // Block until space is available or abort() is called.
+    auto blockingPush(Packet pkt) -> bool {
+        std::unique_lock lock(mutex_);
+        not_full_cv_.wait(lock, [&] {
+            return aborted_ || queue_.size() < capacity_;
+        });
+        if (aborted_) return false;
+        queue_.push(std::move(pkt));
+        not_empty_cv_.notify_one();
+        return true;
+    }
+
+    // Block until a packet is available or abort() is called.
+    auto blockingPop() -> std::optional<Packet> {
+        std::unique_lock lock(mutex_);
+        not_empty_cv_.wait(lock, [&] {
+            return aborted_ || !queue_.empty();
+        });
+        if (aborted_ && queue_.empty()) return std::nullopt;
+        Packet pkt = std::move(queue_.front());
+        queue_.pop();
+        not_full_cv_.notify_one();
+        return pkt;
+    }
+
+    void abort() {
+        std::lock_guard lock(mutex_);
+        aborted_ = true;
+        while (!queue_.empty()) queue_.pop();
+        not_empty_cv_.notify_all();
+        not_full_cv_.notify_all();
+    }
+
+    void reset() {
+        std::lock_guard lock(mutex_);
+        aborted_ = false;
+        while (!queue_.empty()) queue_.pop();
+    }
+
+    auto size() const -> size_t {
+        std::lock_guard lock(mutex_);
+        return queue_.size();
+    }
+
+    auto isAborted() const -> bool {
+        std::lock_guard lock(mutex_);
+        return aborted_;
+    }
+
+private:
+    std::queue<Packet>      queue_;
+    mutable std::mutex      mutex_;
+    std::condition_variable not_full_cv_;
+    std::condition_variable not_empty_cv_;
+    size_t                  capacity_;
+    bool                    aborted_ = false;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,12 +111,11 @@ static auto toSdlFormat(OMSampleFormat fmt) noexcept -> SDL_AudioFormat {
     }
 }
 
-// Interleave planar PCM planes into a contiguous buffer.
 static auto interleave(const AudioSamples& s) -> std::vector<uint8_t> {
-    const uint32_t ch        = s.format.channels;
-    const uint32_t nb        = s.nb_samples;
-    const size_t   bps       = getBytesPerSample(s.format.sample_format);
-    const size_t   frame_sz  = bps * ch;
+    const uint32_t ch       = s.format.channels;
+    const uint32_t nb       = s.nb_samples;
+    const size_t   bps      = getBytesPerSample(s.format.sample_format);
+    const size_t   frame_sz = bps * ch;
     std::vector<uint8_t> out(static_cast<size_t>(nb) * frame_sz);
 
     if (s.format.planar) {
@@ -64,13 +132,11 @@ static auto interleave(const AudioSamples& s) -> std::vector<uint8_t> {
     return out;
 }
 
-// Some codecs deliver sub-32-bit samples stored in 32-bit words with the
-// payload in the MSB. Shift it down so SDL sees full-range values.
 static auto normaliseBits(std::vector<uint8_t> src,
-                                           uint8_t bits) -> std::vector<uint8_t> {
+                          uint8_t bits) -> std::vector<uint8_t> {
     if (bits == 0 || bits == 8 || bits == 32) return src;
-    const int shift = 32 - static_cast<int>(bits);
-    const size_t n  = src.size() / 4;
+    const int    shift = 32 - static_cast<int>(bits);
+    const size_t n     = src.size() / 4;
     std::vector<uint8_t> dst(src.size());
     for (size_t i = 0; i < n; ++i) {
         int32_t s = 0;
@@ -112,7 +178,6 @@ static auto buildPixels(const Picture& pic) -> std::vector<uint32_t> {
 // ---------------------------------------------------------------------------
 class MediaPlayer {
 public:
-    // Public status (read from main thread)
     std::string current_file;
 
     MediaPlayer() {
@@ -133,11 +198,19 @@ public:
     // -----------------------------------------------------------------------
 
     void stop() {
-        stopWorker();
+        // 1. Signal all threads and queues before joining.
+        stop_requested_ = true;
+        audio_packet_queue_.abort();
+        video_packet_queue_.abort();
+        video_frame_queue_.abort();
 
+        // 2. Join all worker threads.
+        if (demux_thread_.joinable())        demux_thread_.join();
+        if (audio_decoder_thread_.joinable()) audio_decoder_thread_.join();
+        if (video_decoder_thread_.joinable()) video_decoder_thread_.join();
+
+        // 3. Tear down A/V resources.
         audio_sink_.close();
-
-        video_frame_queue_.flush();
         video_renderer_.reset();
 
         if (demuxer_) {
@@ -153,15 +226,15 @@ public:
         }
 
         clock_.reset(0);
-        has_image_         = false;
-        has_video_         = false;
-        has_audio_         = false;
-        seek_pending_      = false;
+        has_image_          = false;
+        has_video_          = false;
+        has_audio_          = false;
         current_file.clear();
         audio_stream_index_ = -1;
         video_stream_index_ = -1;
         image_stream_index_ = -1;
-        total_duration_    = 0;
+        total_duration_     = 0;
+        stop_requested_     = false;
     }
 
     auto play(const std::string& path) -> bool {
@@ -175,7 +248,7 @@ public:
         }
 
         uint8_t probe[2048];
-        const size_t n   = input->read(probe);
+        const size_t n  = input->read(probe);
         const DetectedFormat fmt = format_detector_.detect({probe, n});
         if (fmt.isUnknown()) {
             SDL_Log("[Player] Unknown format: %s", path.c_str());
@@ -222,12 +295,11 @@ public:
     }
 
     // -----------------------------------------------------------------------
-    // Per-frame render-loop call (main thread).
+    // Per-frame render call (main thread)
     // -----------------------------------------------------------------------
-    void tickVideo() {
-        // Update wall clock when there is no audio driving it.
-        if (!audio_sink_.started()) clock_.wallTick();
 
+    void tickVideo() {
+        if (!audio_sink_.started()) clock_.wallTick();
         video_renderer_.tick(video_frame_queue_, clock_);
     }
 
@@ -235,12 +307,12 @@ public:
     // Queries
     // -----------------------------------------------------------------------
 
-    auto  getVolume()      const -> float { return volume_; }
-    auto   hasImage()       const -> bool { return has_image_; }
-    auto   hasVideo()       const -> bool { return has_video_; }
-    auto   hasAudio()       const -> bool { return has_audio_; }
+    auto getVolume()      const -> float { return volume_; }
+    auto hasImage()       const -> bool  { return has_image_; }
+    auto hasVideo()       const -> bool  { return has_video_; }
+    auto hasAudio()       const -> bool  { return has_audio_; }
 
-    auto   isActive()       const -> bool {
+    auto isActive() const -> bool {
         return has_video_ || audio_sink_.started();
     }
 
@@ -256,8 +328,8 @@ public:
                detail::formatTime(total_duration_, clock_.timeBase());
     }
 
-    auto getVideoTexture() -> SDL_Texture*  { return video_renderer_.texture(); }
-    auto getVideoSize() const -> std::pair<uint32_t,uint32_t> {
+    auto getVideoTexture() -> SDL_Texture* { return video_renderer_.texture(); }
+    auto getVideoSize() const -> std::pair<uint32_t, uint32_t> {
         return {video_renderer_.textureWidth(), video_renderer_.textureHeight()};
     }
 
@@ -265,7 +337,7 @@ public:
         std::lock_guard lock(image_mutex_);
         return image_texture_;
     }
-    auto getImageSize() const -> std::pair<uint32_t,uint32_t> {
+    auto getImageSize() const -> std::pair<uint32_t, uint32_t> {
         return {image_width_, image_height_};
     }
 
@@ -287,7 +359,7 @@ private:
                 image_stream_index_ = int32_t(i);
         }
 
-        // Still image: decode immediately, no worker needed.
+        // Still image path — decode immediately, no threads needed.
         if (image_stream_index_ >= 0 &&
             video_stream_index_ < 0 &&
             audio_stream_index_ < 0) {
@@ -302,7 +374,7 @@ private:
 
         if (video_stream_index_ >= 0 || audio_stream_index_ >= 0) {
             current_file = path_;
-            startWorker();
+            startThreads();
         }
     }
 
@@ -326,18 +398,12 @@ private:
 
     void setupVideoDecoder(const Track& track) {
         if (!makeDecoder(track, video_decoder_)) return;
-
-        // Use the video track's timebase as the master reference when
-        // there is no audio.  When audio is present, setupAudioDecoder
-        // will overwrite this.
         clock_.setTimeBase(track.time_base);
         clock_.setMode(AVClock::Mode::WALL);
         clock_.reset(0);
-
-        total_duration_ = track.duration;
+        total_duration_  = track.duration;
         video_time_base_ = track.time_base;
-        has_video_ = true;
-
+        has_video_       = true;
         SDL_Log("[Player] Video %dx%d codec=%s tb=%d/%d",
                 track.format.image.width, track.format.image.height,
                 getCodecMeta(track.format.codec_id).name.data(),
@@ -346,18 +412,13 @@ private:
 
     void setupAudioDecoder(const Track& track) {
         if (!makeDecoder(track, audio_decoder_)) return;
-
-        // Audio track drives the master clock – use its timebase.
         clock_.setTimeBase(track.time_base);
         clock_.setMode(AVClock::Mode::AUDIO);
         clock_.reset(0);
-
-        if (video_stream_index_ < 0) {
+        if (video_stream_index_ < 0)
             total_duration_ = track.duration;
-        }
         audio_time_base_ = track.time_base;
-        has_audio_ = true;
-
+        has_audio_       = true;
         SDL_Log("[Player] Audio codec=%s tb=%d/%d",
                 getCodecMeta(track.format.codec_id).name.data(),
                 track.time_base.num, track.time_base.den);
@@ -372,48 +433,71 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    // Worker
+    // Thread management
     // -----------------------------------------------------------------------
 
-    void startWorker() {
-        video_frame_queue_.resetFlush();
+    void startThreads() {
+        audio_packet_queue_.reset();
+        video_packet_queue_.reset();
+        video_frame_queue_.reset();
         stop_requested_ = false;
-        worker_         = std::thread([this] { workerLoop(); });
+
+        // Demux thread feeds the per-stream packet queues.
+        demux_thread_ = std::thread([this] { demuxLoop(); });
+
+        // Per-stream decoder threads drain their packet queue → decoded output.
+        if (has_audio_)
+            audio_decoder_thread_ = std::thread([this] { audioDecodeLoop(); });
+        if (has_video_)
+            video_decoder_thread_ = std::thread([this] { videoDecodeLoop(); });
     }
 
-    void stopWorker() {
-        {
-            std::lock_guard lock(seek_mutex_);
-            stop_requested_ = true;
-        }
-        seek_cv_.notify_all();
-        video_frame_queue_.flush();
-        if (worker_.joinable()) worker_.join();
+    void stopThreads() {
+        stop_requested_ = true;
+        seek_cv_.notify_all();          // wake demux from seek-settle wait
+        audio_packet_queue_.abort();
+        video_packet_queue_.abort();
+        video_frame_queue_.abort();
+
+        if (demux_thread_.joinable())        demux_thread_.join();
+        if (audio_decoder_thread_.joinable()) audio_decoder_thread_.join();
+        if (video_decoder_thread_.joinable()) video_decoder_thread_.join();
     }
 
-    void workerLoop() {
+    // -----------------------------------------------------------------------
+    // Demux thread — mirrors ffplay's read_thread()
+    //
+    // Responsibilities:
+    //   • Route demuxed packets to the correct per-stream PacketQueue.
+    //   • Handle seek requests: flush queues, seek demuxer, resume.
+    //   • Apply back-pressure: sleep when both packet queues are full.
+    // -----------------------------------------------------------------------
+    void demuxLoop() {
         using namespace std::chrono_literals;
 
         while (!stop_requested_) {
-            // ---- handle pending seek ----
+
+            // ---- seek handling (ffplay: check seek_req flag) ----
             {
                 std::unique_lock lock(seek_mutex_);
                 if (seek_pending_ &&
                     (SteadyClock::now() - last_seek_time_) >= kSeekSettle) {
-                    const float p   = pending_seek_progress_;
-                    seek_pending_   = false;
+                    const float p = pending_seek_progress_;
+                    seek_pending_ = false;
                     lock.unlock();
                     doSeek(p);
                     continue;
                 }
             }
 
-            // ---- back-pressure: sleep if queues are well-fed ----
-            const bool video_full = has_video_ &&
-                video_frame_queue_.size() >= video_frame_queue_.capacity() * 3 / 4;
-            const bool audio_full = has_audio_ && !audio_sink_.needsData();
+            // ---- back-pressure (ffplay: infinite_buffer check) ----
+            // Both packet queues are well-fed — yield without spinning.
+            const bool audio_ok = !has_audio_ ||
+                audio_packet_queue_.size() < kPacketQueueCapacity * 3 / 4;
+            const bool video_ok = !has_video_ ||
+                video_packet_queue_.size() < kPacketQueueCapacity * 3 / 4;
 
-            if (video_full && audio_full) {
+            if (!audio_ok && !video_ok) {
                 std::unique_lock lock(seek_mutex_);
                 seek_cv_.wait_for(lock, 10ms, [&] {
                     return stop_requested_.load() || seek_pending_;
@@ -421,147 +505,170 @@ private:
                 continue;
             }
 
-            // ---- decode one packet ----
+            // ---- read one packet ----
             auto res = demuxer_->readPacket();
             if (res.isErr()) {
-                SDL_Log("[Worker] EOF/error %d", res.unwrapErr());
-                // Wait instead of spinning on EOF.
+                // EOF — wait; a seek may restart things.
                 std::unique_lock lock(seek_mutex_);
                 seek_cv_.wait_for(lock, 200ms, [&] {
                     return stop_requested_.load() || seek_pending_;
                 });
                 continue;
             }
-            processPacket(res.unwrap(), /*allow_open_device=*/true);
+
+            Packet pkt = res.unwrap();
+            if (pkt.stream_index == audio_stream_index_)
+                audio_packet_queue_.blockingPush(std::move(pkt));
+            else if (pkt.stream_index == video_stream_index_)
+                video_packet_queue_.blockingPush(std::move(pkt));
+            // Packets for other streams are discarded.
         }
     }
 
     // -----------------------------------------------------------------------
-    // Seek
+    // Audio decoder thread — mirrors ffplay's audio_thread()
     // -----------------------------------------------------------------------
+    void audioDecodeLoop() {
+        while (!stop_requested_) {
+            auto maybe_pkt = audio_packet_queue_.blockingPop();
+            if (!maybe_pkt) break; // aborted
 
+            auto result = audio_decoder_->decode(*maybe_pkt);
+            if (result.isErr()) continue;
+
+            for (auto& frame : result.unwrap()) {
+                if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
+                const AudioSamples& s = std::get<AudioSamples>(frame.data);
+                if (s.nb_samples == 0) continue;
+
+                if (!audio_sink_.isOpen()) {
+                    const size_t bps = getBytesPerSample(s.format.sample_format);
+                    if (!audio_sink_.open(
+                            detail::toSdlFormat(s.format.sample_format),
+                            int(s.format.channels),
+                            int(s.format.sample_rate),
+                            bps, &clock_))
+                        continue;
+                }
+
+                auto pcm = detail::normaliseBits(
+                    detail::interleave(s), s.format.bits_per_sample);
+
+                // Push PCM to the sink.  The sink's own ringbuffer provides
+                // back-pressure; check stop_requested_ between partial writes.
+                size_t written = 0;
+                while (written < pcm.size() && !stop_requested_) {
+                    written += audio_sink_.pushPcm(
+                        pcm.data() + written, pcm.size() - written);
+                    if (written < pcm.size())
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+
+                audio_sink_.tickBuffering(int64_t(frame.pts));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Video decoder thread — mirrors ffplay's video_thread()
+    //
+    // The original freeze came from this thread doing a sleep-spin inside
+    // processVideoPacket while holding no lock, but the render thread was
+    // unable to make progress draining the queue (e.g. renderer not ticking
+    // fast enough, or a seek draining the queue while the push was mid-retry).
+    //
+    // Here we use blockingPush() instead: the thread sleeps on a CV inside
+    // the queue and is woken the instant a slot opens OR abort() is called.
+    // There is no spin, no 2 ms sleep, and the thread exits cleanly on stop.
+    // -----------------------------------------------------------------------
+    void videoDecodeLoop() {
+        while (!stop_requested_) {
+            auto maybe_pkt = video_packet_queue_.blockingPop();
+            if (!maybe_pkt) break; // aborted
+
+            auto result = video_decoder_->decode(*maybe_pkt);
+            if (result.isErr()) continue;
+
+            for (auto& frame : result.unwrap()) {
+                if (!std::holds_alternative<Picture>(frame.data)) continue;
+                const Picture& pic = std::get<Picture>(frame.data);
+                if (pic.width == 0 || pic.height == 0) continue;
+
+                VideoFrame vf;
+                vf.width   = pic.width;
+                vf.height  = pic.height;
+                vf.pts     = int64_t(frame.pts);
+                vf.pts_sec = clock_.ptsToSeconds(vf.pts);
+
+                vf.y_stride = pic.planes.getLinesize(0);
+                vf.u_stride = pic.planes.getLinesize(1);
+                vf.v_stride = pic.planes.getLinesize(2);
+
+                const uint8_t* y = pic.planes.getData(0);
+                const uint8_t* u = pic.planes.getData(1);
+                const uint8_t* v = pic.planes.getData(2);
+
+                vf.y_plane.assign(y, y + vf.y_stride * pic.height);
+                vf.u_plane.assign(u, u + vf.u_stride * (pic.height / 2));
+                vf.v_plane.assign(v, v + vf.v_stride * (pic.height / 2));
+
+                // blockingPush sleeps on a CV until space is available or
+                // abort() is called — no spin, no arbitrary sleep.
+                if (!video_frame_queue_.blockingPush(std::move(vf))) break;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Seek — called from demux thread only (no cross-thread decoder access)
+    // -----------------------------------------------------------------------
     void doSeek(float progress) {
+        // 1. Abort decoder threads so they drain immediately.
+        audio_packet_queue_.abort();
+        video_packet_queue_.abort();
+        video_frame_queue_.abort();
+
+        // 2. Flush codec internal state.
         audio_sink_.pause();
         audio_sink_.clearBuffer();
         if (audio_decoder_) audio_decoder_->flush();
         if (video_decoder_) video_decoder_->flush();
-        video_frame_queue_.flush();
-        video_frame_queue_.resetFlush();
 
+        // 3. Reset queues for reuse.
+        audio_packet_queue_.reset();
+        video_packet_queue_.reset();
+        video_frame_queue_.reset();
+
+        // 4. Seek the demuxer.
         const int32_t ref = (audio_stream_index_ >= 0)
                               ? audio_stream_index_
                               : video_stream_index_;
-
-        const int64_t target_pts = int64_t(
-            progress * float(total_duration_));
-
-        // Convert target PTS → nanoseconds for demuxer seek.
+        const int64_t target_pts = int64_t(progress * float(total_duration_));
         const Rational& tb = (audio_stream_index_ >= 0)
                                ? audio_time_base_
                                : video_time_base_;
         int64_t target_ns = 0;
         if (tb.den != 0)
-            target_ns = int64_t(
-                double(target_pts) * tb.num / tb.den * 1e9);
+            target_ns = int64_t(double(target_pts) * tb.num / tb.den * 1e9);
 
-        if (demuxer_->seek(target_ns, ref) == OM_SUCCESS) {
+        if (demuxer_->seek(target_ns, ref) == OM_SUCCESS)
             clock_.reset(target_pts);
-        }
 
-        // Warm the pipeline with a few packets.
+        // 5. Re-launch decoder threads (they had exited after abort).
+        if (has_audio_)
+            audio_decoder_thread_ = std::thread([this] { audioDecodeLoop(); });
+        if (has_video_)
+            video_decoder_thread_ = std::thread([this] { videoDecodeLoop(); });
+
+        // 6. Prime the pipeline by pushing a few packets before returning.
         for (int i = 0; i < 12 && !stop_requested_; ++i) {
             auto res = demuxer_->readPacket();
             if (res.isErr()) break;
-            processPacket(res.unwrap(), /*allow_open_device=*/false);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Packet processing
-    // -----------------------------------------------------------------------
-
-    void processPacket(const Packet& pkt, bool allow_open_device) {
-        if (pkt.stream_index == audio_stream_index_ && audio_decoder_)
-            processAudioPacket(pkt, allow_open_device);
-        else if (pkt.stream_index == video_stream_index_ && video_decoder_)
-            processVideoPacket(pkt);
-    }
-
-    void processAudioPacket(const Packet& pkt, bool allow_open_device) {
-        auto result = audio_decoder_->decode(pkt);
-        if (result.isErr()) return;
-
-        for (auto& frame : result.unwrap()) {
-            if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
-            const AudioSamples& s = std::get<AudioSamples>(frame.data);
-            if (s.nb_samples == 0) continue;
-
-            // Open SDL audio device on first decoded frame.
-            if (!audio_sink_.isOpen()) {
-                if (!allow_open_device) continue;
-                const size_t bps = getBytesPerSample(s.format.sample_format);
-                if (!audio_sink_.open(
-                        detail::toSdlFormat(s.format.sample_format),
-                        int(s.format.channels),
-                        int(s.format.sample_rate),
-                        bps, &clock_)) {
-                    continue;
-                }
-            }
-
-            // Interleave + normalise bit-width.
-            auto pcm = detail::normaliseBits(
-                detail::interleave(s), s.format.bits_per_sample);
-
-            // Blocking write with stop-check.
-            size_t written = 0;
-            while (written < pcm.size() && !stop_requested_) {
-                written += audio_sink_.pushPcm(pcm.data() + written,
-                                               pcm.size() - written);
-                if (written < pcm.size())
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
-
-            // Prime buffering – unpauses device once threshold is reached.
-            audio_sink_.tickBuffering(int64_t(frame.pts));
-        }
-    }
-
-    void processVideoPacket(const Packet& pkt) {
-        auto result = video_decoder_->decode(pkt);
-        if (result.isErr()) return;
-
-        for (auto& frame : result.unwrap()) {
-            if (!std::holds_alternative<Picture>(frame.data)) continue;
-            const Picture& pic = std::get<Picture>(frame.data);
-            if (pic.width == 0 || pic.height == 0) continue;
-
-            VideoFrame vf;
-            vf.width  = pic.width;
-            vf.height = pic.height;
-            vf.pts    = int64_t(frame.pts);
-
-            // Pre-compute pts_sec using the video track's own timebase.
-            vf.pts_sec = clock_.ptsToSeconds(vf.pts);
-
-            vf.y_stride = pic.planes.getLinesize(0);
-            vf.u_stride = pic.planes.getLinesize(1);
-            vf.v_stride = pic.planes.getLinesize(2);
-
-            const uint8_t* y = pic.planes.getData(0);
-            const uint8_t* u = pic.planes.getData(1);
-            const uint8_t* v = pic.planes.getData(2);
-
-            vf.y_plane.assign(y, y + vf.y_stride * pic.height);
-            vf.u_plane.assign(u, u + vf.u_stride * (pic.height / 2));
-            vf.v_plane.assign(v, v + vf.v_stride * (pic.height / 2));
-
-            // Back-pressure: sleep-retry until there is space or we're stopped.
-            // Never block inside the queue itself.
-            while (!stop_requested_ && !video_frame_queue_.isFlushing()) {
-                if (video_frame_queue_.tryPush(std::move(vf))) break;
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
+            Packet pkt = res.unwrap();
+            if (pkt.stream_index == audio_stream_index_)
+                audio_packet_queue_.blockingPush(std::move(pkt));
+            else if (pkt.stream_index == video_stream_index_)
+                video_packet_queue_.blockingPush(std::move(pkt));
         }
     }
 
@@ -580,8 +687,8 @@ private:
         Frame& f = result.unwrap()[0];
         if (!std::holds_alternative<Picture>(f.data)) return;
 
-        const Picture& pic  = std::get<Picture>(f.data);
-        const auto     pix  = detail::buildPixels(pic);
+        const Picture& pic = std::get<Picture>(f.data);
+        const auto     pix = detail::buildPixels(pic);
 
         std::lock_guard lock(image_mutex_);
         if (image_texture_) {
@@ -623,16 +730,23 @@ private:
     int32_t video_stream_index_ = -1;
     int32_t image_stream_index_ = -1;
 
-    // Timebases per track (may differ!)
+    // Timebases
     Rational audio_time_base_ {1, 44100};
     Rational video_time_base_ {1, 90000};
 
     // A/V pipeline
-    AVClock         clock_;
-    AudioSink       audio_sink_;
-    FrameQueue      video_frame_queue_ {8};
-    VideoRenderer   video_renderer_;
-    SDL_Renderer*   renderer_    = nullptr;
+    AVClock       clock_;
+    AudioSink     audio_sink_;
+    VideoRenderer video_renderer_;
+    SDL_Renderer* renderer_ = nullptr;
+
+    // Packet queues (demux thread → decoder threads)
+    static constexpr size_t kPacketQueueCapacity = 64;
+    PacketQueue audio_packet_queue_ {kPacketQueueCapacity};
+    PacketQueue video_packet_queue_ {kPacketQueueCapacity};
+
+    // Frame queue (video decoder thread → render thread)
+    FrameQueue video_frame_queue_ {8};
 
     // Audio state
     float volume_    = 1.0f;
@@ -642,18 +756,22 @@ private:
     bool has_video_ = false;
 
     // Image state
-    SDL_Texture*   image_texture_ = nullptr;
+    SDL_Texture*       image_texture_ = nullptr;
     mutable std::mutex image_mutex_;
-    uint32_t       image_width_   = 0;
-    uint32_t       image_height_  = 0;
-    bool           has_image_     = false;
+    uint32_t           image_width_   = 0;
+    uint32_t           image_height_  = 0;
+    bool               has_image_     = false;
 
     // Timeline
     int64_t total_duration_ = 0;
 
-    // Worker
-    std::thread             worker_;
-    std::atomic<bool>       stop_requested_ {false};
+    // Threads
+    std::thread       demux_thread_;
+    std::thread       audio_decoder_thread_;
+    std::thread       video_decoder_thread_;
+    std::atomic<bool> stop_requested_ {false};
+
+    // Seek coordination (used only by demux thread and seek() caller)
     std::mutex              seek_mutex_;
     std::condition_variable seek_cv_;
     bool                    seek_pending_          = false;

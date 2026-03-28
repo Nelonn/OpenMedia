@@ -6,7 +6,6 @@
 #include <SDL3/SDL.h>
 #include <mutex>
 
-// ---------------------------------------------------------------------------
 // VideoRenderer
 //
 // Consumes VideoFrames from a FrameQueue, compares each frame's pts_sec
@@ -21,7 +20,6 @@
 //   otherwise              → display (the "just right" window)
 //
 // Only ONE frame is displayed per tick so the render loop controls pacing.
-// ---------------------------------------------------------------------------
 class VideoRenderer {
 public:
   // Seconds: a frame more than this far ahead is held back.
@@ -33,12 +31,10 @@ public:
 
   void setRenderer(SDL_Renderer* r) { renderer_ = r; }
 
-  // -----------------------------------------------------------------------
   // Called once per render-loop iteration from the main thread.
   // `clock` – the master clock this player uses.
   // Returns true if a new frame was uploaded (texture is dirty).
-  // -----------------------------------------------------------------------
-  bool tick(FrameQueue& queue, const AVClock& clock) {
+  auto tick(FrameQueue& queue, const AVClock& clock) -> bool {
     if (!renderer_) return false;
 
     const double master = clock.masterSeconds();
