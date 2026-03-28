@@ -103,11 +103,11 @@ public:
 
   // Poll buffering state; returns true once playback has started.
   // Call this after pushing audio data.
-  bool tickBuffering(int64_t current_pts) {
+  bool tickBuffering(double current_seconds) {
     if (!open_ || started_ || !ring_) return false;
     const double ratio = ring_->fillRatio();
     if (ratio >= kStartThresh) {
-      clock_->setAudioPts(current_pts);
+      clock_->setAudioSeconds(current_seconds);
       SDL_ResumeAudioDevice(device_);
       started_ = true;
       SDL_Log("[AudioSink] Playback started (fill=%.1f%%)", ratio * 100.0);
@@ -165,8 +165,8 @@ private:
 
       // Advance the master clock by the number of PCM frames consumed.
       if (sample_rate_ > 0 && frame_bytes_ > 0) {
-        const int64_t frames_consumed = static_cast<int64_t>(n / frame_bytes_);
-        clock_->audioAdvance(frames_consumed, sample_rate_);
+        const double secs_consumed = static_cast<double>(n) / (sample_rate_ * frame_bytes_);
+        clock_->audioAdvance(secs_consumed);
       }
     } else {
       // Underrun – push silence to avoid SDL starvation.

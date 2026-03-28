@@ -40,7 +40,7 @@ public:
 
     // Block until space is available or abort() is called.
     auto blockingPush(Packet pkt) -> bool {
-        std::unique_lock lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         not_full_cv_.wait(lock, [&] {
             return aborted_ || queue_.size() < capacity_;
         });
@@ -52,7 +52,7 @@ public:
 
     // Block until a packet is available or abort() is called.
     auto blockingPop() -> std::optional<Packet> {
-        std::unique_lock lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         not_empty_cv_.wait(lock, [&] {
             return aborted_ || !queue_.empty();
         });
@@ -64,7 +64,7 @@ public:
     }
 
     void abort() {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         aborted_ = true;
         while (!queue_.empty()) queue_.pop();
         not_empty_cv_.notify_all();
@@ -72,18 +72,18 @@ public:
     }
 
     void reset() {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         aborted_ = false;
         while (!queue_.empty()) queue_.pop();
     }
 
     auto size() const -> size_t {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return queue_.size();
     }
 
     auto isAborted() const -> bool {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return aborted_;
     }
 
@@ -147,10 +147,9 @@ static auto normaliseBits(std::vector<uint8_t> src,
     return dst;
 }
 
-static auto formatTime(int64_t pts, Rational tb) -> std::string {
-    if (pts < 0 || tb.den == 0) return "00:00";
-    const int total_s = static_cast<int>(
-        static_cast<double>(pts) * tb.num / tb.den);
+static auto formatTime(double seconds) -> std::string {
+    if (seconds < 0) return "00:00";
+    const int total_s = static_cast<int>(seconds);
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%02d:%02d", total_s / 60, total_s % 60);
     return buf;
@@ -233,7 +232,7 @@ public:
         audio_stream_index_ = -1;
         video_stream_index_ = -1;
         image_stream_index_ = -1;
-        total_duration_     = 0;
+        total_duration_secs_ = 0;
         stop_requested_     = false;
     }
 
@@ -284,9 +283,9 @@ public:
     }
 
     void seek(float progress) {
-        if (!demuxer_ || total_duration_ <= 0) return;
+        if (!demuxer_ || total_duration_secs_ <= 0) return;
         {
-            std::lock_guard lock(seek_mutex_);
+            std::lock_guard<std::mutex> lock(seek_mutex_);
             pending_seek_progress_ = std::clamp(progress, 0.0f, 1.0f);
             seek_pending_          = true;
             last_seek_time_        = SteadyClock::now();
@@ -317,15 +316,15 @@ public:
     }
 
     auto getProgress() const -> float {
-        if (total_duration_ <= 0) return 0.0f;
-        return static_cast<float>(clock_.masterPts()) /
-               static_cast<float>(total_duration_);
+        if (total_duration_secs_ <= 0) return 0.0f;
+        return static_cast<float>(clock_.masterSeconds()) /
+               static_cast<float>(total_duration_secs_);
     }
 
     auto getProgressString() const -> std::string {
-        return detail::formatTime(clock_.masterPts(), clock_.timeBase()) +
+        return detail::formatTime(clock_.masterSeconds()) +
                " / " +
-               detail::formatTime(total_duration_, clock_.timeBase());
+               detail::formatTime(total_duration_secs_);
     }
 
     auto getVideoTexture() -> SDL_Texture* { return video_renderer_.texture(); }
@@ -334,7 +333,7 @@ public:
     }
 
     auto getImageTexture() -> SDL_Texture* {
-        std::lock_guard lock(image_mutex_);
+        std::lock_guard<std::mutex> lock(image_mutex_);
         return image_texture_;
     }
     auto getImageSize() const -> std::pair<uint32_t, uint32_t> {
@@ -342,6 +341,75 @@ public:
     }
 
 private:
+    // -----------------------------------------------------------------------
+    // Data
+    // -----------------------------------------------------------------------
+
+    // Infrastructure
+    FormatDetector format_detector_;
+    CodecRegistry  codec_registry_;
+    FormatRegistry format_registry_;
+
+    std::unique_ptr<Demuxer> demuxer_;
+    std::unique_ptr<Decoder> audio_decoder_;
+    std::unique_ptr<Decoder> video_decoder_;
+    std::string              path_;
+
+    // Stream indices
+    int32_t audio_stream_index_ = -1;
+    int32_t video_stream_index_ = -1;
+    int32_t image_stream_index_ = -1;
+
+    // Timebases
+    Rational audio_time_base_ {1, 44100};
+    Rational video_time_base_ {1, 90000};
+
+    // A/V pipeline
+    AVClock       clock_;
+    AudioSink     audio_sink_;
+    VideoRenderer video_renderer_;
+    SDL_Renderer* renderer_ = nullptr;
+
+    // Packet queues (demux thread → decoder threads)
+    static constexpr size_t kPacketQueueCapacity = 64;
+    PacketQueue audio_packet_queue_ {kPacketQueueCapacity};
+    PacketQueue video_packet_queue_ {kPacketQueueCapacity};
+
+    // Frame queue (video decoder thread → render thread)
+    FrameQueue video_frame_queue_ {8};
+
+    // Audio state
+    float volume_    = 1.0f;
+    bool  has_audio_ = false;
+
+    // Video state
+    bool has_video_ = false;
+
+    // Image state
+    SDL_Texture*       image_texture_ = nullptr;
+    mutable std::mutex image_mutex_;
+    uint32_t           image_width_   = 0;
+    uint32_t           image_height_  = 0;
+    bool               has_image_     = false;
+
+    // Timeline
+    double total_duration_secs_ = 0;
+
+    // Threads
+    std::thread       demux_thread_;
+    std::thread       audio_decoder_thread_;
+    std::thread       video_decoder_thread_;
+    std::atomic<bool> stop_requested_ {false};
+
+    // Seek coordination (used only by demux thread and seek() caller)
+    std::mutex              seek_mutex_;
+    std::condition_variable seek_cv_;
+    bool                    seek_pending_          = false;
+    float                   pending_seek_progress_ = 0.0f;
+    TimePoint               last_seek_time_;
+
+    static constexpr auto kSeekSettle = std::chrono::milliseconds(100);
+
     // -----------------------------------------------------------------------
     // Setup
     // -----------------------------------------------------------------------
@@ -398,11 +466,11 @@ private:
 
     void setupVideoDecoder(const Track& track) {
         if (!makeDecoder(track, video_decoder_)) return;
-        clock_.setTimeBase(track.time_base);
         clock_.setMode(AVClock::Mode::WALL);
-        clock_.reset(0);
-        total_duration_  = track.duration;
+        clock_.reset(0.0);
         video_time_base_ = track.time_base;
+        total_duration_secs_ = static_cast<double>(track.duration) * 
+                               track.time_base.num / track.time_base.den;
         has_video_       = true;
         SDL_Log("[Player] Video %dx%d codec=%s tb=%d/%d",
                 track.format.image.width, track.format.image.height,
@@ -412,12 +480,13 @@ private:
 
     void setupAudioDecoder(const Track& track) {
         if (!makeDecoder(track, audio_decoder_)) return;
-        clock_.setTimeBase(track.time_base);
         clock_.setMode(AVClock::Mode::AUDIO);
-        clock_.reset(0);
-        if (video_stream_index_ < 0)
-            total_duration_ = track.duration;
+        clock_.reset(0.0);
         audio_time_base_ = track.time_base;
+        if (video_stream_index_ < 0) {
+            total_duration_secs_ = static_cast<double>(track.duration) * 
+                                   track.time_base.num / track.time_base.den;
+        }
         has_audio_       = true;
         SDL_Log("[Player] Audio codec=%s tb=%d/%d",
                 getCodecMeta(track.format.codec_id).name.data(),
@@ -428,7 +497,8 @@ private:
         if (!makeDecoder(track, video_decoder_)) return;
         image_width_    = track.format.image.width;
         image_height_   = track.format.image.height;
-        total_duration_ = track.duration;
+        total_duration_secs_ = static_cast<double>(track.duration) * 
+                               track.time_base.num / track.time_base.den;
         decodeAndShowImage();
     }
 
@@ -479,7 +549,7 @@ private:
 
             // ---- seek handling (ffplay: check seek_req flag) ----
             {
-                std::unique_lock lock(seek_mutex_);
+                std::unique_lock<std::mutex> lock(seek_mutex_);
                 if (seek_pending_ &&
                     (SteadyClock::now() - last_seek_time_) >= kSeekSettle) {
                     const float p = pending_seek_progress_;
@@ -498,7 +568,7 @@ private:
                 video_packet_queue_.size() < kPacketQueueCapacity * 3 / 4;
 
             if (!audio_ok && !video_ok) {
-                std::unique_lock lock(seek_mutex_);
+                std::unique_lock<std::mutex> lock(seek_mutex_);
                 seek_cv_.wait_for(lock, 10ms, [&] {
                     return stop_requested_.load() || seek_pending_;
                 });
@@ -509,7 +579,7 @@ private:
             auto res = demuxer_->readPacket();
             if (res.isErr()) {
                 // EOF — wait; a seek may restart things.
-                std::unique_lock lock(seek_mutex_);
+                std::unique_lock<std::mutex> lock(seek_mutex_);
                 seek_cv_.wait_for(lock, 200ms, [&] {
                     return stop_requested_.load() || seek_pending_;
                 });
@@ -564,7 +634,9 @@ private:
                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 }
 
-                audio_sink_.tickBuffering(int64_t(frame.pts));
+                const double pts_sec = static_cast<double>(frame.pts) * 
+                                       audio_time_base_.num / audio_time_base_.den;
+                audio_sink_.tickBuffering(pts_sec);
             }
         }
     }
@@ -598,7 +670,8 @@ private:
                 vf.width   = pic.width;
                 vf.height  = pic.height;
                 vf.pts     = int64_t(frame.pts);
-                vf.pts_sec = clock_.ptsToSeconds(vf.pts);
+                vf.pts_sec = static_cast<double>(vf.pts) * 
+                             video_time_base_.num / video_time_base_.den;
 
                 vf.y_stride = pic.planes.getLinesize(0);
                 vf.u_stride = pic.planes.getLinesize(1);
@@ -643,16 +716,12 @@ private:
         const int32_t ref = (audio_stream_index_ >= 0)
                               ? audio_stream_index_
                               : video_stream_index_;
-        const int64_t target_pts = int64_t(progress * float(total_duration_));
-        const Rational& tb = (audio_stream_index_ >= 0)
-                               ? audio_time_base_
-                               : video_time_base_;
-        int64_t target_ns = 0;
-        if (tb.den != 0)
-            target_ns = int64_t(double(target_pts) * tb.num / tb.den * 1e9);
+        const double target_secs = static_cast<double>(progress) * total_duration_secs_;
+        
+        const int64_t target_ns = static_cast<int64_t>(target_secs * 1e9);
 
         if (demuxer_->seek(target_ns, ref) == OM_SUCCESS)
-            clock_.reset(target_pts);
+            clock_.reset(target_secs);
 
         // 5. Re-launch decoder threads (they had exited after abort).
         if (has_audio_)
@@ -690,7 +759,7 @@ private:
         const Picture& pic = std::get<Picture>(f.data);
         const auto     pix = detail::buildPixels(pic);
 
-        std::lock_guard lock(image_mutex_);
+        std::lock_guard<std::mutex> lock(image_mutex_);
         if (image_texture_) {
             SDL_DestroyTexture(image_texture_);
             image_texture_ = nullptr;
@@ -710,73 +779,4 @@ private:
         current_file  = path_;
         SDL_Log("[Player] Image %dx%d loaded", image_width_, image_height_);
     }
-
-    // -----------------------------------------------------------------------
-    // Data
-    // -----------------------------------------------------------------------
-
-    // Infrastructure
-    FormatDetector format_detector_;
-    CodecRegistry  codec_registry_;
-    FormatRegistry format_registry_;
-
-    std::unique_ptr<Demuxer> demuxer_;
-    std::unique_ptr<Decoder> audio_decoder_;
-    std::unique_ptr<Decoder> video_decoder_;
-    std::string              path_;
-
-    // Stream indices
-    int32_t audio_stream_index_ = -1;
-    int32_t video_stream_index_ = -1;
-    int32_t image_stream_index_ = -1;
-
-    // Timebases
-    Rational audio_time_base_ {1, 44100};
-    Rational video_time_base_ {1, 90000};
-
-    // A/V pipeline
-    AVClock       clock_;
-    AudioSink     audio_sink_;
-    VideoRenderer video_renderer_;
-    SDL_Renderer* renderer_ = nullptr;
-
-    // Packet queues (demux thread → decoder threads)
-    static constexpr size_t kPacketQueueCapacity = 64;
-    PacketQueue audio_packet_queue_ {kPacketQueueCapacity};
-    PacketQueue video_packet_queue_ {kPacketQueueCapacity};
-
-    // Frame queue (video decoder thread → render thread)
-    FrameQueue video_frame_queue_ {8};
-
-    // Audio state
-    float volume_    = 1.0f;
-    bool  has_audio_ = false;
-
-    // Video state
-    bool has_video_ = false;
-
-    // Image state
-    SDL_Texture*       image_texture_ = nullptr;
-    mutable std::mutex image_mutex_;
-    uint32_t           image_width_   = 0;
-    uint32_t           image_height_  = 0;
-    bool               has_image_     = false;
-
-    // Timeline
-    int64_t total_duration_ = 0;
-
-    // Threads
-    std::thread       demux_thread_;
-    std::thread       audio_decoder_thread_;
-    std::thread       video_decoder_thread_;
-    std::atomic<bool> stop_requested_ {false};
-
-    // Seek coordination (used only by demux thread and seek() caller)
-    std::mutex              seek_mutex_;
-    std::condition_variable seek_cv_;
-    bool                    seek_pending_          = false;
-    float                   pending_seek_progress_ = 0.0f;
-    TimePoint               last_seek_time_;
-
-    static constexpr auto kSeekSettle = std::chrono::milliseconds(100);
 };
