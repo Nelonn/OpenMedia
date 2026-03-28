@@ -552,7 +552,8 @@ inline auto parseVvcc(std::span<const uint8_t> body,
   if (ptl_present) {
     if (r.remaining() < 2) return false;
 
-    uint8_t num_bytes_constraint_info = r.read_u8();
+    uint8_t ci_byte = r.read_u8();
+    uint8_t num_bytes_constraint_info = ci_byte >> 2;
     uint8_t num_sub_layers = r.read_u8() & 0x07u;
 
     if (r.remaining() < 2) return false;
@@ -609,6 +610,9 @@ inline auto parseVvcc(std::span<const uint8_t> body,
       r.skip(nal_size);
     }
   }
+
+  fprintf(stderr, "num_arrays=%u, annexb_extra.size()=%zu, remaining=%zu\n",
+       num_arrays, annexb_extra.size(), r.remaining());
 
   if (annexb_extra.empty()) {
     return false;
