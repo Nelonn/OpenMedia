@@ -964,6 +964,8 @@ class BMFFDemuxer final : public BaseDemuxer {
   std::vector<Sample> samples_;
   size_t current_sample_index_ = 0;
 
+  RandomRead random_;
+
 public:
   BMFFDemuxer() = default;
 
@@ -971,6 +973,8 @@ public:
     input_ = std::move(input);
     if (!input_ || !input_->isValid()) return OM_IO_INVALID_STREAM;
     if (!input_->canSeek()) return OM_IO_SEEK_REQUIRED;
+
+    random_ = RandomRead(input_.get());
 
     parseBoxes(0, input_->size());
 
@@ -1029,9 +1033,8 @@ public:
     const auto& bmff_track = bmff_tracks_[sample.stream_index];
 
     std::vector<uint8_t> raw(sample.size);
-    input_->seek(sample.offset, Whence::BEG);
-    const size_t n = input_->read(raw);
-    if (n < sample.size) return Err(OM_FORMAT_END_OF_FILE);
+    if (!random_.read(sample.offset, raw.data(), sample.size))
+      return Err(OM_FORMAT_END_OF_FILE);
 
     std::vector<uint8_t> converted;
     std::span<const uint8_t> payload(raw);
@@ -1090,47 +1093,45 @@ private:
 
   // Read exactly `n` bytes from the stream at position `pos`.
   // Sets fatal_ on a short-read and resizes the buffer to actual bytes read.
-  auto readBoxData(int64_t pos, uint64_t n) -> std::vector<uint8_t> {
+  auto readBoxData(size_t pos, size_t n) -> std::vector<uint8_t> {
     std::vector<uint8_t> buf(n);
-    input_->seek(pos, Whence::BEG);
-    const size_t got = input_->read(buf);
-    if (got < n) {
+    if (!random_.read(pos, buf.data(), n)) {
       fatal_ = true;
-      buf.resize(got);
+      buf.clear();
     }
     return buf;
   }
 
-  void parseBoxes(int64_t start, int64_t end) {
+  void parseBoxes(size_t start, size_t end) {
     if (fatal_) return;
 
-    input_->seek(start, Whence::BEG);
+    size_t pos = start;
 
-    while (!fatal_ && input_->tell() + 8 <= end) {
+    while (!fatal_ && pos + 8 <= end) {
       uint8_t hdr[8];
-      if (input_->read(hdr) != 8) {
+      if (!random_.read(pos, hdr, 8)) {
         fatal_ = true;
         return;
       }
 
       const uint32_t raw_size = load_u32_be(hdr);
       const uint32_t type = load_u32(hdr + 4);
-      int64_t body_pos = input_->tell();
-      uint64_t body_size = 0;
+      size_t body_pos = pos + 8;
+      size_t body_size = 0;
 
       if (raw_size == 1) {
         // 64-bit extended size follows immediately after the 4-byte type.
         uint8_t large[8];
-        if (input_->read(large) != 8) {
+        if (!random_.read(body_pos, large, 8)) {
           fatal_ = true;
           return;
         }
         const uint64_t full_size = load_u64_be(large);
-        body_pos = input_->tell();
+        body_pos = pos + 16;
         body_size = (full_size >= 16) ? full_size - 16u : 0u;
       } else if (raw_size == 0) {
         // Box extends to the end of the enclosing container.
-        body_size = static_cast<uint64_t>(end - body_pos);
+        body_size = end - body_pos;
       } else if (raw_size < 8) {
         // Malformed: header claims size < minimum. Stop parsing this level.
         fatal_ = true;
@@ -1141,16 +1142,16 @@ private:
 
       // Guard against body_pos + body_size overflowing int64_t.
       const int64_t box_end =
-          (body_size <= static_cast<uint64_t>(end - body_pos))
-              ? (body_pos + static_cast<int64_t>(body_size))
+          (body_size <= end - body_pos)
+              ? (body_pos + body_size)
               : end;
 
-      handleBox(type, body_pos, static_cast<uint64_t>(box_end - body_pos));
-      input_->seek(box_end, Whence::BEG);
+      handleBox(type, body_pos, box_end - body_pos);
+      pos = box_end;
     }
   }
 
-  void handleBox(uint32_t type, int64_t pos, uint64_t size) {
+  void handleBox(uint32_t type, size_t pos, uint64_t size) {
     if (fatal_) return;
 
     switch (type) {
@@ -1256,7 +1257,7 @@ private:
     }
   }
 
-  void parseStsd(int64_t pos, uint64_t /*size*/) {
+  void parseStsd(size_t pos, uint64_t /*size*/) {
     if (fatal_) return;
 
     auto& track = *current_track_;
@@ -1266,65 +1267,62 @@ private:
                            track.timescale ? track.timescale : movie_timescale_)};
 
     // Skip FullBox header (version + flags = 4 bytes), then read entry count.
-    input_->seek(pos + 4, Whence::BEG);
     uint8_t count_buf[4];
-    if (input_->read(count_buf) != 4) {
+    if (!random_.read(pos + 4, count_buf, 4)) {
       fatal_ = true;
       return;
     }
     const uint32_t count = load_u32_be(count_buf);
 
+    int64_t entry_pos = pos + 8;
     for (uint32_t i = 0; i < count; ++i) {
       if (fatal_) return;
 
-      const int64_t entry_start = input_->tell();
       uint8_t entry_hdr[8];
-      if (input_->read(entry_hdr) != 8) {
+      if (!random_.read(entry_pos, entry_hdr, 8)) {
         fatal_ = true;
         return;
       }
 
       const uint32_t entry_size = load_u32_be(entry_hdr);
       const uint32_t fmt = load_u32(entry_hdr + 4);
-      const int64_t entry_end = entry_start + entry_size;
+      const int64_t entry_end = entry_pos + entry_size;
+      const int64_t entry_body = entry_pos + 8;
 
       if (fmt == ATOM('a', 'l', 'a', 'c')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_ALAC;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
         inside_alac_entry_ = true;
-        input_->seek(entry_start + 36, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 36, entry_end);
         inside_alac_entry_ = false;
 
       } else if (isMp4aVariant(fmt)) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_AAC;
-        input_->seek(entry_start + 16, Whence::BEG);
         uint8_t v_buf[2];
-        if (input_->read(v_buf) != 2) {
+        if (!random_.read(entry_pos + 16, v_buf, 2)) {
           fatal_ = true;
           return;
         }
         const uint16_t mp4a_version = static_cast<uint16_t>(
             (v_buf[0] << 8u) | v_buf[1]);
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
-          input_->seek(entry_end, Whence::BEG);
+        if (!seekAndParseAudioEntry(entry_body, st)) {
+          entry_pos = entry_end;
           continue;
         }
         const int64_t header_size = 36 + (mp4a_version == 1 ? 16 : 0) + (mp4a_version == 2 ? 36 : 0);
         inside_mp4a_entry_ = true;
-        input_->seek(entry_start + header_size, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + header_size, entry_end);
         inside_mp4a_entry_ = false;
 
       } else if (fmt == ATOM('a', 'c', '-', '3') || fmt == ATOM('e', 'c', '-', '3')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = (fmt == ATOM('a', 'c', '-', '3')) ? OM_CODEC_AC3 : OM_CODEC_EAC3;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
@@ -1332,26 +1330,24 @@ private:
       } else if (fmt == ATOM('f', 'l', 'a', 'c') || fmt == ATOM('f', 'L', 'a', 'C')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_FLAC;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 36, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 36, entry_end);
       } else if (fmt == ATOM('o', 'p', 'u', 's') || fmt == ATOM('O', 'p', 'u', 's')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_OPUS;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 36, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 36, entry_end);
 
       } else if (isPcmVariant(fmt)) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_PCM_U8;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
@@ -1359,47 +1355,43 @@ private:
       } else if (isAvcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_H264;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
-          input_->seek(entry_end, Whence::BEG);
+        if (!seekAndParseVideoEntry(entry_body, st)) {
+          entry_pos = entry_end;
           continue;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
 
       } else if (isHevcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_HEVC;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
 
       } else if (isVvcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_VVC;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
 
       } else if (fmt == ATOM('e', 'v', 'c', '1')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_EVC;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
 
       } else if (fmt == ATOM('v', 'p', '0', '8')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_VP8;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
@@ -1407,56 +1399,49 @@ private:
       } else if (fmt == ATOM('v', 'p', '0', '9')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_VP9;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
 
       } else if (fmt == ATOM('a', 'v', '0', '1')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_AV1;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
 
       } else if (fmt == ATOM('m', 'p', '4', 'v') || fmt == ATOM('M', 'P', '4', 'V')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_MPEG4;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 78, entry_end);
       }
 
-      input_->seek(entry_end, Whence::BEG);
+      entry_pos = entry_end;
     }
   }
 
-  auto seekAndParseAudioEntry(int64_t body_start, Track& track) const -> bool {
+  auto seekAndParseAudioEntry(int64_t body_start, Track& track) -> bool {
     // AudioSampleEntry layout (from body_start):
     //   6 bytes reserved + 2 bytes data_ref_index  → skip 8
     //   4 bytes reserved + 4 bytes reserved          → skip 8
     //   After those 16 bytes: channel_count (2), sample_size (2),
     //                          compression_id (2), packet_size (2)
     //                          sample_rate (4, 16.16 fixed-point)
-    input_->seek(body_start + 16, Whence::BEG);
-    uint8_t buf[8];
-    if (input_->read(buf) != 8) return false;
+    uint8_t buf[12];
+    if (!random_.read(body_start + 16, buf, 12)) return false;
 
     const uint16_t ch = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
     const uint16_t bits = (static_cast<uint16_t>(buf[2]) << 8) | buf[3];
+    const uint32_t sr_fp = load_u32_be(buf + 8);
 
-    uint8_t sr_buf[4];
-    if (input_->read(sr_buf) != 4) return false;
-
-    const uint32_t sr_fp = load_u32_be(sr_buf);
     if (ch) {
       track.format.audio.channels = ch;
     }
@@ -1469,16 +1454,15 @@ private:
     return true;
   }
 
-  auto seekAndParseVideoEntry(int64_t body_start, Track& track) const -> bool {
+  auto seekAndParseVideoEntry(int64_t body_start, Track& track) -> bool {
     // VisualSampleEntry layout from body_start:
     //   6 reserved + 2 data_ref_index + 16 pre_defined/reserved = 24 bytes
     //   Then: width (2), height (2)
-    input_->seek(body_start + 24, Whence::BEG);
     uint8_t vis[4];
-    if (input_->read(vis) != 4) return false;
+    if (!random_.read(body_start + 24, vis, 4)) return false;
 
-    track.format.video.width = (static_cast<uint16_t>(vis[0]) << 8) | vis[1];
-    track.format.video.height = (static_cast<uint16_t>(vis[2]) << 8) | vis[3];
+    track.format.video.width = load_u16_be(vis);
+    track.format.video.height = load_u16_be(vis + 2);
     track.format.video.color_space = OM_COLOR_SPACE_UNKNOWN;
     track.format.video.transfer_char = OM_TRANSFER_UNKNOWN;
     return true;

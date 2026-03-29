@@ -17,23 +17,24 @@
 namespace openmedia {
 
 class InputStreamMkvReader final : public mkvparser::IMkvReader {
-  InputStream* stream_;
+  std::unique_ptr<RandomRead> random_;
 
 public:
-  explicit InputStreamMkvReader(InputStream* stream)
-      : stream_(stream) {}
+  explicit InputStreamMkvReader(InputStream* stream) {
+    if (stream && stream->canSeek()) {
+      random_ = std::make_unique<RandomRead>(stream);
+    }
+  }
 
   auto Read(long long position, long length, unsigned char* buffer) -> int override {
-    if (!stream_ || position < 0 || length < 0) return -1;
-    if (!stream_->seek(static_cast<int64_t>(position), Whence::BEG)) return -1;
-
-    const size_t read = stream_->read(std::span<uint8_t>(buffer, static_cast<size_t>(length)));
-    return (read == static_cast<size_t>(length)) ? 0 : -1;
+    if (!random_ || position < 0 || length < 0) return -1;
+    if (!random_->read(position, buffer, static_cast<size_t>(length))) return -1;
+    return 0;
   }
 
   auto Length(long long* total, long long* available) -> int override {
-    if (!stream_) return -1;
-    const int64_t size = stream_->size();
+    if (!random_) return -1;
+    const int64_t size = random_->size();
     if (total) *total = size;
     if (available) *available = size;
     return (size >= 0) ? 0 : -1;

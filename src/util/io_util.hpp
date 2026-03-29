@@ -230,4 +230,60 @@ public:
   }
 };
 
+class RandomRead {
+private:
+  InputStream* input_ = nullptr;
+  std::vector<uint8_t> cache_;
+  size_t cache_pos_ = 0;
+  size_t cache_size_ = 0;
+  int64_t stream_size_ = 0;
+
+  static constexpr size_t DEFAULT_CACHE_SIZE = 8192;
+
+  void invalidateCache() {
+    cache_size_ = 0;
+  }
+
+  auto loadCache(size_t pos) -> bool {
+    if (!input_ || pos >= stream_size_) return false;
+    invalidateCache();
+    if (!input_->seek(pos, Whence::BEG)) return false;
+    cache_pos_ = pos;
+    const size_t to_read = std::min(DEFAULT_CACHE_SIZE, stream_size_ - pos);
+    const size_t n = input_->read(std::span<uint8_t>(cache_.data(), to_read));
+    cache_size_ = n;
+    return n > 0;
+  }
+
+  auto isInCache(size_t pos, size_t n) const -> bool {
+    return pos >= cache_pos_ && pos + n <= cache_pos_ + cache_size_;
+  }
+
+public:
+  explicit RandomRead(InputStream* input = nullptr) : input_(input) {
+    if (input_) {
+      stream_size_ = input_->size();
+      cache_.resize(DEFAULT_CACHE_SIZE);
+    }
+  }
+
+  auto ok() const -> bool { return input_ != nullptr; }
+
+  auto size() const -> size_t { return stream_size_; }
+
+  auto read(size_t pos, void* dst, size_t n) -> bool;
+
+  auto read(size_t pos, std::span<uint8_t> dst) -> bool {
+    return read(pos, dst.data(), dst.size());
+  }
+
+  auto readBuf(size_t pos, size_t size) -> std::vector<uint8_t> {
+    std::vector<uint8_t> buf(size);
+    if (!read(pos, buf.data(), size)) {
+      buf.clear();
+    }
+    return buf;
+  }
+};
+
 } // namespace openmedia
