@@ -47,7 +47,6 @@ private:
       pos += nalu_len_sz_;
 
       if (nalu_len == 0) continue;
-      if (nalu_len < 2) continue;
       if (pos + nalu_len > src.size()) break;
 
       out.insert(out.end(), std::begin(START_CODE_LONG), std::end(START_CODE_LONG));

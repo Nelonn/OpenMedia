@@ -546,95 +546,134 @@ inline auto parseVvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 2) return false;
 
+  fprintf(stderr, "vvcC body[%zu]: ", body.size());
+  for (size_t i = 0; i < std::min(body.size(), size_t{16}); ++i) {
+    fprintf(stderr, "%02x ", body[i]);
+  }
+  fprintf(stderr, "\n");
+
   BufReader r(body.data(), body.size());
 
-  r.skip(1);  // configurationVersion
+  // byte 0: configurationVersion (must be 1)
+  const uint8_t config_version = r.read_u8();
+  if (config_version != 1) {
+    return false;
+  }
 
-  const uint8_t flags         = r.read_u8();
-  const uint8_t nalu_len_sz   = ((flags >> 1) & 0x03u) + 1u;
-  const bool    ptl_present   = (flags & 0x10u) != 0;   // bit 4
+  // byte 1: lengthSizeMinusOne(2) | ptl_present_flag(1) | reserved(5)
+  // ISO 14496-15:2022 §11.2.4.2 VvcDecoderConfigurationRecord
+  const uint8_t flags       = r.read_u8();
+  const uint8_t nalu_len_sz = ((flags >> 5) & 0x03u) + 1u;  // bits [6:5]
+  const bool    ptl_present = (flags & 0x10u) != 0;          // bit 4
 
   if (ptl_present) {
-    // ols_idx(9) + num_sublayers(3) straddle bytes [2..3]
-    if (r.remaining() < 2) return false;
+    // bytes [2..3]:
+    //   ols_idx(9 bits) | num_sublayers(3 bits) | constant_frame_rate(2 bits)
+    //   | chroma_format_idc(2 bits)
+    // byte [4]: bit_depth_minus8(3) | reserved(5)
+    if (r.remaining() < 3) {
+      return false;
+    }
     const uint8_t b0 = r.read_u8();
     const uint8_t b1 = r.read_u8();
-    // b0[7..0] = ols_idx[8..1], b1[7] = ols_idx[0], b1[6..4] = num_sublayers
+    // b0 = ols_idx[8:1], b1[7] = ols_idx[0]
+    // b1[6:4] = num_sublayers, b1[3:2] = constant_frame_rate
+    // b1[1:0] = chroma_format_idc
     const uint8_t num_sublayers = (b1 >> 4) & 0x07u;
-    // constant_frame_rate(2) | chroma_format_idc(2) | bit_depth_minus8(3) | reserved(1)
-    if (r.remaining() < 1) return false;
-    r.skip(1);
+    r.skip(1);  // bit_depth_minus8(3) | reserved(5)
 
-    // profile_tier_level() — ISO 23090-3 §7.3.3
-    // general_profile_idc(7) | general_tier_flag(1)
-    if (r.remaining() < 1) return false;
-    const uint8_t ptl_b0    = r.read_u8();
+    // --- VvcPTL() — ISO 14496-15:2022 §11.2.4.3 ---
+
+    // byte: general_profile_idc(7) | general_tier_flag(1)
+    if (r.remaining() < 1) {
+      return false;
+    }
+    const uint8_t ptl_b0      = r.read_u8();
     const uint8_t profile_idc = ptl_b0 >> 1;   // bits [7:1]
     if (profile_idc) {
       track.track.format.profile = static_cast<OMProfile>(profile_idc);
     }
 
-    // general_level_idc(8)
-    if (r.remaining() < 1) return false;
+    // byte: general_level_idc(8)
+    if (r.remaining() < 1) {
+      return false;
+    }
     r.skip(1);
 
-    // ptl_frame_only_constraint_flag(1) | ptl_multi_layer_enabled_flag(1) |
-    // gci_present_flag(1) — packed in one byte with 5 padding bits
-    if (r.remaining() < 1) return false;
+    // byte: ptl_frame_only_constraint_flag(1) | ptl_multi_layer_enabled_flag(1)
+    //       | gci_present_flag(1) | reserved(5)
+    if (r.remaining() < 1) {
+      return false;
+    }
     const uint8_t constraint_byte = r.read_u8();
-    const bool gci_present = (constraint_byte >> 5) & 0x01u;
+    const bool    gci_present     = (constraint_byte >> 5) & 0x01u;  // bit 5
 
     if (gci_present) {
-      // 81 bits of GCI flags (ISO 23090-3 Table 3), byte-aligned afterward.
-      // 81 bits = 10 full bytes + 1 bit, padded to 11 bytes total.
-      if (r.remaining() < 11) return false;
-      r.skip(11);
+      // general_constraint_info() is exactly 12 bytes in the stored record
+      // (ISO 14496-15 §11.2 specifies the in-file form is byte-aligned to 12 B)
+      if (r.remaining() < 12) {
+        return false;
+      }
+      r.skip(12);
     }
 
-    // sublayer level present flags + byte-alignment padding
-    // For num_sublayers-1 flags, padded to next byte boundary.
+    // ptl_sublayer_level_present_flag[i] for i in [num_sublayers-2 .. 0]
+    // That is (num_sublayers - 1) flags, packed MSB-first then byte-padded.
     if (num_sublayers > 1) {
-      const uint8_t flag_bits = num_sublayers - 1u;
-      const uint8_t flag_bytes = (flag_bits + 7u) / 8u;
-      if (r.remaining() < flag_bytes) return false;
-      // Read flags to count how many sublayers have level_idc present
+      const uint32_t flag_count = num_sublayers - 1u;
+      const uint32_t flag_bytes = (flag_count + 7u) / 8u;
+      if (r.remaining() < flag_bytes) {
+        return false;
+      }
+
       uint8_t present_count = 0;
-      for (uint8_t fb = 0; fb < flag_bytes; ++fb) {
-        const uint8_t fbyte = r.read_u8();
-        const uint8_t bits_in_byte = (fb == flag_bytes - 1u)
-            ? flag_bits - fb * 8u
+      for (uint32_t fb = 0; fb < flag_bytes; ++fb) {
+        const uint8_t fbyte      = r.read_u8();
+        const uint32_t bits_used = (fb == flag_bytes - 1u)
+            ? flag_count - fb * 8u
             : 8u;
-        for (uint8_t bit = 0; bit < bits_in_byte; ++bit) {
+        for (uint32_t bit = 0; bit < bits_used; ++bit) {
           if ((fbyte >> (7u - bit)) & 0x01u) ++present_count;
         }
       }
-      // Each present sublayer has a level_idc byte
-      if (r.remaining() < present_count) return false;
+
+      // Each flagged sublayer has one level_idc byte
+      if (r.remaining() < present_count) {
+        return false;
+      }
       r.skip(present_count);
     }
 
-    // ptl_num_sub_profiles(8) + N×4 bytes
-    if (r.remaining() < 1) return false;
-    const uint8_t num_sub_profiles = r.read_u8();
-    const size_t  sub_profile_bytes = static_cast<size_t>(num_sub_profiles) * 4u;
-    if (r.remaining() < sub_profile_bytes) return false;
+    // ptl_num_sub_profiles(8) followed by N × 4-byte sub-profile IDCs
+    if (r.remaining() < 1) {
+      return false;
+    }
+    const uint8_t num_sub_profiles   = r.read_u8();
+    const size_t  sub_profile_bytes  = static_cast<size_t>(num_sub_profiles) * 4u;
+    if (r.remaining() < sub_profile_bytes) {
+      return false;
+    }
     r.skip(sub_profile_bytes);
   }
 
-  if (r.remaining() < 1) return false;
+  // num_of_arrays(8)
+  if (r.remaining() < 1) {
+    return false;
+  }
   const uint8_t num_arrays = r.read_u8();
 
   std::vector<uint8_t> annexb_extra;
 
   for (uint8_t i = 0; i < num_arrays; ++i) {
+    // array_completeness(1) | reserved(1) | nal_unit_type(6)
     if (r.remaining() < 3) break;
-
-    r.skip(1);   // array_completeness(1) | reserved(1) | nal_unit_type(6)
+    r.skip(1);
     const uint16_t num_nalus = r.read_u16_be();
 
     for (uint16_t j = 0; j < num_nalus; ++j) {
       if (r.remaining() < 2) break;
       const uint16_t nal_size = r.read_u16_be();
+      if (nal_size == 0) continue;
       if (r.remaining() < nal_size) break;
 
       annexb_extra.insert(annexb_extra.end(),
@@ -646,7 +685,9 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     }
   }
 
-  if (annexb_extra.empty()) return false;
+  if (annexb_extra.empty()) {
+    return false;
+  }
 
   track.track.extradata = annexb_extra;
   track.annexb_bsf = std::make_unique<AnnexBFilter>(
@@ -1389,7 +1430,7 @@ private:
           entry_pos = entry_end;
           continue;
         }
-        parseBoxes(entry_pos + 86, entry_end); // 8 (box hdr) + 78 (VisualSampleEntry fields)
+        parseBoxes(entry_pos + 86, entry_end); // 8 (box hdr) + 86 (VisualSampleEntry fields)
 
       } else if (isHevcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
@@ -1398,7 +1439,7 @@ private:
           fatal_ = true;
           return;
         }
-        parseBoxes(entry_pos + 78, entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (isVvcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
@@ -1407,7 +1448,7 @@ private:
           fatal_ = true;
           return;
         }
-        parseBoxes(entry_pos + 78, entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('e', 'v', 'c', '1')) {
         st.format.type = OM_MEDIA_VIDEO;
@@ -1416,7 +1457,7 @@ private:
           fatal_ = true;
           return;
         }
-        parseBoxes(entry_pos + 78, entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('v', 'p', '0', '8')) {
         st.format.type = OM_MEDIA_VIDEO;
@@ -1433,7 +1474,7 @@ private:
           fatal_ = true;
           return;
         }
-        parseBoxes(entry_pos + 78, entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('a', 'v', '0', '1')) {
         st.format.type = OM_MEDIA_VIDEO;
@@ -1442,7 +1483,7 @@ private:
           fatal_ = true;
           return;
         }
-        parseBoxes(entry_pos + 78, entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('m', 'p', '4', 'v') || fmt == ATOM('M', 'P', '4', 'V')) {
         st.format.type = OM_MEDIA_VIDEO;
@@ -1451,7 +1492,7 @@ private:
           fatal_ = true;
           return;
         }
-        parseBoxes(entry_pos + 78, entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
       }
 
       entry_pos = entry_end;
