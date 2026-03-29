@@ -33,7 +33,9 @@ private:
 
   auto reserveSize(size_t sample_size, bool is_keyframe) const -> size_t {
     size_t sz = sample_size + (sample_size / 4 + 1) * 4;
-    if (is_keyframe) sz += annexb_extra_.size();
+    if (is_keyframe) {
+      sz += annexb_extra_.size();
+    }
     return sz;
   }
 
@@ -48,14 +50,8 @@ private:
       if (nalu_len < 2) continue;
       if (pos + nalu_len > src.size()) break;
 
-      if (out.empty()) { // first NALU in packet
-        appendBytes(out, START_CODE_LONG);
-      } else {
-        appendBytes(out, START_CODE_LONG);
-        //appendBytes(out, START_CODE_SHORT);
-      }
-
-      appendBytes(out, src.subspan(pos, nalu_len));
+      out.insert(out.end(), std::begin(START_CODE_LONG), std::end(START_CODE_LONG));
+      out.insert(out.end(), src.begin() + pos, src.begin() + pos + nalu_len);
       pos += nalu_len;
     }
   }
