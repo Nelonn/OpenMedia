@@ -263,19 +263,8 @@ public:
     std::lock_guard<std::mutex> lock(seek_mutex_);
 
     auto& format_loader = LibAVFormat::getInstance();
-    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
-    // FFmpeg's av_seek_frame expects timestamp in AV_TIME_BASE units (microseconds).
-    int64_t av_timestamp;
-    if (stream_idx < 0) {
-      // timestamp is already in microseconds
-      av_timestamp = timestamp;
-    } else {
-      // timestamp is in track time base, convert to microseconds
-      // Use the first track's timebase as reference
-      const AVRational tb = fmt_ctx_->streams[0]->time_base;
-      av_timestamp = av_rescale_q(timestamp, tb, AV_TIME_BASE_Q);
-    }
-    int ret = format_loader.av_seek_frame(fmt_ctx_, -1, av_timestamp, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
+
+    int ret = format_loader.av_seek_frame(fmt_ctx_, stream_idx, timestamp, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
