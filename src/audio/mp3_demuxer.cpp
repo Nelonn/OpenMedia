@@ -160,16 +160,16 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
+  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
     if (tracks_.empty()) {
       return OM_COMMON_NOT_INITIALIZED;
     }
 
-    if (timestamp_ns < 0) {
+    if (timestamp_us < 0) {
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
-    if (timestamp_ns == 0) {
+    if (timestamp_us == 0) {
       pts_counter_ = 0;
       return input_->seek(0, Whence::BEG) ? OM_SUCCESS : OM_IO_SEEK_FAILED;
     }
@@ -186,7 +186,7 @@ public:
     // double gives 53-bit mantissa precision (~9×10¹⁵), which is exact
     // to within 1 sample for any file shorter than ~52 days at 48 kHz —
     // well beyond practical limits.
-    const double target_sample_d = static_cast<double>(timestamp_ns) * static_cast<double>(sample_rate) / 1.0e9;
+    const double target_sample_d = static_cast<double>(timestamp_us) * static_cast<double>(sample_rate) / 1.0e9;
     const int64_t target_sample = static_cast<int64_t>(target_sample_d);
 
     // Clamp to known duration.

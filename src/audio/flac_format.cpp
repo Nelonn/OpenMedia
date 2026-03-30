@@ -379,26 +379,22 @@ public:
   //   5. Call seekScanSync() to advance frame-by-frame until
   //      current_sample_pos_ reaches the frame that contains the target.
   // -----------------------------------------------------------------------
-  auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
+  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
     is_sequential_ = false;
 
-    // Convert nanoseconds → samples.
-    // Use __int128 to avoid overflow at high sample rates / long files.
+    // Convert nanoseconds -> samples.
     const uint64_t sr = stream_info_.sample_rate;
-    const uint64_t ts = static_cast<uint64_t>(timestamp_ns < 0 ? 0 : timestamp_ns);
-    const uint64_t hi = (ts >> 32) * sr;
-    const uint64_t lo = (ts & 0xFFFFFFFFULL) * sr;
-    const uint64_t combined = hi + (lo >> 32) + (((lo & 0xFFFFFFFFULL) + ((hi & 0xFFFFFFFFULL) << 32)) >> 32);
-    // Simpler, sufficient for practical file lengths (< ~2500 hours at 48kHz):
-    const int64_t target_sample = static_cast<int64_t>(
-        (hi / 1'000'000'000ULL) * 4'294'967'296ULL +
-        (((hi % 1'000'000'000ULL) * 4'294'967'296ULL + lo) / 1'000'000'000ULL));
+    const uint64_t ts = timestamp_us < 0 ? 0 : static_cast<uint64_t>(timestamp_us);
+    const uint64_t seconds = ts / 1'000'000;
+    const uint64_t micros = ts % 1'000'000;
+    const uint64_t samples_from_seconds = seconds * sr;
+    const uint64_t samples_from_micros = (micros * sr) / 1'000'000;
+    const int64_t target_sample = static_cast<int64_t>(samples_from_seconds + samples_from_micros);
 
     // Always discard buffered data — it belongs to the old position.
     read_buf_.clear();
     read_buf_origin_ = 0;
 
-    // ---- Rewind to start ---------------------------------------------------
     if (target_sample <= 0) {
       current_sample_pos_ = 0;
       current_frame_index_ = 0;

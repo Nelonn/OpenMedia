@@ -255,7 +255,7 @@ public:
     return Ok(std::move(om_packet));
   }
 
-  auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
+  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
     if (!initialized_ || !fmt_ctx_) {
       return OM_COMMON_NOT_INITIALIZED;
     }
@@ -263,13 +263,10 @@ public:
     std::lock_guard<std::mutex> lock(seek_mutex_);
 
     auto& format_loader = LibAVFormat::getInstance();
-    int ret = format_loader.av_seek_frame(fmt_ctx_, stream_index, timestamp_ns, AVSEEK_FLAG_BACKWARD);
+    int ret = format_loader.av_seek_frame(fmt_ctx_, -1, timestamp_us, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
-
-    // Flush codec buffers
-    // Note: This would require access to codec contexts
 
     return OM_SUCCESS;
   }

@@ -1130,26 +1130,76 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
-    if (stream_index < 0 ||
-        stream_index >= static_cast<int32_t>(tracks_.size()))
-      return OM_FORMAT_PARSE_FAILED;
-
-    const auto& st = tracks_[stream_index];
-    const int64_t den = st.time_base.den ? st.time_base.den : 1;
-    const int64_t num = st.time_base.num ? st.time_base.num : 1;
-    const int64_t ts_ticks = (timestamp_ns * den) / (num * INT64_C(1'000'000'000));
-
-    // Find the last keyframe whose dts <= ts_ticks on the requested stream.
-    size_t best = samples_.size();
-    for (size_t i = 0; i < samples_.size(); ++i) {
-      const auto& s = samples_[i];
-      if (s.stream_index != stream_index) continue;
-      if (s.dts > ts_ticks) break;
-      if (s.is_keyframe) best = i;
+  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+    if (tracks_.empty() || samples_.empty()) {
+      return OM_COMMON_NOT_INITIALIZED;
     }
 
-    if (best == samples_.size()) return OM_FORMAT_PARSE_FAILED;
+    if (timestamp_us < 0) {
+      return OM_COMMON_INVALID_ARGUMENT;
+    }
+
+    // Convert timestamp from microseconds to track timescale units.
+    // Use the first track's timebase as reference (typically the video track).
+    const auto& ref_track = bmff_tracks_[samples_[0].stream_index];
+    const int64_t timescale = ref_track.timescale ? ref_track.timescale : 1;
+    const int64_t target_ts = (timestamp_us * timescale) / INT64_C(1'000'000);
+
+    size_t best = samples_.size();
+    int64_t best_diff = INT64_MAX;
+
+    for (size_t i = 0; i < samples_.size(); ++i) {
+      const auto& s = samples_[i];
+      if (s.stream_index == 0) continue;
+      if (mode != SeekMode::DONT_SYNC && !s.is_keyframe) continue;
+
+      const int64_t diff = s.dts - target_ts;
+
+      switch (mode) {
+        case SeekMode::PREVIOUS_SYNC:
+          // Find the last keyframe with dts <= target_ts.
+          if (s.dts <= target_ts) {
+            best = i;
+          }
+          break;
+
+        case SeekMode::NEXT_SYNC:
+          // Find the first keyframe with dts >= target_ts.
+          if (s.dts >= target_ts) {
+            best = i;
+            if (best == samples_.size()) {
+              // If no suitable keyframe found, go to the end.
+              current_sample_index_ = samples_.size();
+              return OM_SUCCESS;
+            }
+            return OM_SUCCESS;
+          }
+          break;
+
+        case SeekMode::CLOSEST_SYNC:
+          // Find the keyframe closest to target_ts (before or after).
+          if (std::abs(diff) < std::abs(best_diff)) {
+            best = i;
+            best_diff = diff;
+          }
+          break;
+
+        case SeekMode::DONT_SYNC:
+          // Find the sample (not necessarily keyframe) closest to target_ts.
+          if (std::abs(diff) < std::abs(best_diff)) {
+            best = i;
+            best_diff = diff;
+          }
+          break;
+      }
+    }
+
+    if (best == samples_.size()) {
+      // If no suitable keyframe found, go to the end.
+      current_sample_index_ = samples_.size();
+      return OM_SUCCESS;
+    }
+
     current_sample_index_ = best;
     return OM_SUCCESS;
   }

@@ -60,8 +60,8 @@ public:
         }
     }
 
-    auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
-        if (timestamp_ns == 0) {
+    auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+        if (timestamp_us == 0) {
             input_->seek(0, Whence::BEG);
             ogg_sync_reset(&sync_);
             for (auto& pair : streams_state_) {
