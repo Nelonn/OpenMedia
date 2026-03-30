@@ -364,8 +364,8 @@ public:
   // -----------------------------------------------------------------------
   // seek()
   //
-  // timestamp_ns is in the stream's time_base units (samples), not
-  // nanoseconds — the name is inherited from the base class interface.
+  // When stream_idx < 0: timestamp is in microseconds (us)
+  // Otherwise: timestamp is in track time base units (samples for FLAC)
   //
   // Strategy:
   //   1. Convert the target timestamp to a sample number.
@@ -379,17 +379,25 @@ public:
   //   5. Call seekScanSync() to advance frame-by-frame until
   //      current_sample_pos_ reaches the frame that contains the target.
   // -----------------------------------------------------------------------
-  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     is_sequential_ = false;
 
-    // Convert nanoseconds -> samples.
+    // Convert timestamp to samples.
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's already in track time base (samples).
     const uint64_t sr = stream_info_.sample_rate;
-    const uint64_t ts = timestamp_us < 0 ? 0 : static_cast<uint64_t>(timestamp_us);
-    const uint64_t seconds = ts / 1'000'000;
-    const uint64_t micros = ts % 1'000'000;
-    const uint64_t samples_from_seconds = seconds * sr;
-    const uint64_t samples_from_micros = (micros * sr) / 1'000'000;
-    const int64_t target_sample = static_cast<int64_t>(samples_from_seconds + samples_from_micros);
+    int64_t target_sample;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds
+      const uint64_t ts = timestamp < 0 ? 0 : static_cast<uint64_t>(timestamp);
+      const uint64_t seconds = ts / 1'000'000;
+      const uint64_t micros = ts % 1'000'000;
+      const uint64_t samples_from_seconds = seconds * sr;
+      const uint64_t samples_from_micros = (micros * sr) / 1'000'000;
+      target_sample = static_cast<int64_t>(samples_from_seconds + samples_from_micros);
+    } else {
+      // timestamp is already in track time base (samples)
+      target_sample = timestamp;
+    }
 
     // Always discard buffered data — it belongs to the old position.
     read_buf_.clear();

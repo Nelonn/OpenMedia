@@ -185,7 +185,7 @@ public:
     }
   }
 
-  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (!segment_) return OM_FORMAT_PARSE_FAILED;
     if (track_map_.empty()) return OM_FORMAT_PARSE_FAILED;
 
@@ -195,6 +195,17 @@ public:
     long long target_track_num = track_map_.begin()->first;
 
     const mkvparser::Cues* cues = segment_->GetCues();
+
+    // Convert timestamp to nanoseconds for Matroska seek.
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
+    long long target_ns;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds, convert to nanoseconds
+      target_ns = timestamp * 1'000LL;
+    } else {
+      // timestamp is in track time base (timecode_scale units), convert to nanoseconds
+      target_ns = timestamp * timecode_scale_;
+    }
 
     if (cues) {
       while (!cues->DoneParsing()) {
@@ -206,8 +217,6 @@ public:
 
       const mkvparser::CuePoint* cue_point = nullptr;
       const mkvparser::CuePoint::TrackPosition* track_pos = nullptr;
-
-      const long long target_ns = timestamp_us * 1'000LL;
 
       if (cues->Find(target_ns, track, cue_point, track_pos) && track_pos) {
         const long long abs_pos =
@@ -223,9 +232,8 @@ public:
       next_cluster_pos_ = 0;
 
       while (current_cluster_ && !current_cluster_->EOS()) {
-        const long long cluster_us =
-            (current_cluster_->GetTimeCode() * timecode_scale_) / 1'000LL;
-        if (cluster_us >= timestamp_us) break;
+        const long long cluster_ns = current_cluster_->GetTimeCode() * timecode_scale_;
+        if (cluster_ns >= target_ns) break;
         current_cluster_ = segment_->GetNext(current_cluster_);
       }
     }

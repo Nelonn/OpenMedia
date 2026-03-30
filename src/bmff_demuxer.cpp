@@ -1155,20 +1155,27 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (tracks_.empty() || samples_.empty()) {
       return OM_COMMON_NOT_INITIALIZED;
     }
 
-    if (timestamp_us < 0) {
+    if (timestamp < 0) {
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
-    // Convert timestamp from microseconds to track timescale units.
-    // Use the first track's timebase as reference (typically the video track).
+    // Convert timestamp to track timescale units.
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
     const auto& ref_track = bmff_tracks_[samples_[0].stream_index];
     const int64_t timescale = ref_track.timescale ? ref_track.timescale : 1;
-    const int64_t target_ts = (timestamp_us * timescale) / INT64_C(1'000'000);
+    int64_t target_ts;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds
+      target_ts = (timestamp * timescale) / INT64_C(1'000'000);
+    } else {
+      // timestamp is already in track time base
+      target_ts = timestamp;
+    }
 
     size_t best = samples_.size();
     int64_t best_diff = INT64_MAX;

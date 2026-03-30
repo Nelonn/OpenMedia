@@ -255,7 +255,7 @@ public:
     return Ok(std::move(om_packet));
   }
 
-  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (!initialized_ || !fmt_ctx_) {
       return OM_COMMON_NOT_INITIALIZED;
     }
@@ -263,7 +263,19 @@ public:
     std::lock_guard<std::mutex> lock(seek_mutex_);
 
     auto& format_loader = LibAVFormat::getInstance();
-    int ret = format_loader.av_seek_frame(fmt_ctx_, -1, timestamp_us, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
+    // FFmpeg's av_seek_frame expects timestamp in AV_TIME_BASE units (microseconds).
+    int64_t av_timestamp;
+    if (stream_idx < 0) {
+      // timestamp is already in microseconds
+      av_timestamp = timestamp;
+    } else {
+      // timestamp is in track time base, convert to microseconds
+      // Use the first track's timebase as reference
+      const AVRational tb = fmt_ctx_->streams[0]->time_base;
+      av_timestamp = av_rescale_q(timestamp, tb, AV_TIME_BASE_Q);
+    }
+    int ret = format_loader.av_seek_frame(fmt_ctx_, -1, av_timestamp, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
     if (ret < 0) {
       return avErrorToOmError(ret);
     }

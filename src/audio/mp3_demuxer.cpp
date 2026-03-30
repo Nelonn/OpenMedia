@@ -160,16 +160,16 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_us, SeekMode mode) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (tracks_.empty()) {
       return OM_COMMON_NOT_INITIALIZED;
     }
 
-    if (timestamp_us < 0) {
+    if (timestamp < 0) {
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
-    if (timestamp_us == 0) {
+    if (timestamp == 0) {
       pts_counter_ = 0;
       return input_->seek(0, Whence::BEG) ? OM_SUCCESS : OM_IO_SEEK_FAILED;
     }
@@ -180,14 +180,18 @@ public:
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
-    // Convert ns → sample position without __int128.
-    // timestamp_ns * sample_rate can overflow int64 for long files at high
-    // sample rates (e.g. 192 kHz × ~2.7 h ≈ 1.9×10¹⁸ > INT64_MAX).
-    // double gives 53-bit mantissa precision (~9×10¹⁵), which is exact
-    // to within 1 sample for any file shorter than ~52 days at 48 kHz —
-    // well beyond practical limits.
-    const double target_sample_d = static_cast<double>(timestamp_us) * static_cast<double>(sample_rate) / 1.0e9;
-    const int64_t target_sample = static_cast<int64_t>(target_sample_d);
+    // Convert timestamp to sample position.
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
+    int64_t target_sample;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds
+      // double gives 53-bit mantissa precision, exact to within 1 sample for practical file lengths.
+      const double target_sample_d = static_cast<double>(timestamp) * static_cast<double>(sample_rate) / 1.0e6;
+      target_sample = static_cast<int64_t>(target_sample_d);
+    } else {
+      // timestamp is already in track time base (samples for MP3)
+      target_sample = timestamp;
+    }
 
     // Clamp to known duration.
     if (track.duration > 0 && target_sample >= track.duration) {

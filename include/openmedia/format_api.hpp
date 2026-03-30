@@ -27,7 +27,9 @@ public:
 
   virtual auto tracks() const -> const std::vector<Track>& = 0;
   virtual auto readPacket() -> Result<Packet, OMError> = 0;
-  virtual auto seek(int64_t timestamp_us, SeekMode mode = SeekMode::PREVIOUS_SYNC) -> OMError = 0;
+
+  // When stream_idx is < 0 then timestamp is in microseconds (us), otherwise timestamp is in track time base
+  virtual auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode = SeekMode::PREVIOUS_SYNC) -> OMError = 0;
 };
 
 class OPENMEDIA_ABI Muxer {
