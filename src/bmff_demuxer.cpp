@@ -965,20 +965,26 @@ inline void buildSampleTable(BMFFTrack& track) {
       track.stsc_entries.empty() ||
       track.stts_entries.empty()) return;
 
+  const size_t num_chunks = track.chunk_offsets.size();
+
+  std::vector<uint32_t> samples_per_chunk_table(num_chunks);
+  {
+    const auto& entries = track.stsc_entries;
+    for (size_t ei = 0; ei < entries.size(); ++ei) {
+      const uint32_t first = entries[ei].first_chunk - 1u; // 0-based
+      const uint32_t last  = (ei + 1 < entries.size())
+                                 ? entries[ei + 1].first_chunk - 1u
+                                 : static_cast<uint32_t>(num_chunks);
+      const uint32_t spc   = entries[ei].samples_per_chunk;
+      for (uint32_t ci = first; ci < last && ci < num_chunks; ++ci) {
+        samples_per_chunk_table[ci] = spc;
+      }
+    }
+  }
+
   track.samples.clear();
   track.samples.reserve(track.sample_sizes.size());
 
-  // Build a lookup from 1-based chunk index → samples_per_chunk.
-  // The stsc table is sparse; the last entry whose first_chunk <= ci applies.
-  auto samplesPerChunk = [&](uint32_t chunk_id) -> uint32_t {
-    // Search from the end for the last applicable entry.
-    for (auto it = track.stsc_entries.rbegin(); it != track.stsc_entries.rend(); ++it) {
-      if (chunk_id >= it->first_chunk) return it->samples_per_chunk;
-    }
-    return 0;
-  };
-
-  // RLE iterators for timing tables.
   auto stts_iter = detail::RleIterator(track.stts_entries,
                                        [](const STTSEntry& e) { return e.sample_delta; });
   auto ctts_iter = detail::RleIterator(track.ctts_entries,
@@ -989,9 +995,8 @@ inline void buildSampleTable(BMFFTrack& track) {
   size_t sample_idx = 0;
   int64_t current_dts = 0;
 
-  for (size_t ci = 0; ci < track.chunk_offsets.size(); ++ci) {
-    const uint32_t chunk_id = static_cast<uint32_t>(ci + 1u);
-    const uint32_t samples_in_chunk = samplesPerChunk(chunk_id);
+  for (size_t ci = 0; ci < num_chunks; ++ci) {
+    const uint32_t samples_in_chunk = samples_per_chunk_table[ci];
     if (samples_in_chunk == 0) continue;
 
     int64_t offset = track.chunk_offsets[ci];
@@ -1048,13 +1053,18 @@ public:
     random_ = RandomRead(input_.get());
 
     parseBoxes(0, input_->size());
-
     if (fatal_) return OM_FORMAT_END_OF_FILE;
 
     for (auto& t : bmff_tracks_) {
       applyEditList(t);
       buildSampleTable(t);
     }
+
+    size_t total_samples = 0;
+    for (const auto& t : bmff_tracks_) {
+      total_samples += t.samples.size();
+    }
+    samples_.reserve(total_samples);
 
     for (auto& t : bmff_tracks_) {
       if (t.track.format.type == OM_MEDIA_NONE) continue;
@@ -1068,26 +1078,41 @@ public:
 
       for (auto& s : t.samples) {
         s.stream_index = t.index;
-        samples_.push_back(s);
         min_pts = std::min(min_pts, s.pts);
-        max_pts_end = std::max(max_pts_end,
-                               s.pts + static_cast<int64_t>(s.duration));
+        max_pts_end = std::max(max_pts_end, s.pts + static_cast<int64_t>(s.duration));
       }
 
       t.track.start_time = min_pts;
-      t.track.duration = (max_pts_end > min_pts)
-                             ? (max_pts_end - min_pts)
-                             : t.track_duration;
-      t.track.nb_frames = static_cast<int64_t>(t.samples.size());
+      t.track.duration   = (max_pts_end > min_pts)
+                               ? (max_pts_end - min_pts)
+                               : t.track_duration;
+      t.track.nb_frames  = static_cast<int64_t>(t.samples.size());
       tracks_.push_back(t.track);
     }
 
-    if (samples_.empty() || tracks_.empty()) return OM_FORMAT_PARSE_FAILED;
+    if (tracks_.empty()) return OM_FORMAT_PARSE_FAILED;
 
-    std::sort(samples_.begin(), samples_.end(),
-              [](const Sample& a, const Sample& b) {
-                return a.offset < b.offset;
-              });
+    using Iter = std::vector<Sample>::iterator;
+    struct Run { Iter cur, end; };
+    std::vector<Run> runs;
+    runs.reserve(bmff_tracks_.size());
+    for (auto& t : bmff_tracks_) {
+      if (!t.samples.empty()) {
+        runs.push_back({t.samples.begin(), t.samples.end()});
+      }
+    }
+
+    while (!runs.empty()) {
+      auto best = runs.begin();
+      for (auto it = runs.begin() + 1; it != runs.end(); ++it) {
+        if (it->cur->offset < best->cur->offset) best = it;
+      }
+      samples_.push_back(*best->cur);
+      if (++best->cur == best->end)
+        runs.erase(best);
+    }
+
+    if (samples_.empty()) return OM_FORMAT_PARSE_FAILED;
 
     current_sample_index_ = 0;
     parsing_state_ = ParsingState::READY;
