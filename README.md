@@ -76,16 +76,18 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| API              | Status | Platform      | Description                                |
-|------------------|:------:|---------------|--------------------------------------------|
-| Vulkan Video     |   🔧   | Windows/Linux | Khronos standard for GPU-accelerated video |
-| VA-API           |   🔧   | Linux         | Video Acceleration API (Intel/AMD GPUs)    |
-| DirectX 11 Video |   🔧   | Windows       | D3D11 video decode/encode                  |
-| DirectX 12 Video |   🔧   | Windows       | D3D12 video decode/encode                  |
-| CUDA/NVDEC       |   🔧   | Windows/Linux | NVIDIA hardware decoding                   |
-| NVENC            |   🔧   | Windows/Linux | NVIDIA hardware encoding (NV Codec SDK)    |
-| AMF              |   🔧   | Windows/Linux | AMD Advanced Media Framework               |
-| MediaCodec       |   🔧   | Android       | Android hardware codec API                 |
+| API              | Status | Platform      | 
+|------------------|:------:|---------------|
+| VideoToolbox     |   🔧   | macOS         |
+| VA-API           |   🔧   | Linux         |
+| AMF              |   🔧   | Windows       |
+| Vulkan Video     |   🔧   | Windows/Linux |
+| DirectX 11 Video |   🔧   | Windows       |
+| DirectX 12 Video |   🔧   | Windows       |
+| CUDA/NVDEC       |   🔧   | Windows/Linux |
+| NVENC            |   🔧   | Windows/Linux |
+| Intel® Media SDK |   🔧   | Windows       |
+| MediaCodec       |   🔧   | Android       |
 
 ---
 
