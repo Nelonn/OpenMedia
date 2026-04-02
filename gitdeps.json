@@ -5,7 +5,7 @@
   },
   "third_party/external/dav1d": {
     "url": "https://github.com/Nelonn/dav1d",
-    "commit": "930cba9fa0d0f5f2dd3294376c690120262569b9"
+    "commit": "952d5b5db330928908e733d423675b335690c94e"
   },
   "third_party/external/flac": {
     "url": "https://github.com/Nelonn/flac",
