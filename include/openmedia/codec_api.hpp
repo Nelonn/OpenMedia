@@ -28,6 +28,7 @@ auto profileToString(OMCodecId codec, OMProfile profile) -> std::string_view;
 
 struct OPENMEDIA_ABI DecoderOptions {
   MediaFormat format;
+  Rational time_base = {};
   std::span<const uint8_t> extradata;
   LoggerRef logger;
   Dictionary extra;
@@ -183,9 +184,24 @@ enum CodecFlags : uint8_t {
   HARDWARE = 1 << 0,
 };
 
+struct OPENMEDIA_ABI AudioCodecCaps {
+  bool fmt_u8 : 1 = false;
+  bool fmt_s16 : 1 = false;
+  bool fmt_s32 : 1 = false;
+  bool fmt_f32 : 1 = false;
+  bool fmt_f64 : 1 = false;
+  std::vector<uint32_t> sample_rates = {};
+};
+
+struct OPENMEDIA_ABI VideoCodecCaps {
+  std::vector<OMPixelFormat> pix_fmts = {};
+};
+
 struct OPENMEDIA_ABI CodecCaps {
   std::vector<OMProfile> profiles = {};
   std::vector<int32_t> levels = {};
+  bool threading = false;
+  std::variant<AudioCodecCaps, VideoCodecCaps> media = {};
 };
 
 struct OPENMEDIA_ABI CodecDescriptor {

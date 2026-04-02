@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <annexb.hpp>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -313,6 +314,7 @@ struct BMFFTrack {
   int64_t start_dts = 0;
   int64_t track_duration = 0;
   Track track = {};
+  std::unique_ptr<AnnexBFilter> annexb_bsf;
 
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
@@ -432,11 +434,12 @@ inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 12) return;
   BufReader r(body.data(), body.size());
   r.skip(8);
-  if (const uint32_t avg = r.read_u32_be(); avg)
+  if (const uint32_t avg = r.read_u32_be(); avg) {
     track.track.bitrate = avg;
+  }
 }
 
-inline auto parseAvcc(std::span<const uint8_t> body,
+/*inline auto parseAvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 4) return false;
   BufReader r(body.data(), body.size());
@@ -451,28 +454,175 @@ inline auto parseAvcc(std::span<const uint8_t> body,
           : static_cast<OMProfile>(profile);
   track.track.extradata.assign(body.begin(), body.end());
   return true;
+}*/
+
+inline auto parseAvcc(std::span<const uint8_t> body,
+                      BMFFTrack& track) -> bool {
+  if (body.size() < 7) return false;
+  BufReader r(body.data(), body.size());
+
+  r.skip(4); // configurationVersion, profile, constraints, level
+
+  const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
+
+  std::vector<uint8_t> annexb_extra;
+  auto extract_nals = [&](uint8_t count) {
+    for (uint8_t i = 0; i < count; ++i) {
+      uint16_t nal_size = r.read_u16_be();
+      if (r.remaining() < nal_size) break;
+      annexb_extra.insert(annexb_extra.end(),
+                          AnnexBFilter::START_CODE_LONG,
+                          AnnexBFilter::START_CODE_LONG + 4);
+      const uint8_t* ptr = r.cur();
+      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
+      r.skip(nal_size);
+    }
+  };
+
+  uint8_t num_sps = r.read_u8() & 0x1Fu;
+  extract_nals(num_sps);
+  if (r.remaining() > 0) {
+    uint8_t num_pps = r.read_u8();
+    extract_nals(num_pps);
+  }
+
+  track.track.extradata = annexb_extra; // keep for callers that inspect it
+  track.annexb_bsf = std::make_unique<AnnexBFilter>(
+      nalu_len_sz, std::move(annexb_extra));
+  return true;
 }
 
-inline void parseHvcc(std::span<const uint8_t> body, BMFFTrack& track) {
-  if (body.size() < 2) return;
-  track.track.format.profile = static_cast<OMProfile>(body[1] & 0x1F);
-  track.track.extradata.assign(body.begin(), body.end());
+inline auto parseHvcc(std::span<const uint8_t> body,
+                      BMFFTrack& track) -> bool {
+  if (body.size() < 23) return false;
+
+  BufReader r(body.data(), body.size());
+
+  r.skip(21); // skip header up to lengthSizeMinusOne
+
+  const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
+  const uint8_t num_arrays = r.read_u8();
+
+  std::vector<uint8_t> annexb_extra;
+
+  for (uint8_t i = 0; i < num_arrays; ++i) {
+    if (r.remaining() < 3) break;
+
+    uint8_t nal_type = r.read_u8() & 0x3Fu;
+    (void) nal_type;
+
+    uint16_t num_nalus = r.read_u16_be();
+
+    for (uint16_t j = 0; j < num_nalus; ++j) {
+      if (r.remaining() < 2) break;
+
+      uint16_t nal_size = r.read_u16_be();
+      if (r.remaining() < nal_size) break;
+
+      annexb_extra.insert(annexb_extra.end(),
+                          AnnexBFilter::START_CODE_LONG,
+                          AnnexBFilter::START_CODE_LONG + 4);
+
+      const uint8_t* ptr = r.cur();
+      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
+
+      r.skip(nal_size);
+    }
+  }
+
+  track.track.extradata = annexb_extra;
+  track.annexb_bsf = std::make_unique<AnnexBFilter>(
+      nalu_len_sz, std::move(annexb_extra));
+
+  return true;
 }
 
-inline void parseVvcc(std::span<const uint8_t> body, BMFFTrack& track) {
-  if (body.size() < 2) return;
+inline auto parseVvcc(std::span<const uint8_t> body,
+                      BMFFTrack& track) -> bool {
+  if (body.size() < 8) return false;
 
-  const uint8_t flags_byte = body[1];
-  const uint8_t nalu_len_size = ((flags_byte >> 1) & 0x3u) + 1u;
-  const bool ptl_present = (flags_byte & 0x01u) != 0;
+  BufReader r(body.data(), body.size());
 
-  track.track.extradata.assign(body.begin(), body.end());
+  r.skip(1); // configurationVersion
 
-  (void) nalu_len_size;
+  const uint8_t flags = r.read_u8();
+  const uint8_t nalu_len_sz = ((flags >> 1) & 0x03u) + 1u;
+  const bool ptl_present = (flags & 0x01u) != 0;
 
   if (ptl_present) {
-    return;
+    if (r.remaining() < 2) return false;
+
+    uint8_t ci_byte = r.read_u8();
+    uint8_t num_bytes_constraint_info = ci_byte >> 2;
+    uint8_t num_sub_layers = r.read_u8() & 0x07u;
+
+    if (r.remaining() < 2) return false;
+    r.skip(2);
+
+    if (r.remaining() < num_bytes_constraint_info) return false;
+    r.skip(num_bytes_constraint_info);
+
+    for (uint8_t i = 0; i < num_sub_layers; ++i) {
+      if (r.remaining() < 1) return false;
+      uint8_t sublayer_flags = r.read_u8();
+
+      if (sublayer_flags & 0x80u) { // profile_present_flag
+        if (r.remaining() < 2) return false;
+        r.skip(2);
+
+        if (r.remaining() < num_bytes_constraint_info) return false;
+        r.skip(num_bytes_constraint_info);
+      }
+
+      if (sublayer_flags & 0x40u) { // level_present_flag
+        if (r.remaining() < 1) return false;
+        r.skip(1);
+      }
+    }
   }
+
+  if (r.remaining() < 1) {
+    return false;
+  }
+  uint8_t num_arrays = r.read_u8();
+
+  std::vector<uint8_t> annexb_extra;
+
+  for (uint8_t i = 0; i < num_arrays; ++i) {
+    if (r.remaining() < 3) break;
+
+    uint8_t nal_unit_type = r.read_u8() & 0x3Fu;
+    uint16_t num_nalus = r.read_u16_be();
+
+    for (uint16_t j = 0; j < num_nalus; ++j) {
+      if (r.remaining() < 2) break;
+
+      uint16_t nal_size = r.read_u16_be();
+      if (r.remaining() < nal_size) break;
+
+      annexb_extra.insert(annexb_extra.end(),
+                          AnnexBFilter::START_CODE_LONG,
+                          AnnexBFilter::START_CODE_LONG + 4);
+
+      const uint8_t* ptr = r.cur();
+      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
+
+      r.skip(nal_size);
+    }
+  }
+
+  fprintf(stderr, "num_arrays=%u, annexb_extra.size()=%zu, remaining=%zu\n",
+       num_arrays, annexb_extra.size(), r.remaining());
+
+  if (annexb_extra.empty()) {
+    return false;
+  }
+
+  track.track.extradata = annexb_extra;
+  track.annexb_bsf = std::make_unique<AnnexBFilter>(
+      nalu_len_sz, std::move(annexb_extra));
+
+  return true;
 }
 
 inline void parseEvcc(std::span<const uint8_t> body, BMFFTrack& track) {
@@ -876,15 +1026,25 @@ public:
       return Err(OM_FORMAT_END_OF_FILE);
 
     const auto& sample = samples_[current_sample_index_];
-    Packet pkt;
-    pkt.allocate(sample.size);
+    const auto& bmff_track = bmff_tracks_[sample.stream_index];
 
+    std::vector<uint8_t> raw(sample.size);
     input_->seek(sample.offset, Whence::BEG);
-
-    const size_t n = input_->read(std::span<uint8_t>(pkt.bytes.data(), sample.size));
+    const size_t n = input_->read(raw);
     if (n < sample.size) return Err(OM_FORMAT_END_OF_FILE);
 
-    pkt.bytes = pkt.bytes.subspan(0, n);
+    std::vector<uint8_t> converted;
+    std::span<const uint8_t> payload(raw);
+
+    if (bmff_track.annexb_bsf) {
+      converted = bmff_track.annexb_bsf->convert(payload, sample.is_keyframe);
+      payload = converted;
+    }
+
+    Packet pkt;
+    pkt.allocate(payload.size());
+    memcpy(pkt.bytes.data(), payload.data(), payload.size());
+
     pkt.stream_index = sample.stream_index;
     pkt.pts = sample.pts;
     pkt.dts = sample.dts;
@@ -1060,7 +1220,8 @@ private:
       // Codec configuration boxes
       case ATOM('a', 'v', 'c', 'C'): parseAvcc(body, track); break;
       case ATOM('h', 'v', 'c', 'C'): parseHvcc(body, track); break;
-      case ATOM('V', 'v', 'c', 'C'): parseVvcc(body, track); break;
+      case ATOM('V', 'v', 'c', 'C'):
+      case ATOM('v', 'v', 'c', 'C'): parseVvcc(body, track); break;
       case ATOM('e', 'v', 'c', 'C'): parseEvcc(body, track); break;
       case ATOM('v', 'p', 'c', 'C'): parseVpcc(body, track); break;
       case ATOM('a', 'v', '1', 'C'): parseAv1c(body, track); break;

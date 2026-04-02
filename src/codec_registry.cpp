@@ -128,6 +128,20 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_XEVD);
 #endif
 
+#if defined(_WIN32)
+  //registry->registerCodec(&CODEC_WMF_VIDEO_H264);
+  //registry->registerCodec(&CODEC_WMF_VIDEO_H265);
+  //registry->registerCodec(&CODEC_WMF_VIDEO_AV1);
+#endif
+
+#if defined(OPENMEDIA_AVCODEC)
+  registry->registerCodec(&CODEC_FFMPEG_H264);
+  registry->registerCodec(&CODEC_FFMPEG_H265);
+  registry->registerCodec(&CODEC_FFMPEG_H266);
+  registry->registerCodec(&CODEC_FFMPEG_VP9);
+  registry->registerCodec(&CODEC_FFMPEG_AV1);
+#endif
+
   // Video - DirectX11 (Windows only)
   //registry->registerCodec(&CODEC_DX11_H264);
   //registry->registerCodec(&CODEC_DX11_H265);

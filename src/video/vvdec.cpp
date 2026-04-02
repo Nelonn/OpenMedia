@@ -51,7 +51,7 @@ static void vvdec_log_callback(void* opaque, int level, const char* format, va_l
 class VvdecDecoder final : public Decoder {
   std::unique_ptr<vvdecDecoder, VvdecDecoderDeleter> ctx_;
   std::unique_ptr<vvdecParams, VvdecParamsDeleter> params_;
-  std::unique_ptr<vvdecAccessUnit, VvdecAccessUnitDeleter> accessUnit_;
+  std::unique_ptr<vvdecAccessUnit, VvdecAccessUnitDeleter> access_unit_;
   LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
@@ -95,14 +95,14 @@ public:
     });
 
     // Allocate access unit for input
-    accessUnit_.reset(vvdec_accessUnit_alloc());
-    if (!accessUnit_) {
+    access_unit_.reset(vvdec_accessUnit_alloc());
+    if (!access_unit_) {
       return OM_CODEC_OPEN_FAILED;
     }
-    vvdec_accessUnit_default(accessUnit_.get());
+    vvdec_accessUnit_default(access_unit_.get());
 
     // Allocate payload buffer (1MB should be enough for most NAL units)
-    vvdec_accessUnit_alloc_payload(accessUnit_.get(), 1024 * 1024);
+    vvdec_accessUnit_alloc_payload(access_unit_.get(), 1024 * 1024);
 
     output_format_.width = options.format.video.width;
     output_format_.height = options.format.video.height;
@@ -125,21 +125,21 @@ public:
 
     if (!packet.bytes.empty()) {
       // Copy packet data to access unit payload
-      if (static_cast<size_t>(packet.bytes.size()) > static_cast<size_t>(accessUnit_->payloadSize)) {
+      if (static_cast<size_t>(packet.bytes.size()) > static_cast<size_t>(access_unit_->payloadSize)) {
         // Reallocate if needed
-        vvdec_accessUnit_alloc_payload(accessUnit_.get(), static_cast<int>(packet.bytes.size()));
+        vvdec_accessUnit_alloc_payload(access_unit_.get(), static_cast<int>(packet.bytes.size()));
       }
 
-      std::memcpy(accessUnit_->payload, packet.bytes.data(), packet.bytes.size());
-      accessUnit_->payloadUsedSize = static_cast<int>(packet.bytes.size());
-      accessUnit_->cts = static_cast<uint64_t>(packet.pts);
-      accessUnit_->dts = static_cast<uint64_t>(packet.dts);
-      accessUnit_->ctsValid = (packet.pts >= 0);
-      accessUnit_->dtsValid = (packet.dts >= 0);
+      memcpy(access_unit_->payload, packet.bytes.data(), packet.bytes.size());
+      access_unit_->payloadUsedSize = static_cast<int>(packet.bytes.size());
+      access_unit_->cts = static_cast<uint64_t>(packet.pts);
+      access_unit_->dts = static_cast<uint64_t>(packet.dts);
+      access_unit_->ctsValid = (packet.pts >= 0);
+      access_unit_->dtsValid = (packet.dts >= 0);
 
       // Decode and get frame
       vvdecFrame* frame = nullptr;
-      int res = vvdec_decode(ctx_.get(), accessUnit_.get(), &frame);
+      int res = vvdec_decode(ctx_.get(), access_unit_.get(), &frame);
       if (res == VVDEC_OK && frame != nullptr) {
         if (auto result = processFrame(frame)) {
           frames.push_back(std::move(*result));

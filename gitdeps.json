@@ -53,7 +53,7 @@
   "third_party/external/SDL": {
     "url": "https://github.com/libsdl-org/SDL",
     "commit": "225fb12ae13b70689bcb8c0b42bf061120fefcc4",
-    "option": ["omplayer"]
+    "option": ["examples"]
   },
   "third_party/external/tga": {
     "url": "https://github.com/Nelonn/tga",
@@ -61,7 +61,7 @@
   },
   "third_party/external/vorbis": {
     "url": "https://github.com/Nelonn/vorbis",
-    "commit": "9317964d4f863940b60ffcfb4e76120a6a6eefa2"
+    "commit": "0f10985d66b6c150e1900c9836be7d262439cea2"
   },
   "third_party/external/Vulkan-Headers": {
     "url": "https://github.com/KhronosGroup/Vulkan-Headers",
