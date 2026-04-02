@@ -8,7 +8,7 @@ on:
 
 jobs:
   test_builds:
-    name: ${{ matrix.os }} ( ${{ matrix.compiler }} )
+    name: ${{ matrix.os }} (${{ matrix.compiler }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
