@@ -16,24 +16,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu x86-64
           - { os: ubuntu-latest,     compiler: GCC }
           - { os: ubuntu-latest,     compiler: Clang }
 
-          # Ubuntu ARM64
           - { os: ubuntu-24.04-arm,  compiler: GCC }
           - { os: ubuntu-24.04-arm,  compiler: Clang }
 
-          # Windows x86-64
           - { os: windows-latest,    compiler: MSVC }
           - { os: windows-latest,    compiler: Clang }
           - { os: windows-latest,    compiler: MinGW }
 
-          # Windows ARM64
           - { os: windows-11-arm,    compiler: MSVC }
           - { os: windows-11-arm,    compiler: Clang }
 
-          # macOS (Apple Silicon)
           - { os: macos-latest,      compiler: Clang }
           - { os: macos-latest,      compiler: AppleClang }
     steps:
@@ -45,25 +40,22 @@ jobs:
         with:
           gitdeps_ver: 0.2.3
           gitdeps_args: -e omplayer
-      # deps
+
       - name: install deps
         if: ${{ runner.os == 'Linux' }}
         run: |
           sudo apt-get update 
           sudo apt-get install -y cmake build-essential ninja-build libsdl2-dev libavcodec-dev libavutil-dev libavformat-dev ffmpeg libpipewire-0.3-dev nasm libxtst-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxrender-dev
 
-      # ── Linux: Clang 21 ──────────────────────────────────────────────
-      - name: Install Clang 21 (Linux)
+      - name: Install Clang 22 (Linux)
         if: matrix.compiler == 'Clang' && runner.os == 'Linux'
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 21 all
-          echo "CC=clang-21"   >> $GITHUB_ENV
-          echo "CXX=clang++-21" >> $GITHUB_ENV
+          sudo ./llvm.sh 22 all
+          echo "CC=clang-22"   >> $GITHUB_ENV
+          echo "CXX=clang++-22" >> $GITHUB_ENV
 
-
-      # ── Linux: GCC ───────────────────────────────────────────────────
       - name: Install GCC (Linux)
         if: matrix.compiler == 'GCC' && runner.os == 'Linux'
         run: |
@@ -72,14 +64,12 @@ jobs:
           echo "CC=gcc"   >> $GITHUB_ENV
           echo "CXX=g++" >> $GITHUB_ENV
 
-      # ── macOS: AppleClang
       - name: Setup AppleClang (macOS)
         if: matrix.compiler == 'AppleClang' && runner.os == 'macOS'
         run: |
           echo "CC=/usr/bin/clang"   >> $GITHUB_ENV
           echo "CXX=/usr/bin/clang++" >> $GITHUB_ENV
 
-        # ── Clang: LLVM через Homebrew ──
       - name: Setup LLVM Clang
         if: matrix.compiler == 'Clang' && runner.os == 'macOS'
         run: |
@@ -88,12 +78,10 @@ jobs:
           echo "CC=${LLVM_PREFIX}/bin/clang"    >> $GITHUB_ENV
           echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
 
-      # ── Windows: MSVC
       - name: Setup MSVC (Windows)
         if: matrix.compiler == 'MSVC' && runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # ── Windows: MinGW (GCC-toolchain) ──────────────────────────────
       - name: Setup MinGW (Windows)
         if: matrix.compiler == 'MinGW' && runner.os == 'Windows'
         run: |
@@ -101,7 +89,6 @@ jobs:
           echo "CC=gcc"   >> $env:GITHUB_ENV
           echo "CXX=g++" >> $env:GITHUB_ENV
 
-      # ── Windows: Clang (LLVM-toolchain) ─────────────────────────────
       - name: Setup Clang (Windows)
         if: matrix.compiler == 'Clang' && runner.os == 'Windows'
         run: |
@@ -109,10 +96,8 @@ jobs:
           echo "CC=clang"   >> $env:GITHUB_ENV
           echo "CXX=clang++" >> $env:GITHUB_ENV
 
-      # cmake
-      - name: cmake build part ( ${{ matrix.os }} )
-        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLE_PLAYER=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_VORBIS=OFF -DOPENMEDIA_INSTALL=OFF
+      - name: cmake build part (${{ matrix.os }})
+        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLE_PLAYER=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF
 
-      # compile
       - name: try to compile
         run: cmake --build build --target omplayer
