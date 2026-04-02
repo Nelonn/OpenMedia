@@ -94,7 +94,12 @@ jobs:
           echo "CXX=clang++" >> $env:GITHUB_ENV
 
       - name: cmake build part (${{ matrix.os }})
+        if: matrix.compiler != 'MSVC'
         run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF
+
+      - name: cmake build part (${{ matrix.os }})
+        if: matrix.compiler == 'MSVC'
+        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
       - name: try to compile
         run: cmake --build build --target OpenMediaExample
