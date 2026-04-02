@@ -118,10 +118,14 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_ms, int32_t /*stream_index*/) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (!is_animated_) {
       next_frame_n_ = 1;
       return OM_SUCCESS;
+    }
+
+    if (stream_idx >= 0) {
+      timestamp *= 1000;
     }
 
     int target = 1;
@@ -129,11 +133,11 @@ public:
     for (int i = 1; i <= frame_count_; ++i) {
       WebPIterator it;
       if (!WebPDemuxGetFrame(demuxer_, i, &it)) break;
-      if (t > timestamp_ms) {
+      if (t > timestamp) {
         WebPDemuxReleaseIterator(&it);
         break;
       }
-      t += it.duration;
+      t += it.duration * 1000;
       target = i;
       WebPDemuxReleaseIterator(&it);
     }

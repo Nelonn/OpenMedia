@@ -52,6 +52,7 @@ target_sources(OpenMedia PRIVATE
         src/util/cpp.hpp
         src/util/demuxer_base.hpp
         src/util/dynamic_loader.hpp
+        src/util/io_util.cpp
         src/util/io_util.hpp
         src/audio/pcm.cpp
         src/bmff_demuxer.cpp

@@ -17,23 +17,24 @@
 namespace openmedia {
 
 class InputStreamMkvReader final : public mkvparser::IMkvReader {
-  InputStream* stream_;
+  std::unique_ptr<RandomRead> random_;
 
 public:
-  explicit InputStreamMkvReader(InputStream* stream)
-      : stream_(stream) {}
+  explicit InputStreamMkvReader(InputStream* stream) {
+    if (stream && stream->canSeek()) {
+      random_ = std::make_unique<RandomRead>(stream);
+    }
+  }
 
   auto Read(long long position, long length, unsigned char* buffer) -> int override {
-    if (!stream_ || position < 0 || length < 0) return -1;
-    if (!stream_->seek(static_cast<int64_t>(position), Whence::BEG)) return -1;
-
-    const size_t read = stream_->read(std::span<uint8_t>(buffer, static_cast<size_t>(length)));
-    return (read == static_cast<size_t>(length)) ? 0 : -1;
+    if (!random_ || position < 0 || length < 0) return -1;
+    if (!random_->read(position, buffer, static_cast<size_t>(length))) return -1;
+    return 0;
   }
 
   auto Length(long long* total, long long* available) -> int override {
-    if (!stream_) return -1;
-    const int64_t size = stream_->size();
+    if (!random_) return -1;
+    const int64_t size = random_->size();
     if (total) *total = size;
     if (available) *available = size;
     return (size >= 0) ? 0 : -1;
@@ -184,35 +185,38 @@ public:
     }
   }
 
-  auto seek(int64_t timestamp_ms, int32_t stream_index) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (!segment_) return OM_FORMAT_PARSE_FAILED;
+    if (track_map_.empty()) return OM_FORMAT_PARSE_FAILED;
 
     current_block_ = nullptr;
     current_frame_index_ = 0;
 
-    long long target_track_num = -1;
-    for (const auto& [tnum, sidx] : track_map_) {
-      if (sidx == stream_index) {
-        target_track_num = tnum;
-        break;
-      }
-    }
+    long long target_track_num = track_map_.begin()->first;
 
     const mkvparser::Cues* cues = segment_->GetCues();
 
-    if (cues && target_track_num > 0) {
+    // Convert timestamp to nanoseconds for Matroska seek.
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
+    long long target_ns;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds, convert to nanoseconds
+      target_ns = timestamp * 1'000LL;
+    } else {
+      // timestamp is in track time base (timecode_scale units), convert to nanoseconds
+      target_ns = timestamp * timecode_scale_;
+    }
+
+    if (cues) {
       while (!cues->DoneParsing()) {
         cues->LoadCuePoint();
       }
 
       const mkvparser::Tracks* tracks = segment_->GetTracks();
-      const mkvparser::Track* track =
-          tracks->GetTrackByNumber(static_cast<unsigned long>(target_track_num));
+      const mkvparser::Track* track = tracks->GetTrackByNumber(target_track_num);
 
       const mkvparser::CuePoint* cue_point = nullptr;
       const mkvparser::CuePoint::TrackPosition* track_pos = nullptr;
-
-      const long long target_ns = timestamp_ms * 1'000'000LL;
 
       if (cues->Find(target_ns, track, cue_point, track_pos) && track_pos) {
         const long long abs_pos =
@@ -228,12 +232,8 @@ public:
       next_cluster_pos_ = 0;
 
       while (current_cluster_ && !current_cluster_->EOS()) {
-        // Convert cluster timecode units to ms for comparison.
-        // cluster timecode * timecode_scale_ gives nanoseconds; divide by 1_000_000 for ms.
-        const long long cluster_ms =
-            (current_cluster_->GetTimeCode() * timecode_scale_) / 1'000'000LL;
-        if (cluster_ms >= timestamp_ms)
-          break;
+        const long long cluster_ns = current_cluster_->GetTimeCode() * timecode_scale_;
+        if (cluster_ns >= target_ns) break;
         current_cluster_ = segment_->GetNext(current_cluster_);
       }
     }

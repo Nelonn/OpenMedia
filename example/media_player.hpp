@@ -713,15 +713,19 @@ private:
         video_frame_queue_.reset();
 
         // 4. Seek the demuxer.
-        const int32_t ref = (audio_stream_index_ >= 0)
-                              ? audio_stream_index_
-                              : video_stream_index_;
         const double target_secs = static_cast<double>(progress) * total_duration_secs_;
         
-        const int64_t target_ns = static_cast<int64_t>(target_secs * 1e9);
+        const int64_t target_us = static_cast<int64_t>(target_secs * 1e9) / 1000;
 
-        if (demuxer_->seek(target_ns, ref) == OM_SUCCESS)
+        if (demuxer_->seek(-1, target_us) == OM_SUCCESS)
             clock_.reset(target_secs);
+
+        if (audio_decoder_thread_.joinable()) {
+          audio_decoder_thread_.join();
+        }
+        if (video_decoder_thread_.joinable()) {
+          video_decoder_thread_.join();
+        }
 
         // 5. Re-launch decoder threads (they had exited after abort).
         if (has_audio_)

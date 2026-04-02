@@ -439,29 +439,21 @@ inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
   }
 }
 
-/*inline auto parseAvcc(std::span<const uint8_t> body,
-                      BMFFTrack& track) -> bool {
-  if (body.size() < 4) return false;
-  BufReader r(body.data(), body.size());
-  r.skip(1); // configurationVersion
-  const uint8_t profile = r.read_u8();
-  const uint8_t constraints = r.read_u8();
-  if (!r.ok()) return false;
-
-  track.track.format.profile =
-      (profile == 66 && (constraints & 0x40))
-          ? OM_PROFILE_H264_CONSTRAINED_BASELINE
-          : static_cast<OMProfile>(profile);
-  track.track.extradata.assign(body.begin(), body.end());
-  return true;
-}*/
-
 inline auto parseAvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 7) return false;
   BufReader r(body.data(), body.size());
 
-  r.skip(4); // configurationVersion, profile, constraints, level
+  r.skip(1); // configurationVersion
+  const uint8_t profile_idc = r.read_u8(); // AVCProfileIndication
+  const uint8_t profile_compat = r.read_u8(); // profile_compatibility
+  r.skip(1); // AVCLevelIndication
+
+  if (profile_idc == 66 && (profile_compat & 0x40u)) {
+    track.track.format.profile = OM_PROFILE_H264_CONSTRAINED_BASELINE;
+  } else {
+    track.track.format.profile = static_cast<OMProfile>(profile_idc);
+  }
 
   const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
 
@@ -486,9 +478,10 @@ inline auto parseAvcc(std::span<const uint8_t> body,
     extract_nals(num_pps);
   }
 
-  track.track.extradata = annexb_extra; // keep for callers that inspect it
+  track.track.extradata = annexb_extra;
   track.annexb_bsf = std::make_unique<AnnexBFilter>(
       nalu_len_sz, std::move(annexb_extra));
+
   return true;
 }
 
@@ -498,37 +491,49 @@ inline auto parseHvcc(std::span<const uint8_t> body,
 
   BufReader r(body.data(), body.size());
 
-  r.skip(21); // skip header up to lengthSizeMinusOne
+  r.skip(1); // configurationVersion
+  const uint8_t ptl_byte = r.read_u8();
+  const uint8_t profile_idc = ptl_byte & 0x1Fu; // general_profile_idc
+  r.skip(4); // general_profile_compatibility_flags
+  r.skip(6); // general_constraint_indicator_flags (48 bit)
+  r.skip(1); // general_level_idc
+  r.skip(2); // min_spatial_segmentation_idc
+  r.skip(1); // parallelismType
+  r.skip(1); // chromaFormat
+  r.skip(1); // bitDepthLumaMinus8
+  r.skip(1); // bitDepthChromaMinus8
+  r.skip(2); // avgFrameRate
 
   const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
   const uint8_t num_arrays = r.read_u8();
+
+  if (profile_idc) {
+    track.track.format.profile = static_cast<OMProfile>(profile_idc);
+  }
 
   std::vector<uint8_t> annexb_extra;
 
   for (uint8_t i = 0; i < num_arrays; ++i) {
     if (r.remaining() < 3) break;
 
-    uint8_t nal_type = r.read_u8() & 0x3Fu;
-    (void) nal_type;
-
-    uint16_t num_nalus = r.read_u16_be();
+    r.skip(1);
+    const uint16_t num_nalus = r.read_u16_be();
 
     for (uint16_t j = 0; j < num_nalus; ++j) {
       if (r.remaining() < 2) break;
-
-      uint16_t nal_size = r.read_u16_be();
+      const uint16_t nal_size = r.read_u16_be();
       if (r.remaining() < nal_size) break;
 
       annexb_extra.insert(annexb_extra.end(),
                           AnnexBFilter::START_CODE_LONG,
                           AnnexBFilter::START_CODE_LONG + 4);
-
       const uint8_t* ptr = r.cur();
       annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
-
       r.skip(nal_size);
     }
   }
+
+  if (annexb_extra.empty()) return false;
 
   track.track.extradata = annexb_extra;
   track.annexb_bsf = std::make_unique<AnnexBFilter>(
@@ -539,80 +544,146 @@ inline auto parseHvcc(std::span<const uint8_t> body,
 
 inline auto parseVvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
-  if (body.size() < 8) return false;
+  if (body.size() < 2) return false;
+
+  fprintf(stderr, "vvcC body[%zu]: ", body.size());
+  for (size_t i = 0; i < std::min(body.size(), size_t{16}); ++i) {
+    fprintf(stderr, "%02x ", body[i]);
+  }
+  fprintf(stderr, "\n");
 
   BufReader r(body.data(), body.size());
 
-  r.skip(1); // configurationVersion
-
-  const uint8_t flags = r.read_u8();
-  const uint8_t nalu_len_sz = ((flags >> 1) & 0x03u) + 1u;
-  const bool ptl_present = (flags & 0x01u) != 0;
-
-  if (ptl_present) {
-    if (r.remaining() < 2) return false;
-
-    uint8_t ci_byte = r.read_u8();
-    uint8_t num_bytes_constraint_info = ci_byte >> 2;
-    uint8_t num_sub_layers = r.read_u8() & 0x07u;
-
-    if (r.remaining() < 2) return false;
-    r.skip(2);
-
-    if (r.remaining() < num_bytes_constraint_info) return false;
-    r.skip(num_bytes_constraint_info);
-
-    for (uint8_t i = 0; i < num_sub_layers; ++i) {
-      if (r.remaining() < 1) return false;
-      uint8_t sublayer_flags = r.read_u8();
-
-      if (sublayer_flags & 0x80u) { // profile_present_flag
-        if (r.remaining() < 2) return false;
-        r.skip(2);
-
-        if (r.remaining() < num_bytes_constraint_info) return false;
-        r.skip(num_bytes_constraint_info);
-      }
-
-      if (sublayer_flags & 0x40u) { // level_present_flag
-        if (r.remaining() < 1) return false;
-        r.skip(1);
-      }
-    }
+  // byte 0: configurationVersion (must be 1)
+  const uint8_t config_version = r.read_u8();
+  if (config_version != 1) {
+    return false;
   }
 
+  // byte 1: lengthSizeMinusOne(2) | ptl_present_flag(1) | reserved(5)
+  // ISO 14496-15:2022 §11.2.4.2 VvcDecoderConfigurationRecord
+  const uint8_t flags       = r.read_u8();
+  const uint8_t nalu_len_sz = ((flags >> 5) & 0x03u) + 1u;  // bits [6:5]
+  const bool    ptl_present = (flags & 0x10u) != 0;          // bit 4
+
+  if (ptl_present) {
+    // bytes [2..3]:
+    //   ols_idx(9 bits) | num_sublayers(3 bits) | constant_frame_rate(2 bits)
+    //   | chroma_format_idc(2 bits)
+    // byte [4]: bit_depth_minus8(3) | reserved(5)
+    if (r.remaining() < 3) {
+      return false;
+    }
+    const uint8_t b0 = r.read_u8();
+    const uint8_t b1 = r.read_u8();
+    // b0 = ols_idx[8:1], b1[7] = ols_idx[0]
+    // b1[6:4] = num_sublayers, b1[3:2] = constant_frame_rate
+    // b1[1:0] = chroma_format_idc
+    const uint8_t num_sublayers = (b1 >> 4) & 0x07u;
+    r.skip(1);  // bit_depth_minus8(3) | reserved(5)
+
+    // --- VvcPTL() — ISO 14496-15:2022 §11.2.4.3 ---
+
+    // byte: general_profile_idc(7) | general_tier_flag(1)
+    if (r.remaining() < 1) {
+      return false;
+    }
+    const uint8_t ptl_b0      = r.read_u8();
+    const uint8_t profile_idc = ptl_b0 >> 1;   // bits [7:1]
+    if (profile_idc) {
+      track.track.format.profile = static_cast<OMProfile>(profile_idc);
+    }
+
+    // byte: general_level_idc(8)
+    if (r.remaining() < 1) {
+      return false;
+    }
+    r.skip(1);
+
+    // byte: ptl_frame_only_constraint_flag(1) | ptl_multi_layer_enabled_flag(1)
+    //       | gci_present_flag(1) | reserved(5)
+    if (r.remaining() < 1) {
+      return false;
+    }
+    const uint8_t constraint_byte = r.read_u8();
+    const bool    gci_present     = (constraint_byte >> 5) & 0x01u;  // bit 5
+
+    if (gci_present) {
+      // general_constraint_info() is exactly 12 bytes in the stored record
+      // (ISO 14496-15 §11.2 specifies the in-file form is byte-aligned to 12 B)
+      if (r.remaining() < 12) {
+        return false;
+      }
+      r.skip(12);
+    }
+
+    // ptl_sublayer_level_present_flag[i] for i in [num_sublayers-2 .. 0]
+    // That is (num_sublayers - 1) flags, packed MSB-first then byte-padded.
+    if (num_sublayers > 1) {
+      const uint32_t flag_count = num_sublayers - 1u;
+      const uint32_t flag_bytes = (flag_count + 7u) / 8u;
+      if (r.remaining() < flag_bytes) {
+        return false;
+      }
+
+      uint8_t present_count = 0;
+      for (uint32_t fb = 0; fb < flag_bytes; ++fb) {
+        const uint8_t fbyte      = r.read_u8();
+        const uint32_t bits_used = (fb == flag_bytes - 1u)
+            ? flag_count - fb * 8u
+            : 8u;
+        for (uint32_t bit = 0; bit < bits_used; ++bit) {
+          if ((fbyte >> (7u - bit)) & 0x01u) ++present_count;
+        }
+      }
+
+      // Each flagged sublayer has one level_idc byte
+      if (r.remaining() < present_count) {
+        return false;
+      }
+      r.skip(present_count);
+    }
+
+    // ptl_num_sub_profiles(8) followed by N × 4-byte sub-profile IDCs
+    if (r.remaining() < 1) {
+      return false;
+    }
+    const uint8_t num_sub_profiles   = r.read_u8();
+    const size_t  sub_profile_bytes  = static_cast<size_t>(num_sub_profiles) * 4u;
+    if (r.remaining() < sub_profile_bytes) {
+      return false;
+    }
+    r.skip(sub_profile_bytes);
+  }
+
+  // num_of_arrays(8)
   if (r.remaining() < 1) {
     return false;
   }
-  uint8_t num_arrays = r.read_u8();
+  const uint8_t num_arrays = r.read_u8();
 
   std::vector<uint8_t> annexb_extra;
 
   for (uint8_t i = 0; i < num_arrays; ++i) {
+    // array_completeness(1) | reserved(1) | nal_unit_type(6)
     if (r.remaining() < 3) break;
-
-    uint8_t nal_unit_type = r.read_u8() & 0x3Fu;
-    uint16_t num_nalus = r.read_u16_be();
+    r.skip(1);
+    const uint16_t num_nalus = r.read_u16_be();
 
     for (uint16_t j = 0; j < num_nalus; ++j) {
       if (r.remaining() < 2) break;
-
-      uint16_t nal_size = r.read_u16_be();
+      const uint16_t nal_size = r.read_u16_be();
+      if (nal_size == 0) continue;
       if (r.remaining() < nal_size) break;
 
       annexb_extra.insert(annexb_extra.end(),
                           AnnexBFilter::START_CODE_LONG,
                           AnnexBFilter::START_CODE_LONG + 4);
-
       const uint8_t* ptr = r.cur();
       annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
-
       r.skip(nal_size);
     }
   }
-
-  fprintf(stderr, "num_arrays=%u, annexb_extra.size()=%zu, remaining=%zu\n",
-       num_arrays, annexb_extra.size(), r.remaining());
 
   if (annexb_extra.empty()) {
     return false;
@@ -894,20 +965,26 @@ inline void buildSampleTable(BMFFTrack& track) {
       track.stsc_entries.empty() ||
       track.stts_entries.empty()) return;
 
+  const size_t num_chunks = track.chunk_offsets.size();
+
+  std::vector<uint32_t> samples_per_chunk_table(num_chunks);
+  {
+    const auto& entries = track.stsc_entries;
+    for (size_t ei = 0; ei < entries.size(); ++ei) {
+      const uint32_t first = entries[ei].first_chunk - 1u; // 0-based
+      const uint32_t last  = (ei + 1 < entries.size())
+                                 ? entries[ei + 1].first_chunk - 1u
+                                 : static_cast<uint32_t>(num_chunks);
+      const uint32_t spc   = entries[ei].samples_per_chunk;
+      for (uint32_t ci = first; ci < last && ci < num_chunks; ++ci) {
+        samples_per_chunk_table[ci] = spc;
+      }
+    }
+  }
+
   track.samples.clear();
   track.samples.reserve(track.sample_sizes.size());
 
-  // Build a lookup from 1-based chunk index → samples_per_chunk.
-  // The stsc table is sparse; the last entry whose first_chunk <= ci applies.
-  auto samplesPerChunk = [&](uint32_t chunk_id) -> uint32_t {
-    // Search from the end for the last applicable entry.
-    for (auto it = track.stsc_entries.rbegin(); it != track.stsc_entries.rend(); ++it) {
-      if (chunk_id >= it->first_chunk) return it->samples_per_chunk;
-    }
-    return 0;
-  };
-
-  // RLE iterators for timing tables.
   auto stts_iter = detail::RleIterator(track.stts_entries,
                                        [](const STTSEntry& e) { return e.sample_delta; });
   auto ctts_iter = detail::RleIterator(track.ctts_entries,
@@ -918,9 +995,8 @@ inline void buildSampleTable(BMFFTrack& track) {
   size_t sample_idx = 0;
   int64_t current_dts = 0;
 
-  for (size_t ci = 0; ci < track.chunk_offsets.size(); ++ci) {
-    const uint32_t chunk_id = static_cast<uint32_t>(ci + 1u);
-    const uint32_t samples_in_chunk = samplesPerChunk(chunk_id);
+  for (size_t ci = 0; ci < num_chunks; ++ci) {
+    const uint32_t samples_in_chunk = samples_per_chunk_table[ci];
     if (samples_in_chunk == 0) continue;
 
     int64_t offset = track.chunk_offsets[ci];
@@ -964,6 +1040,8 @@ class BMFFDemuxer final : public BaseDemuxer {
   std::vector<Sample> samples_;
   size_t current_sample_index_ = 0;
 
+  RandomRead random_;
+
 public:
   BMFFDemuxer() = default;
 
@@ -972,14 +1050,21 @@ public:
     if (!input_ || !input_->isValid()) return OM_IO_INVALID_STREAM;
     if (!input_->canSeek()) return OM_IO_SEEK_REQUIRED;
 
-    parseBoxes(0, input_->size());
+    random_ = RandomRead(input_.get());
 
+    parseBoxes(0, input_->size());
     if (fatal_) return OM_FORMAT_END_OF_FILE;
 
     for (auto& t : bmff_tracks_) {
       applyEditList(t);
       buildSampleTable(t);
     }
+
+    size_t total_samples = 0;
+    for (const auto& t : bmff_tracks_) {
+      total_samples += t.samples.size();
+    }
+    samples_.reserve(total_samples);
 
     for (auto& t : bmff_tracks_) {
       if (t.track.format.type == OM_MEDIA_NONE) continue;
@@ -993,26 +1078,41 @@ public:
 
       for (auto& s : t.samples) {
         s.stream_index = t.index;
-        samples_.push_back(s);
         min_pts = std::min(min_pts, s.pts);
-        max_pts_end = std::max(max_pts_end,
-                               s.pts + static_cast<int64_t>(s.duration));
+        max_pts_end = std::max(max_pts_end, s.pts + static_cast<int64_t>(s.duration));
       }
 
       t.track.start_time = min_pts;
-      t.track.duration = (max_pts_end > min_pts)
-                             ? (max_pts_end - min_pts)
-                             : t.track_duration;
-      t.track.nb_frames = static_cast<int64_t>(t.samples.size());
+      t.track.duration   = (max_pts_end > min_pts)
+                               ? (max_pts_end - min_pts)
+                               : t.track_duration;
+      t.track.nb_frames  = static_cast<int64_t>(t.samples.size());
       tracks_.push_back(t.track);
     }
 
-    if (samples_.empty() || tracks_.empty()) return OM_FORMAT_PARSE_FAILED;
+    if (tracks_.empty()) return OM_FORMAT_PARSE_FAILED;
 
-    std::sort(samples_.begin(), samples_.end(),
-              [](const Sample& a, const Sample& b) {
-                return a.offset < b.offset;
-              });
+    using Iter = std::vector<Sample>::iterator;
+    struct Run { Iter cur, end; };
+    std::vector<Run> runs;
+    runs.reserve(bmff_tracks_.size());
+    for (auto& t : bmff_tracks_) {
+      if (!t.samples.empty()) {
+        runs.push_back({t.samples.begin(), t.samples.end()});
+      }
+    }
+
+    while (!runs.empty()) {
+      auto best = runs.begin();
+      for (auto it = runs.begin() + 1; it != runs.end(); ++it) {
+        if (it->cur->offset < best->cur->offset) best = it;
+      }
+      samples_.push_back(*best->cur);
+      if (++best->cur == best->end)
+        runs.erase(best);
+    }
+
+    if (samples_.empty()) return OM_FORMAT_PARSE_FAILED;
 
     current_sample_index_ = 0;
     parsing_state_ = ParsingState::READY;
@@ -1029,9 +1129,8 @@ public:
     const auto& bmff_track = bmff_tracks_[sample.stream_index];
 
     std::vector<uint8_t> raw(sample.size);
-    input_->seek(sample.offset, Whence::BEG);
-    const size_t n = input_->read(raw);
-    if (n < sample.size) return Err(OM_FORMAT_END_OF_FILE);
+    if (!random_.read(sample.offset, raw.data(), sample.size))
+      return Err(OM_FORMAT_END_OF_FILE);
 
     std::vector<uint8_t> converted;
     std::span<const uint8_t> payload(raw);
@@ -1056,26 +1155,83 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
-    if (stream_index < 0 ||
-        stream_index >= static_cast<int32_t>(tracks_.size()))
-      return OM_FORMAT_PARSE_FAILED;
-
-    const auto& st = tracks_[stream_index];
-    const int64_t den = st.time_base.den ? st.time_base.den : 1;
-    const int64_t num = st.time_base.num ? st.time_base.num : 1;
-    const int64_t ts_ticks = (timestamp_ns * den) / (num * INT64_C(1'000'000'000));
-
-    // Find the last keyframe whose dts <= ts_ticks on the requested stream.
-    size_t best = samples_.size();
-    for (size_t i = 0; i < samples_.size(); ++i) {
-      const auto& s = samples_[i];
-      if (s.stream_index != stream_index) continue;
-      if (s.dts > ts_ticks) break;
-      if (s.is_keyframe) best = i;
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
+    if (tracks_.empty() || samples_.empty()) {
+      return OM_COMMON_NOT_INITIALIZED;
     }
 
-    if (best == samples_.size()) return OM_FORMAT_PARSE_FAILED;
+    if (timestamp < 0) {
+      return OM_COMMON_INVALID_ARGUMENT;
+    }
+
+    // Convert timestamp to track timescale units.
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
+    const auto& ref_track = bmff_tracks_[samples_[0].stream_index];
+    const int64_t timescale = ref_track.timescale ? ref_track.timescale : 1;
+    int64_t target_ts;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds
+      target_ts = (timestamp * timescale) / INT64_C(1'000'000);
+    } else {
+      // timestamp is already in track time base
+      target_ts = timestamp;
+    }
+
+    size_t best = samples_.size();
+    int64_t best_diff = INT64_MAX;
+
+    for (size_t i = 0; i < samples_.size(); ++i) {
+      const auto& s = samples_[i];
+      if (s.stream_index == 0) continue;
+      if (mode != SeekMode::DONT_SYNC && !s.is_keyframe) continue;
+
+      const int64_t diff = s.dts - target_ts;
+
+      switch (mode) {
+        case SeekMode::PREVIOUS_SYNC:
+          // Find the last keyframe with dts <= target_ts.
+          if (s.dts <= target_ts) {
+            best = i;
+          }
+          break;
+
+        case SeekMode::NEXT_SYNC:
+          // Find the first keyframe with dts >= target_ts.
+          if (s.dts >= target_ts) {
+            best = i;
+            if (best == samples_.size()) {
+              // If no suitable keyframe found, go to the end.
+              current_sample_index_ = samples_.size();
+              return OM_SUCCESS;
+            }
+            return OM_SUCCESS;
+          }
+          break;
+
+        case SeekMode::CLOSEST_SYNC:
+          // Find the keyframe closest to target_ts (before or after).
+          if (std::abs(diff) < std::abs(best_diff)) {
+            best = i;
+            best_diff = diff;
+          }
+          break;
+
+        case SeekMode::DONT_SYNC:
+          // Find the sample (not necessarily keyframe) closest to target_ts.
+          if (std::abs(diff) < std::abs(best_diff)) {
+            best = i;
+            best_diff = diff;
+          }
+          break;
+      }
+    }
+
+    if (best == samples_.size()) {
+      // If no suitable keyframe found, go to the end.
+      current_sample_index_ = samples_.size();
+      return OM_SUCCESS;
+    }
+
     current_sample_index_ = best;
     return OM_SUCCESS;
   }
@@ -1090,47 +1246,45 @@ private:
 
   // Read exactly `n` bytes from the stream at position `pos`.
   // Sets fatal_ on a short-read and resizes the buffer to actual bytes read.
-  auto readBoxData(int64_t pos, uint64_t n) -> std::vector<uint8_t> {
+  auto readBoxData(size_t pos, size_t n) -> std::vector<uint8_t> {
     std::vector<uint8_t> buf(n);
-    input_->seek(pos, Whence::BEG);
-    const size_t got = input_->read(buf);
-    if (got < n) {
+    if (!random_.read(pos, buf.data(), n)) {
       fatal_ = true;
-      buf.resize(got);
+      buf.clear();
     }
     return buf;
   }
 
-  void parseBoxes(int64_t start, int64_t end) {
+  void parseBoxes(size_t start, size_t end) {
     if (fatal_) return;
 
-    input_->seek(start, Whence::BEG);
+    size_t pos = start;
 
-    while (!fatal_ && input_->tell() + 8 <= end) {
+    while (!fatal_ && pos + 8 <= end) {
       uint8_t hdr[8];
-      if (input_->read(hdr) != 8) {
+      if (!random_.read(pos, hdr, 8)) {
         fatal_ = true;
         return;
       }
 
       const uint32_t raw_size = load_u32_be(hdr);
       const uint32_t type = load_u32(hdr + 4);
-      int64_t body_pos = input_->tell();
-      uint64_t body_size = 0;
+      size_t body_pos = pos + 8;
+      size_t body_size = 0;
 
       if (raw_size == 1) {
         // 64-bit extended size follows immediately after the 4-byte type.
         uint8_t large[8];
-        if (input_->read(large) != 8) {
+        if (!random_.read(body_pos, large, 8)) {
           fatal_ = true;
           return;
         }
         const uint64_t full_size = load_u64_be(large);
-        body_pos = input_->tell();
+        body_pos = pos + 16;
         body_size = (full_size >= 16) ? full_size - 16u : 0u;
       } else if (raw_size == 0) {
         // Box extends to the end of the enclosing container.
-        body_size = static_cast<uint64_t>(end - body_pos);
+        body_size = end - body_pos;
       } else if (raw_size < 8) {
         // Malformed: header claims size < minimum. Stop parsing this level.
         fatal_ = true;
@@ -1141,16 +1295,16 @@ private:
 
       // Guard against body_pos + body_size overflowing int64_t.
       const int64_t box_end =
-          (body_size <= static_cast<uint64_t>(end - body_pos))
-              ? (body_pos + static_cast<int64_t>(body_size))
+          (body_size <= end - body_pos)
+              ? (body_pos + body_size)
               : end;
 
-      handleBox(type, body_pos, static_cast<uint64_t>(box_end - body_pos));
-      input_->seek(box_end, Whence::BEG);
+      handleBox(type, body_pos, box_end - body_pos);
+      pos = box_end;
     }
   }
 
-  void handleBox(uint32_t type, int64_t pos, uint64_t size) {
+  void handleBox(uint32_t type, size_t pos, uint64_t size) {
     if (fatal_) return;
 
     switch (type) {
@@ -1256,7 +1410,7 @@ private:
     }
   }
 
-  void parseStsd(int64_t pos, uint64_t /*size*/) {
+  void parseStsd(size_t pos, uint64_t /*size*/) {
     if (fatal_) return;
 
     auto& track = *current_track_;
@@ -1266,65 +1420,62 @@ private:
                            track.timescale ? track.timescale : movie_timescale_)};
 
     // Skip FullBox header (version + flags = 4 bytes), then read entry count.
-    input_->seek(pos + 4, Whence::BEG);
     uint8_t count_buf[4];
-    if (input_->read(count_buf) != 4) {
+    if (!random_.read(pos + 4, count_buf, 4)) {
       fatal_ = true;
       return;
     }
     const uint32_t count = load_u32_be(count_buf);
 
+    int64_t entry_pos = pos + 8;
     for (uint32_t i = 0; i < count; ++i) {
       if (fatal_) return;
 
-      const int64_t entry_start = input_->tell();
       uint8_t entry_hdr[8];
-      if (input_->read(entry_hdr) != 8) {
+      if (!random_.read(entry_pos, entry_hdr, 8)) {
         fatal_ = true;
         return;
       }
 
       const uint32_t entry_size = load_u32_be(entry_hdr);
       const uint32_t fmt = load_u32(entry_hdr + 4);
-      const int64_t entry_end = entry_start + entry_size;
+      const int64_t entry_end = entry_pos + entry_size;
+      const int64_t entry_body = entry_pos + 8;
 
       if (fmt == ATOM('a', 'l', 'a', 'c')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_ALAC;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
         inside_alac_entry_ = true;
-        input_->seek(entry_start + 36, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 36, entry_end);
         inside_alac_entry_ = false;
 
       } else if (isMp4aVariant(fmt)) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_AAC;
-        input_->seek(entry_start + 16, Whence::BEG);
         uint8_t v_buf[2];
-        if (input_->read(v_buf) != 2) {
+        if (!random_.read(entry_pos + 16, v_buf, 2)) {
           fatal_ = true;
           return;
         }
         const uint16_t mp4a_version = static_cast<uint16_t>(
             (v_buf[0] << 8u) | v_buf[1]);
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
-          input_->seek(entry_end, Whence::BEG);
+        if (!seekAndParseAudioEntry(entry_body, st)) {
+          entry_pos = entry_end;
           continue;
         }
         const int64_t header_size = 36 + (mp4a_version == 1 ? 16 : 0) + (mp4a_version == 2 ? 36 : 0);
         inside_mp4a_entry_ = true;
-        input_->seek(entry_start + header_size, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + header_size, entry_end);
         inside_mp4a_entry_ = false;
 
       } else if (fmt == ATOM('a', 'c', '-', '3') || fmt == ATOM('e', 'c', '-', '3')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = (fmt == ATOM('a', 'c', '-', '3')) ? OM_CODEC_AC3 : OM_CODEC_EAC3;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
@@ -1332,26 +1483,24 @@ private:
       } else if (fmt == ATOM('f', 'l', 'a', 'c') || fmt == ATOM('f', 'L', 'a', 'C')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_FLAC;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 36, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 36, entry_end);
       } else if (fmt == ATOM('o', 'p', 'u', 's') || fmt == ATOM('O', 'p', 'u', 's')) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_OPUS;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 36, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 36, entry_end);
 
       } else if (isPcmVariant(fmt)) {
         st.format.type = OM_MEDIA_AUDIO;
         st.format.codec_id = OM_CODEC_PCM_U8;
-        if (!seekAndParseAudioEntry(entry_start + 8, st)) {
+        if (!seekAndParseAudioEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
@@ -1359,47 +1508,43 @@ private:
       } else if (isAvcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_H264;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
-          input_->seek(entry_end, Whence::BEG);
+        if (!seekAndParseVideoEntry(entry_body, st)) {
+          entry_pos = entry_end;
           continue;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end); // 8 (box hdr) + 86 (VisualSampleEntry fields)
 
       } else if (isHevcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_HEVC;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (isVvcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_VVC;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('e', 'v', 'c', '1')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_EVC;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('v', 'p', '0', '8')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_VP8;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
@@ -1407,56 +1552,49 @@ private:
       } else if (fmt == ATOM('v', 'p', '0', '9')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_VP9;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('a', 'v', '0', '1')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_AV1;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
 
       } else if (fmt == ATOM('m', 'p', '4', 'v') || fmt == ATOM('M', 'P', '4', 'V')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_MPEG4;
-        if (!seekAndParseVideoEntry(entry_start + 8, st)) {
+        if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
         }
-        input_->seek(entry_start + 86, Whence::BEG);
-        parseBoxes(input_->tell(), entry_end);
+        parseBoxes(entry_pos + 86, entry_end);
       }
 
-      input_->seek(entry_end, Whence::BEG);
+      entry_pos = entry_end;
     }
   }
 
-  auto seekAndParseAudioEntry(int64_t body_start, Track& track) const -> bool {
+  auto seekAndParseAudioEntry(int64_t body_start, Track& track) -> bool {
     // AudioSampleEntry layout (from body_start):
     //   6 bytes reserved + 2 bytes data_ref_index  → skip 8
     //   4 bytes reserved + 4 bytes reserved          → skip 8
     //   After those 16 bytes: channel_count (2), sample_size (2),
     //                          compression_id (2), packet_size (2)
     //                          sample_rate (4, 16.16 fixed-point)
-    input_->seek(body_start + 16, Whence::BEG);
-    uint8_t buf[8];
-    if (input_->read(buf) != 8) return false;
+    uint8_t buf[12];
+    if (!random_.read(body_start + 16, buf, 12)) return false;
 
     const uint16_t ch = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
     const uint16_t bits = (static_cast<uint16_t>(buf[2]) << 8) | buf[3];
+    const uint32_t sr_fp = load_u32_be(buf + 8);
 
-    uint8_t sr_buf[4];
-    if (input_->read(sr_buf) != 4) return false;
-
-    const uint32_t sr_fp = load_u32_be(sr_buf);
     if (ch) {
       track.format.audio.channels = ch;
     }
@@ -1469,16 +1607,15 @@ private:
     return true;
   }
 
-  auto seekAndParseVideoEntry(int64_t body_start, Track& track) const -> bool {
+  auto seekAndParseVideoEntry(int64_t body_start, Track& track) -> bool {
     // VisualSampleEntry layout from body_start:
     //   6 reserved + 2 data_ref_index + 16 pre_defined/reserved = 24 bytes
     //   Then: width (2), height (2)
-    input_->seek(body_start + 24, Whence::BEG);
     uint8_t vis[4];
-    if (input_->read(vis) != 4) return false;
+    if (!random_.read(body_start + 24, vis, 4)) return false;
 
-    track.format.video.width = (static_cast<uint16_t>(vis[0]) << 8) | vis[1];
-    track.format.video.height = (static_cast<uint16_t>(vis[2]) << 8) | vis[3];
+    track.format.video.width = load_u16_be(vis);
+    track.format.video.height = load_u16_be(vis + 2);
     track.format.video.color_space = OM_COLOR_SPACE_UNKNOWN;
     track.format.video.transfer_char = OM_TRANSFER_UNKNOWN;
     return true;

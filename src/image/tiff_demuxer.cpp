@@ -176,7 +176,7 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t /*timestamp_ns*/, int32_t /*stream_index*/) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     return OM_SUCCESS; // Single image, no seeking needed
   }
 };

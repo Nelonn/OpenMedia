@@ -143,11 +143,22 @@ public:
     return Ok(std::move(pkt));
   }
 
-  auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError override {
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (tracks_.empty()) {
       return OM_COMMON_NOT_INITIALIZED;
     }
-    int64_t byte_offset = timestamp_ns * tracks_[0].format.audio.channels * (bits_per_sample_ / 8);
+    const auto& fmt = tracks_[0].format.audio;
+    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
+    int64_t frame_index;
+    if (stream_idx < 0) {
+      // timestamp is in microseconds
+      frame_index = (timestamp * fmt.sample_rate) / 1'000'000;
+    } else {
+      // timestamp is already in track time base (samples)
+      frame_index = timestamp;
+    }
+    int64_t block_align = fmt.channels * (bits_per_sample_ == 24 ? (32 / 8) : (bits_per_sample_ / 8));
+    int64_t byte_offset = frame_index * block_align;
     return input_->seek(data_offset_ + byte_offset, Whence::BEG) ? OM_SUCCESS : OM_IO_SEEK_FAILED;
   }
 };

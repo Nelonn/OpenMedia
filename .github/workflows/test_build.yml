@@ -1,4 +1,5 @@
-name: test_build.yml
+name: Test Build
+
 on:
   push:
   pull_request:
@@ -7,7 +8,7 @@ on:
 
 jobs:
   test_builds:
-    name: ${{ matrix.os }} ( ${{ matrix.compiler }} )
+    name: ${{ matrix.os }} (${{ matrix.compiler }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,17 +30,17 @@ jobs:
           - { os: macos-latest,      compiler: Clang }
           - { os: macos-latest,      compiler: AppleClang }
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: gitdeps part
+      - name: Run gitdeps
         uses: Nelonn/gitdeps@v0.2.3
         with:
           gitdeps_ver: 0.2.3
           gitdeps_args: -e examples
 
-      - name: install deps
-        if: ${{ runner.os == 'Linux' }}
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update 
           sudo apt-get install -y cmake build-essential ninja-build libsdl2-dev libavcodec-dev libavutil-dev libavformat-dev ffmpeg libpipewire-0.3-dev nasm libxtst-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxrender-dev
@@ -50,7 +51,7 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 22 all
-          echo "CC=clang-22"   >> $GITHUB_ENV
+          echo "CC=clang-22" >> $GITHUB_ENV
           echo "CXX=clang++-22" >> $GITHUB_ENV
 
       - name: Install GCC (Linux)
@@ -58,7 +59,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc g++
-          echo "CC=gcc"   >> $GITHUB_ENV
+          echo "CC=gcc" >> $GITHUB_ENV
           echo "CXX=g++" >> $GITHUB_ENV
 
       - name: Setup AppleClang (macOS)
@@ -67,12 +68,12 @@ jobs:
           echo "CC=/usr/bin/clang"   >> $GITHUB_ENV
           echo "CXX=/usr/bin/clang++" >> $GITHUB_ENV
 
-      - name: Setup LLVM Clang
+      - name: Setup Clang (macOS)
         if: matrix.compiler == 'Clang' && runner.os == 'macOS'
         run: |
           brew install llvm
           LLVM_PREFIX=$(brew --prefix llvm)
-          echo "CC=${LLVM_PREFIX}/bin/clang"    >> $GITHUB_ENV
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
           echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
 
       - name: Setup MSVC (Windows)
@@ -83,23 +84,19 @@ jobs:
         if: matrix.compiler == 'MinGW' && runner.os == 'Windows'
         run: |
           choco install mingw -y
-          echo "CC=gcc"   >> $env:GITHUB_ENV
+          echo "CC=gcc" >> $env:GITHUB_ENV
           echo "CXX=g++" >> $env:GITHUB_ENV
 
       - name: Setup Clang (Windows)
         if: matrix.compiler == 'Clang' && runner.os == 'Windows'
         run: |
           choco install llvm -y
-          echo "CC=clang"   >> $env:GITHUB_ENV
+          echo "CC=clang" >> $env:GITHUB_ENV
           echo "CXX=clang++" >> $env:GITHUB_ENV
 
-      - name: cmake build part (${{ matrix.os }})
-        if: runner.os != 'Windows'
-        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
-
-      - name: cmake build part (${{ matrix.os }})
+      - name: CMake Configure
         if: runner.os == 'Windows'
-        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DOPENMEDIA_INSTALL=OFF ${{ runner.os == 'Windows' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' || '' }}
 
-      - name: try to compile
+      - name: CMake Build
         run: cmake --build build --target OpenMediaExample

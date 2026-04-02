@@ -11,6 +11,13 @@
 
 namespace openmedia {
 
+enum class SeekMode : uint8_t {
+  PREVIOUS_SYNC = 0,
+  NEXT_SYNC = 1,
+  CLOSEST_SYNC = 2,
+  DONT_SYNC = 3,
+};
+
 class OPENMEDIA_ABI Demuxer {
 public:
   virtual ~Demuxer() = default;
@@ -20,7 +27,9 @@ public:
 
   virtual auto tracks() const -> const std::vector<Track>& = 0;
   virtual auto readPacket() -> Result<Packet, OMError> = 0;
-  virtual auto seek(int64_t timestamp_ns, int32_t stream_index) -> OMError = 0;
+
+  // When stream_idx is < 0 then timestamp is in microseconds (us), otherwise timestamp is in track time base
+  virtual auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode = SeekMode::PREVIOUS_SYNC) -> OMError = 0;
 };
 
 class OPENMEDIA_ABI Muxer {
