@@ -95,7 +95,6 @@ jobs:
           echo "CXX=clang++" >> $env:GITHUB_ENV
 
       - name: CMake Configure
-        if: runner.os == 'Windows'
         run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DOPENMEDIA_INSTALL=OFF ${{ runner.os == 'Windows' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' || '' }}
 
       - name: CMake Build
