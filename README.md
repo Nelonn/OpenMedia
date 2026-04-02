@@ -38,7 +38,6 @@ integration while maintaining a simple, intuitive API.
 | Opus    |    ✅     |    ✅     | libopus                 |
 | Vorbis  |    ✅     |    🔧    | libvorbis               |
 | MP3     |    ✅     |    🔧    | minimp3                 |
-| OGG     |    ✅     |    🔧    | libogg                  |
 | WAV/PCM |    ✅     |    🔧    | OpenMedia               |
 
 ### Video Codecs
