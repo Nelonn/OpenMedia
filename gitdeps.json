@@ -5,7 +5,7 @@
   },
   "third_party/external/dav1d": {
     "url": "https://github.com/Nelonn/dav1d",
-    "commit": "0a19138e22dd996260ba680a74c20db9ba0e529f"
+    "commit": "952d5b5db330928908e733d423675b335690c94e"
   },
   "third_party/external/flac": {
     "url": "https://github.com/Nelonn/flac",
@@ -61,7 +61,7 @@
   },
   "third_party/external/vorbis": {
     "url": "https://github.com/Nelonn/vorbis",
-    "commit": "0f10985d66b6c150e1900c9836be7d262439cea2"
+    "commit": "4ab2df62b9a755210a2ff561cbc143b72bcee3ec"
   },
   "third_party/external/Vulkan-Headers": {
     "url": "https://github.com/KhronosGroup/Vulkan-Headers",

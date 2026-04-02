@@ -1,4 +1,105 @@
 name: test_build.yml
 on:
+  push:
+  pull_request:
+    branches:
+      - main
 
 jobs:
+  test_builds:
+    name: ${{ matrix.os }} ( ${{ matrix.compiler }} )
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,     compiler: GCC }
+          - { os: ubuntu-latest,     compiler: Clang }
+
+          - { os: ubuntu-24.04-arm,  compiler: GCC }
+          - { os: ubuntu-24.04-arm,  compiler: Clang }
+
+          - { os: windows-latest,    compiler: MSVC }
+          - { os: windows-latest,    compiler: Clang }
+          - { os: windows-latest,    compiler: MinGW }
+
+          - { os: windows-11-arm,    compiler: MSVC }
+          - { os: windows-11-arm,    compiler: Clang }
+
+          - { os: macos-latest,      compiler: Clang }
+          - { os: macos-latest,      compiler: AppleClang }
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: gitdeps part
+        uses: Nelonn/gitdeps@v0.2.3
+        with:
+          gitdeps_ver: 0.2.3
+          gitdeps_args: -e examples
+
+      - name: install deps
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update 
+          sudo apt-get install -y cmake build-essential ninja-build libsdl2-dev libavcodec-dev libavutil-dev libavformat-dev ffmpeg libpipewire-0.3-dev nasm libxtst-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxrender-dev
+
+      - name: Install Clang 22 (Linux)
+        if: matrix.compiler == 'Clang' && runner.os == 'Linux'
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22 all
+          echo "CC=clang-22"   >> $GITHUB_ENV
+          echo "CXX=clang++-22" >> $GITHUB_ENV
+
+      - name: Install GCC (Linux)
+        if: matrix.compiler == 'GCC' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++
+          echo "CC=gcc"   >> $GITHUB_ENV
+          echo "CXX=g++" >> $GITHUB_ENV
+
+      - name: Setup AppleClang (macOS)
+        if: matrix.compiler == 'AppleClang' && runner.os == 'macOS'
+        run: |
+          echo "CC=/usr/bin/clang"   >> $GITHUB_ENV
+          echo "CXX=/usr/bin/clang++" >> $GITHUB_ENV
+
+      - name: Setup LLVM Clang
+        if: matrix.compiler == 'Clang' && runner.os == 'macOS'
+        run: |
+          brew install llvm
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "CC=${LLVM_PREFIX}/bin/clang"    >> $GITHUB_ENV
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
+
+      - name: Setup MSVC (Windows)
+        if: matrix.compiler == 'MSVC' && runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup MinGW (Windows)
+        if: matrix.compiler == 'MinGW' && runner.os == 'Windows'
+        run: |
+          choco install mingw -y
+          echo "CC=gcc"   >> $env:GITHUB_ENV
+          echo "CXX=g++" >> $env:GITHUB_ENV
+
+      - name: Setup Clang (Windows)
+        if: matrix.compiler == 'Clang' && runner.os == 'Windows'
+        run: |
+          choco install llvm -y
+          echo "CC=clang"   >> $env:GITHUB_ENV
+          echo "CXX=clang++" >> $env:GITHUB_ENV
+
+      - name: cmake build part (${{ matrix.os }})
+        if: runner.os != 'Windows'
+        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: cmake build part (${{ matrix.os }})
+        if: runner.os == 'Windows'
+        run: cmake -B build -GNinja -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DOPENMEDIA_INSTALL=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: try to compile
+        run: cmake --build build --target OpenMediaExample
