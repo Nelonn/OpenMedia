@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <openmedia/format_api.hpp>
+#include <openmedia/io.hpp>
 #include <formats.hpp>
 #include <vector>
 
@@ -22,6 +23,32 @@ public:
   }
 
   auto tracks() const -> const std::vector<Track>& override {
+    return tracks_;
+  }
+};
+
+class BaseMuxer : public Muxer {
+protected:
+  std::unique_ptr<OutputStream> output_;
+  std::vector<Track> tracks_;
+  bool opened_ = false;
+  bool finalized_ = false;
+
+public:
+  BaseMuxer() = default;
+  ~BaseMuxer() override = default;
+
+  void close() override {
+    if (opened_ && !finalized_) {
+      finalize();
+    }
+    output_.reset();
+    tracks_.clear();
+    opened_ = false;
+    finalized_ = false;
+  }
+
+  auto tracks() const -> const std::vector<Track>& {
     return tracks_;
   }
 };

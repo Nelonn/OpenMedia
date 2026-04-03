@@ -8,6 +8,7 @@
 #include <openmedia/packet.hpp>
 #include <openmedia/result.hpp>
 #include <openmedia/track.hpp>
+#include <openmedia/log.hpp>
 
 namespace openmedia {
 
@@ -35,6 +36,13 @@ public:
 class OPENMEDIA_ABI Muxer {
 public:
   virtual ~Muxer() = default;
+
+  virtual auto open(std::unique_ptr<OutputStream> output, LoggerRef logger = {}) -> OMError = 0;
+  virtual void close() = 0;
+
+  virtual auto addTrack(const Track& track) -> int32_t = 0;
+  virtual auto writePacket(const Packet& packet) -> OMError = 0;
+  virtual auto finalize() -> OMError = 0;
 };
 
 struct OPENMEDIA_ABI FormatDescriptor {

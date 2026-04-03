@@ -171,4 +171,84 @@ auto InputStream::createMemoryStream(std::span<const uint8_t> data) noexcept -> 
   return std::make_unique<MemoryInputStream>(data);
 }
 
+class FileOutputStream final : public OutputStream {
+private:
+  std::ofstream file_stream_;
+  bool is_open_;
+
+public:
+  explicit FileOutputStream(const std::string& filename)
+      : is_open_(false) {
+#if defined(_WIN32)
+    file_stream_.open(utf8_to_wstring(filename), std::ios::out | std::ios::binary | std::ios::trunc);
+#else
+    file_stream_.open(filename, std::ios::out | std::ios::binary | std::ios::trunc);
+#endif
+    if (file_stream_.is_open()) {
+      is_open_ = true;
+    }
+  }
+
+  ~FileOutputStream() override {
+    if (is_open_) {
+      file_stream_.close();
+    }
+  }
+
+  auto write(std::span<const uint8_t> data) -> size_t override {
+    if (!is_open_ || data.empty()) {
+      return 0;
+    }
+
+    file_stream_.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return file_stream_.good() ? data.size() : 0;
+  }
+
+  auto tell() const -> int64_t override {
+    if (!is_open_) return -1;
+    return static_cast<int64_t>(const_cast<std::ofstream&>(file_stream_).tellp());
+  }
+
+  auto isValid() const -> bool override {
+    return is_open_ && file_stream_.good();
+  }
+
+  auto canSeek() const -> bool override {
+    return true;
+  }
+
+  auto seek(int64_t pos, Whence whence) -> bool override {
+    if (!is_open_) return false;
+
+    std::ios_base::seekdir dir;
+    switch (whence) {
+      case Whence::BEG:
+        dir = std::ios::beg;
+        break;
+      case Whence::CUR:
+        dir = std::ios::cur;
+        break;
+      case Whence::END:
+        dir = std::ios::end;
+        break;
+      default: return false;
+    }
+
+    file_stream_.clear();
+    file_stream_.seekp(pos, dir);
+    return !file_stream_.fail();
+  }
+
+  auto flush() -> bool override {
+    if (!is_open_) return false;
+    file_stream_.flush();
+    return file_stream_.good();
+  }
+};
+
+auto OutputStream::createFileStream(const std::string& path) noexcept -> std::unique_ptr<OutputStream> {
+  auto stream = std::make_unique<FileOutputStream>(path);
+  return stream->isValid() ? std::move(stream) : nullptr;
+}
+
 } // namespace openmedia

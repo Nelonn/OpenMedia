@@ -94,17 +94,17 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Format                  | Status | Description                              |
-|-------------------------|:------:|------------------------------------------|
-| Matroska (MKV/MKA/WebM) |   ✅    | Full demuxer support via libwebm         |
-| MP4/MOV (BMFF)          |   ✅    | ISO Base Media File Format demuxer       |
-| Ogg                     |   ✅    | Ogg container demuxer                    |
-| WAV                     |   ✅    | WAV demuxer                              |
-| FLAC                    |   ✅    | Native FLAC demuxer                      |
-| MP3                     |   ✅    | MP3 demuxer                              |
-| AVI                     |   🔧   | Audio Video Interleave                   |
-| WebM                    |   ✅    | Google's web media format (via Matroska) |
-| MOV/QuickTime           |   🔧   | Apple QuickTime format                   |
+| Format                  | Demuxing | Muxing      | Description                         |
+|-------------------------|:--------:|-------------|-------------------------------------|
+| Matroska (MKV/MKA/WebM) |    ✅     | Untested    | Matroska container (libwebm)        |
+| WebM                    |    ✅     | Untested    | Google's web media format (libwebm) |
+| MP4/MOV (BMFF)          |    ✅     | 🔧          | ISO Base Media File Format          |
+| MOV/QuickTime           |    🔧    | 🔧          | Apple QuickTime format              |
+| Ogg                     |    ✅     | 🔧          | Ogg container                       |
+| WAV                     |    ✅     | 🔧          | WAV container                       |
+| FLAC                    |    ✅     | 🔧          | FLAC container                      |
+| MP3                     |    ✅     | 🔧          | MP3 container                       |
+| AVI                     |    🔧    | Not planned | Audio Video Interleave              |
 
 ---
 
