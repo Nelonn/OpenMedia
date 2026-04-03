@@ -49,7 +49,7 @@ integration while maintaining a simple, intuitive API.
 | AV1     |    ✅     |    🔧    | dav1d (decoding only) |
 | H264    |    ✅     |    🔧    | OpenH264, FFmpeg      |
 | VVC     |    🔧    |    🔧    | VVdeC, VVenC          |
-| EVC     |    🔧    |    🔧    | xevd, xeve            |
+| EVC     | Untested | Untested | xevd, xeve            |
 | VP8/VP9 |    🔧    |    🔧    | libvpx                |
 
 ### Image Codecs

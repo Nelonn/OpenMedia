@@ -139,8 +139,8 @@ using RateControlVariant = std::variant<
     HqcbrParams,  // HQCBR
     HqvbrParams,  // HQVBR
     QvbrParams,   // QVBR
-    VbrLatParams, // VBR_LAT
-    CrfParams     // ICQ - same shape as CRF, disambiguated by index (or wrap if desired)
+    VbrLatParams // VBR_LAT
+    //CrfParams     // ICQ - same shape as CRF, disambiguated by index (or wrap if desired)
     >;
 
 struct OPENMEDIA_ABI RateControlParams {

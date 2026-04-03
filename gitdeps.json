@@ -79,12 +79,12 @@
   },
   "third_party/external/xevd": {
     "url": "https://github.com/Nelonn/xevd",
-    "commit": "e248ea81ca8adbf9f1873bca8ebab142e76e0d25",
+    "commit": "d3ef577f51e489260a94bc0abd330674d62f7885",
     "option": ["xevd", "evc_dec", "evc_all"]
   },
   "third_party/external/xeve": {
-    "url": "https://github.com/mpeg5/xeve",
-    "commit": "429c18a7736ffc010e1c550e8015ff18a242d06c",
+    "url": "https://github.com/Nelonn/xeve",
+    "commit": "865dce7ea5104ab2770980713d74e7cc96bc98a8",
     "option": ["xeve", "evc_enc", "evc_all"]
   },
   "third_party/external/zlib-ng": {

@@ -127,6 +127,9 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #if defined(OPENMEDIA_XEVD)
   registry->registerCodec(&CODEC_XEVD);
 #endif
+#if defined(OPENMEDIA_XEVE)
+  registry->registerCodec(&CODEC_XEVE);
+#endif
 
 #if defined(_WIN32)
   //registry->registerCodec(&CODEC_WMF_VIDEO_H264);

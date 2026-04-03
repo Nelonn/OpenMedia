@@ -27,6 +27,7 @@ extern const CodecDescriptor CODEC_DAV1D;
 //extern const CodecDescriptor CODEC_OPENH264;
 extern const CodecDescriptor CODEC_VVDEC;
 extern const CodecDescriptor CODEC_XEVD;
+extern const CodecDescriptor CODEC_XEVE;
 
 // Video - WMF
 extern const CodecDescriptor CODEC_WMF_VIDEO_H264;

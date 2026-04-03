@@ -373,7 +373,7 @@ endif ()
 if (OPENMEDIA_XEVD)
     if (AUI_BOOT)
         auib_import(xevd https://github.com/Nelonn/xevd
-                VERSION e248ea81ca8adbf9f1873bca8ebab142e76e0d25
+                VERSION d3ef577f51e489260a94bc0abd330674d62f7885
                 CMAKE_ARGS -DXEVD_INSTALL=ON)
     elseif (NOT TARGET XEVD::xevd)
         add_subdirectory(third_party/external/xevd)
@@ -381,6 +381,19 @@ if (OPENMEDIA_XEVD)
     target_link_libraries(OpenMedia PRIVATE XEVD::xevd)
     target_sources(OpenMedia PRIVATE src/video/xevd.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVD)
+endif ()
+
+if (OPENMEDIA_XEVE)
+    if (AUI_BOOT)
+        auib_import(xeve https://github.com/Nelonn/xeve
+                VERSION 865dce7ea5104ab2770980713d74e7cc96bc98a8
+                CMAKE_ARGS -DXEVD_INSTALL=ON)
+    elseif (NOT TARGET XEVE::xeve)
+        add_subdirectory(third_party/external/xeve)
+    endif ()
+    target_link_libraries(OpenMedia PRIVATE XEVE::xeve)
+    target_sources(OpenMedia PRIVATE src/video/xeve.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVE)
 endif ()
 
 if (OPENMEDIA_INSTALL)
