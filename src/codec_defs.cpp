@@ -9,12 +9,13 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
 
       // Video
     case OM_CODEC_H261: return {"H.261", "H.261", OM_MEDIA_VIDEO};
-    case OM_CODEC_H262: return {"H.262", "MPEG-2 Video", OM_MEDIA_VIDEO};
+    case OM_CODEC_H262: return {"H.262", "H.262 / MPEG-2 Video / MPEG-2 Part 2", OM_MEDIA_VIDEO};
     case OM_CODEC_H263: return {"H.263", "H.263", OM_MEDIA_VIDEO};
-    case OM_CODEC_H264: return {"H.264 / AVC", "H.264 / AVC (Advanced Video Coding)", OM_MEDIA_VIDEO};
-    case OM_CODEC_H265: return {"H.265 / HEVC", "H.265 / HEVC (High Efficiency Video Coding)", OM_MEDIA_VIDEO};
-    case OM_CODEC_H266: return {"H.266 / VVC", "H.266 / VVC (Versatile Video Coding)", OM_MEDIA_VIDEO};
-    case OM_CODEC_EVC: return {"EVC", "EVC (Essential Video Coding)", OM_MEDIA_VIDEO};
+    case OM_CODEC_H264: return {"H.264 / AVC", "H.264 / AVC (Advanced Video Coding) / MPEG-4 Part 10", OM_MEDIA_VIDEO};
+    case OM_CODEC_H265: return {"H.265 / HEVC", "H.265 / HEVC (High Efficiency Video Coding) / MPEG-H Part 2", OM_MEDIA_VIDEO};
+    case OM_CODEC_H266: return {"H.266 / VVC", "H.266 / VVC (Versatile Video Coding) / MPEG-I Part 3", OM_MEDIA_VIDEO};
+    case OM_CODEC_EVC: return {"EVC", "EVC (Essential Video Coding) / MPEG-5 Part 1", OM_MEDIA_VIDEO};
+    case OM_CODEC_LCEVC: return {"LCEVC", "LCEVC (Low Complexity Enhancement Video Coding) / MPEG-5 Part 2", OM_MEDIA_VIDEO};
     case OM_CODEC_VP8: return {"VP8", "VP8", OM_MEDIA_VIDEO};
     case OM_CODEC_VP9: return {"VP9", "VP9", OM_MEDIA_VIDEO};
     case OM_CODEC_AV1: return {"AV1", "AV1 (AOMedia Video 1)", OM_MEDIA_VIDEO};
