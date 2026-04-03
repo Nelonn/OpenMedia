@@ -314,7 +314,7 @@ struct BMFFTrack {
   int64_t start_dts = 0;
   int64_t track_duration = 0;
   Track track = {};
-  std::unique_ptr<AnnexBFilter> annexb_bsf;
+  std::unique_ptr<BitStreamFilter> bsf;
 
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
@@ -479,7 +479,7 @@ inline auto parseAvcc(std::span<const uint8_t> body,
   }
 
   track.track.extradata = annexb_extra;
-  track.annexb_bsf = std::make_unique<AnnexBFilter>(
+  track.bsf = std::make_unique<AnnexBFilter>(
       nalu_len_sz, std::move(annexb_extra));
 
   return true;
@@ -536,7 +536,7 @@ inline auto parseHvcc(std::span<const uint8_t> body,
   if (annexb_extra.empty()) return false;
 
   track.track.extradata = annexb_extra;
-  track.annexb_bsf = std::make_unique<AnnexBFilter>(
+  track.bsf = std::make_unique<AnnexBFilter>(
       nalu_len_sz, std::move(annexb_extra));
 
   return true;
@@ -690,7 +690,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
   }
 
   track.track.extradata = annexb_extra;
-  track.annexb_bsf = std::make_unique<AnnexBFilter>(
+  track.bsf = std::make_unique<AnnexBFilter>(
       nalu_len_sz, std::move(annexb_extra));
 
   return true;
@@ -1135,8 +1135,8 @@ public:
     std::vector<uint8_t> converted;
     std::span<const uint8_t> payload(raw);
 
-    if (bmff_track.annexb_bsf) {
-      converted = bmff_track.annexb_bsf->convert(payload, sample.is_keyframe);
+    if (bmff_track.bsf) {
+      converted = bmff_track.bsf->convert(payload, sample.is_keyframe);
       payload = converted;
     }
 

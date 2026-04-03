@@ -371,14 +371,14 @@ if (OPENMEDIA_VVDEC)
 endif ()
 
 if (OPENMEDIA_XEVD)
-    #if (AUI_BOOT)
-    #    auib_import(xevd https://github.com/mpeg5/xevd
-    #            VERSION 4087f635624cf4ee6ebe3f9ea165ff939b32117f)
-    #elseif (NOT TARGET dav1d::dav1d)
-    #    add_subdirectory(third_party/external/xevd)
-    #endif ()
-    add_subdirectory(third_party/external/xevd)
-    target_link_libraries(OpenMedia PRIVATE xevd)
+    if (AUI_BOOT)
+        auib_import(xevd https://github.com/Nelonn/xevd
+                VERSION e248ea81ca8adbf9f1873bca8ebab142e76e0d25
+                CMAKE_ARGS -DXEVD_INSTALL=ON)
+    elseif (NOT TARGET XEVD::xevd)
+        add_subdirectory(third_party/external/xevd)
+    endif ()
+    target_link_libraries(OpenMedia PRIVATE XEVD::xevd)
     target_sources(OpenMedia PRIVATE src/video/xevd.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVD)
 endif ()

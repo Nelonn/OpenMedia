@@ -6,7 +6,15 @@
 
 namespace openmedia {
 
-class AnnexBFilter {
+class BitStreamFilter {
+public:
+  virtual ~BitStreamFilter() = default;
+
+  virtual auto convert(std::span<const uint8_t> avcc_sample, bool is_keyframe) const
+      -> std::vector<uint8_t> = 0;
+};
+
+class AnnexBFilter : public BitStreamFilter {
 public:
   static constexpr uint8_t START_CODE_LONG[4] = {0x00, 0x00, 0x00, 0x01};
   static constexpr uint8_t START_CODE_SHORT[3] = {0x00, 0x00, 0x01};
@@ -14,8 +22,10 @@ public:
   AnnexBFilter(uint8_t nalu_len_sz, std::vector<uint8_t> annexb_extra)
       : nalu_len_sz_(nalu_len_sz), annexb_extra_(std::move(annexb_extra)) {}
 
+  ~AnnexBFilter() override = default;
+
   auto convert(std::span<const uint8_t> avcc_sample, bool is_keyframe) const
-      -> std::vector<uint8_t> {
+      -> std::vector<uint8_t> override {
     std::vector<uint8_t> out;
     out.reserve(reserveSize(avcc_sample.size(), is_keyframe));
 
