@@ -35,7 +35,7 @@ static auto codecIdToMFCodec(OMCodecId codec) -> GUID {
 class WMFDecoder final : public Decoder {
   ComPtr<IMFTransform> decoder_;
   AudioFormat output_format_ = {};
-  uint32_t timescale_ = 0;
+  int64_t timescale_ = 0;
   bool initialized_ = false;
 
 public:
@@ -97,7 +97,7 @@ public:
     input_type->SetGUID(MF_MT_SUBTYPE, codec);
     input_type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, options.format.audio.channels);
     input_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, options.format.audio.sample_rate);
-    input_type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    input_type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, options.format.audio.bit_depth);
     input_type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1);
 
     if (options.format.codec_id == OM_CODEC_AAC) {
@@ -130,7 +130,7 @@ public:
       }
     }
 
-    timescale_ = 10000000;
+    timescale_ = 10000000LL * options.time_base.num / options.time_base.den;
 
     hr = decoder_->SetInputType(0, input_type.Get(), 0);
     if (FAILED(hr)) {
@@ -139,7 +139,7 @@ public:
       return OM_CODEC_OPEN_FAILED;
     }
 
-    if (!setup_output_type()) {
+    if (!setupOutputType()) {
       return OM_CODEC_OPEN_FAILED;
     }
 
@@ -173,10 +173,16 @@ public:
       buffer->SetCurrentLength(static_cast<DWORD>(packet.bytes.size()));
 
       sample->AddBuffer(buffer.Get());
-      sample->SetSampleTime(packet.pts * 10000000LL / (timescale_ ? timescale_ : output_format_.sample_rate));
+
+      LONGLONG hnsSampleTime = packet.pts * timescale_;
+      LONGLONG hnsSampleDuration = packet.duration * timescale_;
+
+      sample->SetSampleTime(hnsSampleTime);
+      sample->SetSampleDuration(hnsSampleDuration);
 
       HRESULT hr = decoder_->ProcessInput(0, sample.Get(), 0);
       if (FAILED(hr)) {
+        auto* err = _com_error(hr).ErrorMessage();
         return Err(OM_CODEC_DECODE_FAILED);
       }
     }
@@ -184,7 +190,10 @@ public:
     while (true) {
       MFT_OUTPUT_STREAM_INFO info;
       HRESULT hr = decoder_->GetOutputStreamInfo(0, &info);
-      if (FAILED(hr)) break;
+      if (FAILED(hr)) {
+        auto* err = _com_error(hr).ErrorMessage();
+        break;
+      }
 
       MFT_OUTPUT_DATA_BUFFER output = { 0 };
       output.dwStreamID = 0;
@@ -203,12 +212,18 @@ public:
       DWORD status = 0;
       hr = decoder_->ProcessOutput(0, 1, &output, &status);
 
-      if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
+      if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        auto* err = _com_error(hr).ErrorMessage();
+        break;
+      }
       if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
-        setup_output_type();
+        setupOutputType();
         continue;
       }
-      if (FAILED(hr)) break;
+      if (FAILED(hr)) {
+        auto* err = _com_error(hr).ErrorMessage();
+        break;
+      }
 
       if (output.pSample) {
         ComPtr<IMFMediaBuffer> media_buffer;
@@ -254,7 +269,7 @@ public:
   }
 
 private:
-  bool setup_output_type() {
+  bool setupOutputType() {
     ComPtr<IMFMediaType> output_type;
     HRESULT hr;
 
@@ -291,11 +306,21 @@ auto create_wmf_decoder() -> std::unique_ptr<Decoder> {
   return std::make_unique<WMFDecoder>();
 }
 
-const CodecDescriptor CODEC_WMF = {
+const CodecDescriptor CODEC_WMF_AAC = {
   .codec_id = OM_CODEC_AAC,
   .type = OM_MEDIA_AUDIO,
   .name = "wmf_aac",
-  .long_name = "Windows Media Foundation audio decoder",
+  .long_name = "AAC (Windows Media Foundation)",
+  .vendor = "Microsoft",
+  .flags = NONE,
+  .decoder_factory = create_wmf_decoder,
+};
+
+const CodecDescriptor CODEC_WMF_MP3 = {
+  .codec_id = OM_CODEC_MP3,
+  .type = OM_MEDIA_AUDIO,
+  .name = "wmf_mp3",
+  .long_name = "MP3 (Windows Media Foundation)",
   .vendor = "Microsoft",
   .flags = NONE,
   .decoder_factory = create_wmf_decoder,

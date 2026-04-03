@@ -111,7 +111,8 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_VORBIS);
   registry->registerCodec(&CODEC_OPUS);
 #if defined(_WIN32)
-  registry->registerCodec(&CODEC_WMF);
+  registry->registerCodec(&CODEC_WMF_AAC);;
+  registry->registerCodec(&CODEC_WMF_MP3);;
 #endif
 
   // Video - Software
@@ -145,16 +146,18 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_FFMPEG_AV1);
 #endif
 
-  // Video - DirectX11 (Windows only)
-  //registry->registerCodec(&CODEC_DX11_H264);
-  //registry->registerCodec(&CODEC_DX11_H265);
-  //registry->registerCodec(&CODEC_DX11_VP9);
+  // Video - DirectX11
+#if defined(OPENMEDIA_DX11_VIDEO)
+  registry->registerCodec(&CODEC_DX11_H264);
+#endif
 
-  // Video - DirectX12 (Windows only)
+  // Video - DirectX12
+#if defined(OPENMEDIA_DX12_VIDEO)
   //registry->registerCodec(&CODEC_DX12_H264);
   //registry->registerCodec(&CODEC_DX12_H265);
   //registry->registerCodec(&CODEC_DX12_VP9);
   //registry->registerCodec(&CODEC_DX12_AV1);
+#endif
 
   // Video - AMD AMF
   //registry->registerCodec(&CODEC_AMF_H264);
