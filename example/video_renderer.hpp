@@ -6,6 +6,19 @@
 #include <SDL3/SDL.h>
 #include <mutex>
 
+// Helper: check if a format is high bit depth (10/12/16)
+static inline auto isHighBitDepth(uint8_t bits) -> bool {
+    return bits > 8;
+}
+
+// Helper: determine SDL pixel format based on bit depth
+// SDL3 doesn't have native 10/12/16-bit YUV formats, so we use IYUV for 8-bit
+// and fall back to RGBA8888 for higher bit depths with manual conversion
+static inline auto getSdlPixelFormat(uint8_t bits) -> SDL_PixelFormat {
+    if (bits <= 8) return SDL_PIXELFORMAT_IYUV;
+    return SDL_PIXELFORMAT_RGBA8888; // We'll convert to RGBA manually
+}
+
 // VideoRenderer
 //
 // Consumes VideoFrames from a FrameQueue, compares each frame's pts_sec
@@ -90,26 +103,84 @@ private:
   void uploadFrame(const VideoFrame& vf) {
     std::lock_guard lock(mutex_);
 
-    // Recreate texture only when dimensions change.
-    if (!texture_ || tex_w_ != vf.width || tex_h_ != vf.height) {
+    const SDL_PixelFormat sdl_fmt = getSdlPixelFormat(vf.bits_per_component);
+    const bool need_recreate = !texture_ || tex_w_ != vf.width || 
+                               tex_h_ != vf.height || tex_fmt_ != sdl_fmt;
+
+    // Recreate texture when dimensions or format change.
+    if (need_recreate) {
       destroyTextureUnsafe();
       texture_ = SDL_CreateTexture(
           renderer_,
-          SDL_PIXELFORMAT_IYUV,
+          sdl_fmt,
           SDL_TEXTUREACCESS_STREAMING,
           static_cast<int>(vf.width),
           static_cast<int>(vf.height));
       tex_w_ = vf.width;
       tex_h_ = vf.height;
+      tex_fmt_ = sdl_fmt;
     }
 
-    if (texture_) {
+    if (!texture_) return;
+
+    if (vf.bits_per_component <= 8) {
+      // Standard 8-bit YUV420P - use SDL's native YUV upload
       SDL_UpdateYUVTexture(
           texture_, nullptr,
           vf.y_plane.data(), vf.y_stride,
           vf.u_plane.data(), vf.u_stride,
           vf.v_plane.data(), vf.v_stride);
+    } else {
+      // High bit depth (10/12/16) - convert to RGBA8888 manually
+      uploadHighBitDepthFrame(vf);
     }
+  }
+
+  // Convert high bit depth YUV420P to RGBA8888
+  void uploadHighBitDepthFrame(const VideoFrame& vf) {
+    const uint32_t w = vf.width;
+    const uint32_t h = vf.height;
+    std::vector<uint32_t> rgba(w * h);
+
+    // Helper: clamp value to 8-bit range with proper scaling
+    auto yuvToRgba = [&](uint16_t y, uint16_t u, uint16_t v) -> uint32_t {
+      // Normalize to 8-bit range based on actual bit depth
+      const float scale = 255.0f / static_cast<float>((1 << vf.bits_per_component) - 1);
+      const int yi = static_cast<int>(y * scale);
+      const int ui = static_cast<int>(u * scale) - 128;
+      const int vi = static_cast<int>(v * scale) - 128;
+
+      // BT.709 YUV to RGB conversion
+      const int r = std::clamp(yi + static_cast<int>(1.5748f * vi), 0, 255);
+      const int g = std::clamp(yi - static_cast<int>(0.1873f * ui) - static_cast<int>(0.4681f * vi), 0, 255);
+      const int b = std::clamp(yi + static_cast<int>(1.8556f * ui), 0, 255);
+
+      return (0xFFu << 24) | (uint32_t(b) << 16) | (uint32_t(g) << 8) | uint32_t(r);
+    };
+
+    // Read 16-bit values (data is stored as uint16_t internally)
+    const auto* y_data = reinterpret_cast<const uint16_t*>(vf.y_plane.data());
+    const auto* u_data = reinterpret_cast<const uint16_t*>(vf.u_plane.data());
+    const auto* v_data = reinterpret_cast<const uint16_t*>(vf.v_plane.data());
+
+    const int uv_h = (h + 1) / 2;
+
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        // Y plane: row y, stride in uint16_t units
+        const uint16_t y_val = y_data[y * (vf.y_stride / 2) + x];
+        
+        // UV planes: subsampled 2x1, so use (y/2, x/2)
+        const uint32_t uv_y = y / 2;
+        const uint32_t uv_x = x / 2;
+        const uint16_t u_val = u_data[uv_y * (vf.u_stride / 2) + uv_x];
+        const uint16_t v_val = v_data[uv_y * (vf.v_stride / 2) + uv_x];
+
+        rgba[y * w + x] = yuvToRgba(y_val, u_val, v_val);
+      }
+    }
+
+    SDL_UpdateTexture(texture_, nullptr, rgba.data(), static_cast<int>(w * sizeof(uint32_t)));
   }
 
   void destroyTexture() {
@@ -123,6 +194,7 @@ private:
       texture_ = nullptr;
     }
     tex_w_ = tex_h_ = 0;
+    tex_fmt_ = 0;
   }
 
   SDL_Renderer* renderer_ = nullptr;
@@ -131,6 +203,7 @@ private:
 
   uint32_t tex_w_ = 0;
   uint32_t tex_h_ = 0;
+  uint32_t tex_fmt_ = 0;
   uint64_t dropped_count_ = 0;
   double last_pts_sec_ = 0.0;
 };

@@ -20,6 +20,7 @@
 #include <openmedia/format_detector.hpp>
 #include <openmedia/format_registry.hpp>
 #include <openmedia/io.hpp>
+#include <openmedia/video.hpp>
 #include <queue>
 #include <string>
 #include <thread>
@@ -100,6 +101,31 @@ private:
 // Helpers
 // ---------------------------------------------------------------------------
 namespace detail {
+
+static auto getBitsPerComponent(OMPixelFormat fmt) noexcept -> uint8_t {
+    switch (fmt) {
+        case OM_FORMAT_YUV420P10:
+        case OM_FORMAT_YUV422P10:
+        case OM_FORMAT_YUV444P10:
+            return 10;
+        case OM_FORMAT_YUV420P12:
+        case OM_FORMAT_YUV422P12:
+        case OM_FORMAT_YUV444P12:
+            return 12;
+        case OM_FORMAT_YUV420P16:
+        case OM_FORMAT_YUV422P16:
+        case OM_FORMAT_YUV444P16:
+        case OM_FORMAT_GRAY16:
+        case OM_FORMAT_P016:
+        case OM_FORMAT_RGBA64:
+            return 16;
+        case OM_FORMAT_P010:
+            return 10;
+        // All other formats are 8-bit
+        default:
+            return 8;
+    }
+}
 
 static auto toSdlFormat(OMSampleFormat fmt) noexcept -> SDL_AudioFormat {
     switch (fmt) {
@@ -670,8 +696,9 @@ private:
                 vf.width   = pic.width;
                 vf.height  = pic.height;
                 vf.pts     = int64_t(frame.pts);
-                vf.pts_sec = static_cast<double>(vf.pts) * 
+                vf.pts_sec = static_cast<double>(vf.pts) *
                              video_time_base_.num / video_time_base_.den;
+                vf.bits_per_component = detail::getBitsPerComponent(pic.format);
 
                 vf.y_stride = pic.planes.getLinesize(0);
                 vf.u_stride = pic.planes.getLinesize(1);
@@ -681,9 +708,11 @@ private:
                 const uint8_t* u = pic.planes.getData(1);
                 const uint8_t* v = pic.planes.getData(2);
 
+                // YUV420P: Y plane is full size, U/V planes are half width and height
                 vf.y_plane.assign(y, y + vf.y_stride * pic.height);
-                vf.u_plane.assign(u, u + vf.u_stride * (pic.height / 2));
-                vf.v_plane.assign(v, v + vf.v_stride * (pic.height / 2));
+                const uint32_t uv_h = (pic.height + 1) / 2;
+                vf.u_plane.assign(u, u + vf.u_stride * uv_h);
+                vf.v_plane.assign(v, v + vf.v_stride * uv_h);
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
