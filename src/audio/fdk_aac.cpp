@@ -39,6 +39,8 @@ class FDKAACDecoder final : public Decoder {
   AudioFormat output_format_;
   bool initialized_ = false;
   LoggerRef logger_ = {};
+  std::vector<INT_PCM> decode_buffer_;
+  CStreamInfo* stream_info_ = nullptr;
 
 public:
   FDKAACDecoder() = default;
@@ -96,6 +98,14 @@ public:
     }
 
     initialized_ = true;
+    decode_buffer_.resize(2048 * 8);
+
+    stream_info_ = aacDecoder_GetStreamInfo(decoder_);
+
+    if (stream_info_->aacSampleRate == 0 || stream_info_->channelConfig == 0) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
     return OM_SUCCESS;
   }
 
@@ -108,9 +118,7 @@ public:
     output_format_.sample_rate = info->sampleRate;
     output_format_.channels = info->numChannels;
     output_format_.planar = false;
-
-    output_format_.sample_format =
-        (sizeof(INT_PCM) == 2) ? OM_SAMPLE_S16 : OM_SAMPLE_F32;
+    output_format_.sample_format = OM_SAMPLE_S16;
 
     DecodingInfo dec_info = {};
     dec_info.media_type = OM_MEDIA_AUDIO;
@@ -123,7 +131,7 @@ public:
       return Ok(std::vector<Frame> {});
     }
 
-    UCHAR* in_buf = const_cast<UCHAR*>(packet.bytes.data());
+    UCHAR* in_buf = packet.bytes.data();
     UINT in_size = static_cast<UINT>(packet.bytes.size());
     UINT bytes_valid = in_size;
 
@@ -133,59 +141,44 @@ public:
       return Err(OM_CODEC_DECODE_FAILED);
     }
 
-    std::vector<Frame> frames;
+    error = aacDecoder_DecodeFrame(
+        decoder_,
+        decode_buffer_.data(),
+        static_cast<INT>(decode_buffer_.size()),
+        0);
 
-    while (true) {
-      CStreamInfo* info = aacDecoder_GetStreamInfo(decoder_);
-      if (!info) {
-        return Err(OM_CODEC_DECODE_FAILED);
-      }
-
-      if (info->aacSampleRate == 0 || info->channelConfig == 0) {
-        break;
-      }
-
-      const INT channels = info->channelConfig;
-      const INT samples_per_frame = info->frameSize;
-      const INT max_samples = samples_per_frame * channels;
-
-      AudioFormat fmt = {};
-      fmt.sample_rate = static_cast<uint32_t>(info->aacSampleRate);
-      fmt.channels = static_cast<uint32_t>(channels);
-      fmt.planar = false;
-      fmt.sample_format = OM_SAMPLE_S16;
-
-      AudioSamples samples(fmt, samples_per_frame);
-
-      error = aacDecoder_DecodeFrame(
-          decoder_,
-          reinterpret_cast<INT_PCM*>(samples.planes.data[0]),
-          static_cast<INT>(max_samples),
-          0);
-
-      if (error == AAC_DEC_NOT_ENOUGH_BITS) {
-        break;
-      }
-
-      if (error != AAC_DEC_OK) {
-        if (logger_) {
-          logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
-                       "FDK AAC: Decode frame failed");
-        }
-        if (frames.empty()) {
-          return Err(OM_CODEC_DECODE_FAILED);
-        }
-        break;
-      }
-
-      samples.nb_samples = samples_per_frame;
-
-      Frame frame;
-      frame.pts = packet.pts;
-      frame.dts = packet.dts;
-      frame.data = std::move(samples);
-      frames.push_back(std::move(frame));
+    if (error == AAC_DEC_NOT_ENOUGH_BITS) {
+      return Err(OM_CODEC_NEED_MORE_DATA);
     }
+
+    if (error != AAC_DEC_OK) {
+      if (logger_) {
+        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
+                     "FDK AAC: Decode frame failed");
+      }
+      return Err(OM_CODEC_DECODE_FAILED);
+    }
+
+    const INT channels = stream_info_->channelConfig;
+    const INT samples_per_frame = stream_info_->frameSize;
+
+    AudioFormat fmt = {};
+    fmt.sample_rate = static_cast<uint32_t>(stream_info_->aacSampleRate);
+    fmt.channels = static_cast<uint32_t>(channels);
+    fmt.planar = false;
+    fmt.sample_format = OM_SAMPLE_S16;
+
+    AudioSamples samples(fmt, samples_per_frame);
+    samples.nb_samples = samples_per_frame;
+    memcpy(samples.planes.data[0], decode_buffer_.data(), samples_per_frame * channels * sizeof(int16_t));
+
+    Frame frame;
+    frame.pts = packet.pts;
+    frame.dts = packet.dts;
+    frame.data = std::move(samples);
+
+    std::vector<Frame> frames;
+    frames.push_back(std::move(frame));
 
     return Ok(std::move(frames));
   }
