@@ -33,11 +33,11 @@ integration while maintaining a simple, intuitive API.
 | Codec   | Decoding | Encoding | Backends                |
 |---------|:--------:|:--------:|-------------------------|
 | AAC     |    ✅     |    🔧    | libfdk-aac, WMF, FFmpeg |
-| ALAC    |    ✅     |    🔧    | libalac                 |
-| FLAC    |    ✅     |    🔧    | libFLAC                 |
-| Opus    |    ✅     |    ✅     | libopus                 |
-| Vorbis  |    ✅     |    🔧    | libvorbis               |
-| MP3     |    ✅     |    🔧    | minimp3                 |
+| ALAC    |    ✅     |    🔧    | libalac, FFmpeg         |
+| FLAC    |    ✅     |    🔧    | libFLAC, FFmpeg         |
+| Opus    |    ✅     |    ✅     | libopus, FFmpeg         |
+| Vorbis  |    ✅     |    🔧    | libvorbis, FFmpeg       |
+| MP3     |    ✅     |    🔧    | minimp3, WMF, FFmpeg    |
 | WAV/PCM |    ✅     |    🔧    | OpenMedia               |
 
 ### Video Codecs
