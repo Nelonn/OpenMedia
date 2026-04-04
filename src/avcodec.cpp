@@ -281,7 +281,7 @@ private:
           av_frame->width, av_frame->height, 1);
 
       if (buffer_size > 0) {
-        int num_planes = Picture::getNumPlanes(picture.format);
+        int num_planes = getNumPlanes(picture.format);
         for (int i = 0; i < num_planes && i < 4; ++i) {
           if (av_frame->data[i] && picture.planes.getData(i)) {
             uint32_t plane_height = picture.getPlaneDimensions(i).second;
@@ -405,6 +405,16 @@ const CodecDescriptor CODEC_FFMPEG_H266 = {
     .vendor = "FFmpeg",
     .flags = CodecFlags::NONE,
     .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_H266); },
+};
+
+const CodecDescriptor CODEC_FFMPEG_EVC = {
+    .codec_id = OM_CODEC_EVC,
+    .type = OM_MEDIA_VIDEO,
+    .name = "ffmpeg_evc",
+    .long_name = "EVC (Essential Video Coding) (FFmpeg)",
+    .vendor = "FFmpeg",
+    .flags = CodecFlags::NONE,
+    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_EVC); },
 };
 
 const CodecDescriptor CODEC_FFMPEG_VP9 = {

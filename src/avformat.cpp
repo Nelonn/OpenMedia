@@ -283,11 +283,15 @@ private:
       track.id = static_cast<int32_t>(stream->id);
       track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
       track.format.codec_id = avCodecIdToOmCodecId(stream->codecpar->codec_id);
-      track.format.profile = static_cast<OMProfile>(stream->codecpar->profile);
-      if (track.format.codec_id == OM_CODEC_AAC) {
-        track.format.profile++;
+      if (stream->codecpar->profile >= 0) {
+        track.format.profile = static_cast<OMProfile>(stream->codecpar->profile);
+        if (track.format.codec_id == OM_CODEC_AAC) {
+          track.format.profile++;
+        }
       }
-      track.format.level = stream->codecpar->level;
+      if (stream->codecpar->level >= 0) {
+        track.format.level = stream->codecpar->level;
+      }
       track.time_base = {stream->time_base.num, stream->time_base.den};
       track.duration = stream->duration;
       track.bitrate = static_cast<uint32_t>(stream->codecpar->bit_rate);

@@ -142,6 +142,7 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_FFMPEG_H264);
   registry->registerCodec(&CODEC_FFMPEG_H265);
   registry->registerCodec(&CODEC_FFMPEG_H266);
+  registry->registerCodec(&CODEC_FFMPEG_EVC);
   registry->registerCodec(&CODEC_FFMPEG_VP9);
   registry->registerCodec(&CODEC_FFMPEG_AV1);
 #endif

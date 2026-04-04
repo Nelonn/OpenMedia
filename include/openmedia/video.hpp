@@ -165,6 +165,55 @@ struct OPENMEDIA_ABI VideoFormat {
   uint32_t height;
 };
 
+static auto getNumPlanes(OMPixelFormat fmt) -> uint32_t {
+  switch (fmt) {
+    // Packed RGB / grayscale
+    case OM_FORMAT_R8G8B8A8:
+    case OM_FORMAT_B8G8R8A8:
+    case OM_FORMAT_RGB32:
+    case OM_FORMAT_RGBA64:
+    case OM_FORMAT_GRAY8:
+    case OM_FORMAT_GRAY16:
+      return 1;
+
+      // Palette (index + palette)
+    case OM_FORMAT_PAL8:
+      return 2;
+
+      // Semi-planar (Y + interleaved UV)
+    case OM_FORMAT_NV12:
+    case OM_FORMAT_NV21:
+    case OM_FORMAT_NV16:
+    case OM_FORMAT_NV24:
+    case OM_FORMAT_P010:
+    case OM_FORMAT_P016:
+      return 2;
+
+      // Planar (Y, U, V separate)
+    case OM_FORMAT_YUV420P:
+    case OM_FORMAT_YUVJ420P:
+    case OM_FORMAT_YUV422P:
+    case OM_FORMAT_YUVJ422P:
+    case OM_FORMAT_YUV444P:
+    case OM_FORMAT_YUVJ444P:
+    case OM_FORMAT_YUV410P:
+    case OM_FORMAT_YUV411P:
+    case OM_FORMAT_YUV420P10:
+    case OM_FORMAT_YUV420P12:
+    case OM_FORMAT_YUV420P16:
+    case OM_FORMAT_YUV422P10:
+    case OM_FORMAT_YUV422P12:
+    case OM_FORMAT_YUV422P16:
+    case OM_FORMAT_YUV444P10:
+    case OM_FORMAT_YUV444P12:
+    case OM_FORMAT_YUV444P16:
+      return 3;
+
+    default:
+      return 1;
+  }
+}
+
 struct OPENMEDIA_ABI Picture {
   PictureBuffer buffer;
 
@@ -216,70 +265,83 @@ struct OPENMEDIA_ABI Picture {
     planes = PlaneSpan<4> {};
   }
 
-  static auto getNumPlanes(OMPixelFormat fmt) -> uint32_t {
-    switch (fmt) {
-      case OM_FORMAT_B8G8R8A8:
-      case OM_FORMAT_RGB32:
-      case OM_FORMAT_GRAY8:
-      case OM_FORMAT_GRAY16:
-        return 1;
-      case OM_FORMAT_PAL8:
-        return 2;
-      case OM_FORMAT_NV12:
-      case OM_FORMAT_NV21:
-      case OM_FORMAT_NV16:
-      case OM_FORMAT_NV24:
-        return 2;
-      case OM_FORMAT_YUV420P:
-      case OM_FORMAT_YUVJ420P:
-      case OM_FORMAT_YUV422P:
-      case OM_FORMAT_YUVJ422P:
-      case OM_FORMAT_YUV444P:
-      case OM_FORMAT_YUVJ444P:
-      case OM_FORMAT_YUV410P:
-      case OM_FORMAT_YUV411P:
-        return 3;
-      default:
-        return 1;
-    }
-  }
-
   auto getPlaneDimensions(int plane_idx) const -> std::pair<uint32_t, uint32_t> {
+    if (plane_idx >= getNumPlanes(format))
+      return {0, 0};
+
     switch (format) {
+      // 4:2:0 planar + variants
       case OM_FORMAT_YUV420P:
       case OM_FORMAT_YUVJ420P:
-      case OM_FORMAT_NV12:
-      case OM_FORMAT_NV21:
+      case OM_FORMAT_YUV420P10:
+      case OM_FORMAT_YUV420P12:
+      case OM_FORMAT_YUV420P16:
         if (plane_idx == 0)
           return {width, height};
         else
-          return {width / 2, height / 2};
+          return {(width + 1) / 2, (height + 1) / 2};
+
+        // 4:2:0 semi-planar
+      case OM_FORMAT_NV12:
+      case OM_FORMAT_NV21:
+      case OM_FORMAT_P010:
+      case OM_FORMAT_P016:
+        if (plane_idx == 0)
+          return {width, height};
+        else
+          return {width, (height + 1) / 2};
+
+        // 4:2:2 planar + variants
       case OM_FORMAT_YUV422P:
       case OM_FORMAT_YUVJ422P:
+      case OM_FORMAT_YUV422P10:
+      case OM_FORMAT_YUV422P12:
+      case OM_FORMAT_YUV422P16:
+        if (plane_idx == 0)
+          return {width, height};
+        else
+          return {(width + 1) / 2, height};
+
+        // 4:2:2 semi-planar
       case OM_FORMAT_NV16:
         if (plane_idx == 0)
           return {width, height};
         else
-          return {width / 2, height};
-      case OM_FORMAT_YUV411P:
-        if (plane_idx == 0)
           return {width, height};
-        else
-          return {width / 4, height};
-      case OM_FORMAT_YUV410P:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {width / 4, height / 4};
+
+        // 4:4:4 planar + variants
       case OM_FORMAT_YUV444P:
       case OM_FORMAT_YUVJ444P:
+      case OM_FORMAT_YUV444P10:
+      case OM_FORMAT_YUV444P12:
+      case OM_FORMAT_YUV444P16:
+        return {width, height};
+
+        // 4:4:4 semi-planar
       case OM_FORMAT_NV24:
         return {width, height};
+
+        // 4:1:1
+      case OM_FORMAT_YUV411P:
+        if (plane_idx == 0)
+          return {width, height};
+        else
+          return {(width + 3) / 4, height};
+
+        // 4:1:0
+      case OM_FORMAT_YUV410P:
+        if (plane_idx == 0)
+          return {width, height};
+        else
+          return {(width + 3) / 4, (height + 3) / 4};
+
+        // Palette
       case OM_FORMAT_PAL8:
         if (plane_idx == 0)
           return {width, height};
         else
           return {256, 1};
+
       default:
         return {width, height};
     }
