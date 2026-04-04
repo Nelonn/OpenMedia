@@ -1,13 +1,14 @@
 #include "avformat.hpp"
-#include "avcodec.hpp"
-#include <util/demuxer_base.hpp>
+
+#include <atomic>
+#include <cstring>
+#include <mutex>
 #include <openmedia/format_api.hpp>
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
-#include <cstring>
 #include <thread>
-#include <atomic>
-#include <mutex>
+#include <util/demuxer_base.hpp>
+#include <avcodec.hpp>
 
 namespace openmedia {
 
@@ -80,12 +81,22 @@ auto LibAVFormat::isLoaded() const -> bool {
 
 static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
   switch (codec_id) {
+    // Video codecs
+    case AV_CODEC_ID_H261: return OM_CODEC_H261;
+    case AV_CODEC_ID_H263: return OM_CODEC_H263;
     case AV_CODEC_ID_H264: return OM_CODEC_H264;
     case AV_CODEC_ID_HEVC: return OM_CODEC_H265;
+    case AV_CODEC_ID_VVC: return OM_CODEC_H266;
+    case AV_CODEC_ID_EVC: return OM_CODEC_EVC;
+    case AV_CODEC_ID_LCEVC: return OM_CODEC_LCEVC;
     case AV_CODEC_ID_VP8: return OM_CODEC_VP8;
     case AV_CODEC_ID_VP9: return OM_CODEC_VP9;
     case AV_CODEC_ID_AV1: return OM_CODEC_AV1;
     case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
+    case AV_CODEC_ID_THEORA: return OM_CODEC_THEORA;
+
+    // Audio codecs
+    case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
     case AV_CODEC_ID_AAC: return OM_CODEC_AAC;
     case AV_CODEC_ID_MP3: return OM_CODEC_MP3;
     case AV_CODEC_ID_OPUS: return OM_CODEC_OPUS;
@@ -111,7 +122,7 @@ static auto avMediaTypeToOmMediaType(AVMediaType media_type) -> OMMediaType {
 
 class FFmpegDemuxer final : public BaseDemuxer {
 private:
-  static constexpr size_t k_io_buffer_size = 65536; // 64 KiB
+  static constexpr size_t IO_BUFFER_SIZE = 32768;
 
   AVFormatContext* fmt_ctx_ = nullptr;
   AVIOContext* avio_ctx_ = nullptr;
@@ -120,7 +131,7 @@ private:
   AVPacket* packet_ = nullptr;
 
   std::mutex seek_mutex_;
-  std::atomic_bool stop_reading_{false};
+  std::atomic_bool stop_reading_ {false};
 
 public:
   FFmpegDemuxer() = default;
@@ -150,24 +161,22 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Allocate IO buffer
-    io_buf_ = static_cast<uint8_t*>(util_loader.av_malloc(k_io_buffer_size));
+    io_buf_ = static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE));
     if (!io_buf_) {
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
-    // Setup AVIO context
     InputStream* raw_input = input_.get();
     const bool seekable = raw_input->canSeek();
 
     avio_ctx_ = format_loader.avio_alloc_context(
         io_buf_,
-        static_cast<int>(k_io_buffer_size),
+        static_cast<int>(IO_BUFFER_SIZE),
         0, // write_flag = 0 (read-only)
         raw_input,
-        &readPacketCallback,
-        nullptr, // no write callback
-        seekable ? &seekCallback : nullptr);
+        &ioRead,
+        nullptr,
+        seekable ? &ioSeek : nullptr);
 
     if (!avio_ctx_) {
       util_loader.av_free(io_buf_);
@@ -177,7 +186,6 @@ public:
 
     avio_ctx_->seekable = seekable ? AVIO_SEEKABLE_NORMAL : 0;
 
-    // Allocate format context
     fmt_ctx_ = format_loader.avformat_alloc_context();
     if (!fmt_ctx_) {
       format_loader.avio_context_free(&avio_ctx_);
@@ -187,14 +195,12 @@ public:
 
     fmt_ctx_->pb = avio_ctx_;
 
-    // Open input (url is nullptr since we use custom IO)
     int ret = format_loader.avformat_open_input(&fmt_ctx_, nullptr, nullptr, nullptr);
     if (ret < 0) {
       close();
       return avErrorToOmError(ret);
     }
 
-    // Find stream info
     ret = format_loader.avformat_find_stream_info(fmt_ctx_, nullptr);
     if (ret < 0) {
       close();
@@ -278,12 +284,14 @@ private:
       track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
       track.format.codec_id = avCodecIdToOmCodecId(stream->codecpar->codec_id);
       track.format.profile = static_cast<OMProfile>(stream->codecpar->profile);
+      if (track.format.codec_id == OM_CODEC_AAC) {
+        track.format.profile++;
+      }
       track.format.level = stream->codecpar->level;
       track.time_base = {stream->time_base.num, stream->time_base.den};
       track.duration = stream->duration;
       track.bitrate = static_cast<uint32_t>(stream->codecpar->bit_rate);
 
-      // Extract codec-specific info
       if (track.format.type == OM_MEDIA_VIDEO) {
         track.format.video.width = static_cast<uint32_t>(stream->codecpar->width);
         track.format.video.height = static_cast<uint32_t>(stream->codecpar->height);
@@ -293,7 +301,6 @@ private:
         track.format.audio.channels = static_cast<uint32_t>(stream->codecpar->ch_layout.nb_channels);
       }
 
-      // Copy extradata
       if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
         track.extradata.assign(
             stream->codecpar->extradata,
@@ -334,12 +341,11 @@ private:
     BaseDemuxer::close();
   }
 
-  // IO callbacks
-  static int readPacketCallback(void* opaque, uint8_t* buf, int buf_size) {
+  static int ioRead(void* opaque, uint8_t* buf, int buf_size) {
     auto* input = static_cast<InputStream*>(opaque);
     if (!input) return AVERROR_EOF;
 
-    auto bytes_read = input->read(std::span(buf, static_cast<size_t>(buf_size)));
+    auto bytes_read = input->read(std::span<uint8_t>(buf, static_cast<size_t>(buf_size)));
 
     if (bytes_read == 0) {
       return AVERROR_EOF;
@@ -348,7 +354,7 @@ private:
     return static_cast<int>(bytes_read);
   }
 
-  static auto seekCallback(void* opaque, int64_t offset, int whence) -> int64_t {
+  static auto ioSeek(void* opaque, int64_t offset, int whence) -> int64_t {
     auto* input = static_cast<InputStream*>(opaque);
     if (!input) return -1;
 
@@ -368,8 +374,11 @@ private:
       default: return -1;
     }
 
-    auto result = input->seek(offset, mode);
-    return (result == OM_SUCCESS) ? input->tell() : -1;
+    if (!input->seek(offset, mode)) {
+      return -1;
+    }
+
+    return input->tell();
   }
 
   bool initialized_ = false;
@@ -418,7 +427,7 @@ static auto omMediaTypeToAvMediaType(OMMediaType media_type) -> AVMediaType {
 
 class FFmpegMuxer final : public BaseMuxer {
 private:
-  static constexpr size_t k_io_buffer_size = 65536; // 64 KiB
+  static constexpr size_t IO_BUFFER_SIZE = 65536; // 64 KiB
 
   AVFormatContext* fmt_ctx_ = nullptr;
   AVIOContext* avio_ctx_ = nullptr;
@@ -457,7 +466,7 @@ public:
     }
 
     // Allocate IO buffer
-    io_buf_ = static_cast<uint8_t*>(util_loader.av_malloc(k_io_buffer_size));
+    io_buf_ = static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE));
     if (!io_buf_) {
       return OM_COMMON_OUT_OF_MEMORY;
     }
@@ -466,12 +475,12 @@ public:
     OutputStream* raw_output = output_.get();
     avio_ctx_ = format_loader.avio_alloc_context(
         io_buf_,
-        static_cast<int>(k_io_buffer_size),
+        static_cast<int>(IO_BUFFER_SIZE),
         1, // write_flag = 1
         raw_output,
         nullptr, // no read callback
-        &writePacketCallback,
-        raw_output->canSeek() ? &seekCallback : nullptr);
+        &ioWrite,
+        raw_output->canSeek() ? &ioSeek : nullptr);
 
     if (!avio_ctx_) {
       util_loader.av_free(io_buf_);
@@ -579,7 +588,7 @@ public:
 
     // Fill AVPacket from our Packet
     codec_loader.av_packet_unref(packet_);
-    
+
     int ret = codec_loader.av_new_packet(packet_, static_cast<int>(packet.bytes.size()));
     if (ret < 0) {
       return avErrorToOmError(ret);
@@ -668,12 +677,11 @@ private:
     BaseMuxer::close();
   }
 
-  // IO callbacks
-  static int writePacketCallback(void* opaque, const uint8_t* buf, int buf_size) {
+  static int ioWrite(void* opaque, const uint8_t* buf, int buf_size) {
     auto* output = static_cast<OutputStream*>(opaque);
     if (!output) return -1;
 
-    auto result = output->write(std::span(buf, static_cast<size_t>(buf_size)));
+    auto result = output->write(std::span<const uint8_t>(buf, static_cast<size_t>(buf_size)));
     if (result != OM_SUCCESS) {
       return -1;
     }
@@ -681,7 +689,7 @@ private:
     return buf_size;
   }
 
-  static auto seekCallback(void* opaque, int64_t offset, int whence) -> int64_t {
+  static auto ioSeek(void* opaque, int64_t offset, int whence) -> int64_t {
     auto* output = static_cast<OutputStream*>(opaque);
     if (!output) return -1;
 
@@ -701,8 +709,11 @@ private:
       default: return -1;
     }
 
-    auto result = output->seek(offset, mode);
-    return (result == OM_SUCCESS) ? output->tell() : -1;
+    if (!output->seek(offset, mode)) {
+      return -1;
+    }
+
+    return output->tell();
   }
 };
 

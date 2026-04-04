@@ -41,6 +41,8 @@ auto LibAVUtil::load() -> bool {
   av_get_pix_fmt = library_.getProcAddress<decltype(av_get_pix_fmt)>("av_get_pix_fmt");
   av_get_pix_fmt_name = library_.getProcAddress<decltype(av_get_pix_fmt_name)>("av_get_pix_fmt_name");
   av_get_sample_fmt_name = library_.getProcAddress<decltype(av_get_sample_fmt_name)>("av_get_sample_fmt_name");
+  av_dict_set = library_.getProcAddress<PFN<int(AVDictionary**, const char*, const char*, int)>>("av_dict_set");
+  av_dict_free = library_.getProcAddress<PFN<void(AVDictionary**)>>("av_dict_free");
 
   if (!av_malloc || !av_free || !av_frame_alloc || !av_frame_free || !av_frame_unref) {
     return false;

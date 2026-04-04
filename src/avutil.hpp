@@ -37,6 +37,8 @@ public:
   PFN<AVPixelFormat(const char*)> av_get_pix_fmt = nullptr;
   PFN<const char*(AVPixelFormat)> av_get_pix_fmt_name = nullptr;
   PFN<const char*(AVSampleFormat)> av_get_sample_fmt_name = nullptr;
+  PFN<int(AVDictionary**, const char*, const char*, int)> av_dict_set = nullptr;
+  PFN<void(AVDictionary**)> av_dict_free = nullptr;
 
 private:
   LibAVUtil() = default;
