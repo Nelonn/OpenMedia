@@ -4,9 +4,10 @@
 
 namespace openmedia {
 
-extern const FormatDescriptor FORMAT_FFMPEG;
 extern const FormatDescriptor FORMAT_BMFF;
 extern const FormatDescriptor FORMAT_MATROSKA;
+extern const FormatDescriptor FORMAT_FFMPEG_BMFF;
+extern const FormatDescriptor FORMAT_FFMPEG_MATROSKA;
 
 // Audio
 extern const FormatDescriptor FORMAT_MP3;

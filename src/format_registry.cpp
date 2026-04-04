@@ -72,12 +72,13 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
   if (!registry) return;
 
   // Container formats
-#if defined(OPENMEDIA_AVFORMAT)
-  registry->registerFormat(&FORMAT_FFMPEG);
-#endif
-  registry->registerFormat(&FORMAT_BMFF);
+  //registry->registerFormat(&FORMAT_BMFF);
 #if defined(OPENMEDIA_MATROSKA)
-  registry->registerFormat(&FORMAT_MATROSKA);
+  //registry->registerFormat(&FORMAT_MATROSKA);
+#endif
+#if defined(OPENMEDIA_AVFORMAT)
+  registry->registerFormat(&FORMAT_FFMPEG_BMFF);
+  registry->registerFormat(&FORMAT_FFMPEG_MATROSKA);
 #endif
 
   // Audio formats
