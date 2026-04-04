@@ -20,6 +20,7 @@ OM_ENUM(OMLogCategory, uint8_t) {
   OM_CATEGORY_DEMUXER = 2,
   OM_CATEGORY_ENCODER = 3,
   OM_CATEGORY_DECODER = 4,
+  OM_CATEGORY_HARDWARE = 5,
 };
 
 namespace openmedia {

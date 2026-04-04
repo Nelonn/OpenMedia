@@ -121,7 +121,7 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 ```bash
 mkdir build && cd build
-cmake .. -DOPENMEDIA_EXAMPLE_PLAYER=ON
+cmake .. -DOPENMEDIA_EXAMPLES=ON
 cmake --build .
 ```
 

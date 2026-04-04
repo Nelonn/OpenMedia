@@ -124,20 +124,29 @@ auto avColorTransferToOmTransfer(AVColorTransferCharacteristic av_trc) -> OMTran
   }
 }
 
-/*auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries {
+auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries {
   switch (av_pri) {
-    case AVCOL_PRI_BT709: return OM_COLOR_PRIMARIES_BT709;
-    case AVCOL_PRI_BT601: return OM_COLOR_PRIMARIES_BT601;
-    case AVCOL_PRI_BT2020: return OM_COLOR_PRIMARIES_BT2020;
-    case AVCOL_PRI_SMPTE240M: return OM_COLOR_PRIMARIES_SMPTE240M;
-    case AVCOL_PRI_SMPTE432: return OM_COLOR_PRIMARIES_P3DCI;
-    case AVCOL_PRI_SMPTE431: return OM_COLOR_PRIMARIES_P3DISPLAY;
-    case AVCOL_PRI_EBU3213: return OM_COLOR_PRIMARIES_EBU3213;
-    default: return OM_COLOR_PRIMARIES_UNSPECIFIED;
+    case AVCOL_PRI_BT709: return OM_PRIMARIES_BT709;
+    case AVCOL_PRI_BT470M: return OM_PRIMARIES_BT470M;
+    case AVCOL_PRI_BT470BG: return OM_PRIMARIES_BT470BG;
+    case AVCOL_PRI_SMPTE170M: return OM_PRIMARIES_BT601;
+    case AVCOL_PRI_SMPTE240M: return OM_PRIMARIES_SMPTE240M;
+    case AVCOL_PRI_FILM: return OM_PRIMARIES_FILM;
+    case AVCOL_PRI_BT2020: return OM_PRIMARIES_BT2020;
+    case AVCOL_PRI_SMPTE428: return OM_PRIMARIES_SMPTE428;
+    case AVCOL_PRI_SMPTE431: return OM_PRIMARIES_SMPTE431;
+    case AVCOL_PRI_SMPTE432: return OM_PRIMARIES_SMPTE432;
+    case AVCOL_PRI_EBU3213: return OM_PRIMARIES_EBU3213;
+
+    case AVCOL_PRI_UNSPECIFIED:
+    case AVCOL_PRI_RESERVED0:
+    case AVCOL_PRI_RESERVED:
+    default:
+      return OM_PRIMARIES_UNKNOWN;
   }
 }
 
-auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange {
+/*auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange {
   switch (av_range) {
     case AVCOL_RANGE_MPEG: return OM_COLOR_RANGE_MPEG;
     case AVCOL_RANGE_JPEG: return OM_COLOR_RANGE_JPEG;

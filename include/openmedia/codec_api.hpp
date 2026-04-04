@@ -164,6 +164,7 @@ struct OPENMEDIA_ABI EncoderOptions {
 
 struct OPENMEDIA_ABI EncodingInfo {
   std::vector<uint8_t> extradata;
+
 };
 
 class OPENMEDIA_ABI Encoder {
