@@ -40,6 +40,7 @@ extern const CodecDescriptor CODEC_FFMPEG_H264;
 extern const CodecDescriptor CODEC_FFMPEG_H265;
 extern const CodecDescriptor CODEC_FFMPEG_H266;
 extern const CodecDescriptor CODEC_FFMPEG_EVC;
+extern const CodecDescriptor CODEC_FFMPEG_VP8;
 extern const CodecDescriptor CODEC_FFMPEG_VP9;
 extern const CodecDescriptor CODEC_FFMPEG_AV1;
 
