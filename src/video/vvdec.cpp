@@ -1,10 +1,11 @@
 #include <vvdec/vvdec.h>
 #include <algorithm>
 #include <codecs.hpp>
-#include <cstring>
+#include <iostream>
+#include <iostream>
 #include <openmedia/video.hpp>
-#include <vector>
 #include <util/io_util.hpp>
+#include <vector>
 
 namespace openmedia {
 
@@ -34,18 +35,49 @@ struct VvdecAccessUnitDeleter {
 
 static void vvdec_log_callback(void* opaque, int level, const char* format, va_list ap) {
   if (!opaque || !format) return;
-  Logger* logger = static_cast<Logger*>(opaque);
+  //Logger* logger = static_cast<Logger*>(opaque);
   va_list args_copy;
   va_copy(args_copy, ap);
   int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
   va_end(args_copy);
-  if (required_size <= 0) {
-    return;
-  }
+  if (required_size <= 0) return;
   std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
   std::vsnprintf(buffer.data(), buffer.size(), format, ap);
   std::string_view message(buffer.data(), static_cast<size_t>(required_size));
-  logger->log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
+  std::cerr << "VVdec: " << message << std::endl;
+  //logger->log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
+}
+
+static constexpr uint8_t ANNEX_B_START_CODE[] = {0x00, 0x00, 0x00, 0x01};
+static constexpr size_t ANNEX_B_START_CODE_LEN = sizeof(ANNEX_B_START_CODE);
+
+static auto isAnnexB(const uint8_t* data, size_t size) -> bool {
+  if (size < 4) return false;
+  return data[0] == 0x00 && data[1] == 0x00 &&
+         (data[2] == 0x01 ||
+          (data[2] == 0x00 && data[3] == 0x01));
+}
+
+static auto convertToAnnexB(const uint8_t* data, size_t size) -> std::vector<uint8_t> {
+  std::vector<uint8_t> out;
+  out.reserve(size + 16);
+
+  size_t offset = 0;
+  while (offset + 4 <= size) {
+    uint32_t nal_size = (static_cast<uint32_t>(data[offset]) << 24) |
+                        (static_cast<uint32_t>(data[offset + 1]) << 16) |
+                        (static_cast<uint32_t>(data[offset + 2]) << 8) |
+                        (static_cast<uint32_t>(data[offset + 3]));
+    offset += 4;
+
+    if (nal_size == 0 || offset + nal_size > size) break;
+
+    out.insert(out.end(), ANNEX_B_START_CODE,
+               ANNEX_B_START_CODE + ANNEX_B_START_CODE_LEN);
+    out.insert(out.end(), data + offset, data + offset + nal_size);
+    offset += nal_size;
+  }
+  return out;
 }
 
 class VvdecDecoder final : public Decoder {
@@ -55,10 +87,11 @@ class VvdecDecoder final : public Decoder {
   LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
+  bool extradata_sent_ = false;
+  std::vector<uint8_t> extradata_;
 
 public:
   VvdecDecoder() {}
-
   ~VvdecDecoder() override = default;
 
   auto configure(const DecoderOptions& options) -> OMError override {
@@ -68,46 +101,50 @@ public:
 
     logger_ = options.logger ? options.logger : Logger::refDefault();
 
-    // Allocate and initialize decoder parameters
     params_.reset(vvdec_params_alloc());
-    if (!params_) {
-      return OM_CODEC_OPEN_FAILED;
-    }
+    if (!params_) return OM_CODEC_OPEN_FAILED;
     vvdec_params_default(params_.get());
 
-    // Configure decoder settings
     params_->threads = 1;
     params_->logLevel = VVDEC_INFO;
     params_->filmGrainSynthesis = true;
     params_->errHandlingFlags = VVDEC_ERR_HANDLING_TRY_CONTINUE;
     params_->opaque = logger_.get();
 
-    // Open decoder
     vvdecDecoder* raw_ctx = vvdec_decoder_open(params_.get());
-    if (!raw_ctx) {
-      return OM_CODEC_OPEN_FAILED;
-    }
+    if (!raw_ctx) return OM_CODEC_OPEN_FAILED;
     ctx_.reset(raw_ctx);
 
-    // Set logging callback
-    vvdec_set_logging_callback(raw_ctx, [](void* opaque, int level, const char* format, va_list ap) {
-      //vvdec_log_callback(opaque, level, format, ap);
-    });
+    vvdec_set_logging_callback(raw_ctx, vvdec_log_callback);
 
-    // Allocate access unit for input
     access_unit_.reset(vvdec_accessUnit_alloc());
-    if (!access_unit_) {
-      return OM_CODEC_OPEN_FAILED;
-    }
+    if (!access_unit_) return OM_CODEC_OPEN_FAILED;
     vvdec_accessUnit_default(access_unit_.get());
-
-    // Allocate payload buffer (1MB should be enough for most NAL units)
     vvdec_accessUnit_alloc_payload(access_unit_.get(), 1024 * 1024);
+
+    if (!options.extradata.empty()) {
+      const uint8_t* ed = options.extradata.data();
+      size_t ed_size = options.extradata.size();
+
+      if (isAnnexB(ed, ed_size)) {
+        extradata_.assign(ed, ed + ed_size);
+      } else {
+        extradata_ = convertToAnnexB(ed, ed_size);
+      }
+    }
+
+    if (!extradata_.empty()) {
+      std::vector<Frame> dummy;
+      auto err = sendAccessUnit(extradata_.data(), extradata_.size(),
+                                -1, -1, /*is_rap=*/true, dummy);
+      if (err != OM_SUCCESS) return OM_CODEC_OPEN_FAILED;
+    }
 
     output_format_.width = options.format.video.width;
     output_format_.height = options.format.video.height;
     output_format_.format = OM_FORMAT_YUV420P;
     initialized_ = true;
+
     return OM_SUCCESS;
   }
 
@@ -124,40 +161,33 @@ public:
     std::vector<Frame> frames;
 
     if (!packet.bytes.empty()) {
-      // Copy packet data to access unit payload
-      if (static_cast<size_t>(packet.bytes.size()) > static_cast<size_t>(access_unit_->payloadSize)) {
-        // Reallocate if needed
-        vvdec_accessUnit_alloc_payload(access_unit_.get(), static_cast<int>(packet.bytes.size()));
+      const uint8_t* raw = packet.bytes.data();
+      size_t raw_size = packet.bytes.size();
+
+      std::vector<uint8_t> converted;
+      if (!isAnnexB(raw, raw_size)) {
+        converted = convertToAnnexB(raw, raw_size);
+        raw = converted.data();
+        raw_size = converted.size();
       }
 
-      memcpy(access_unit_->payload, packet.bytes.data(), packet.bytes.size());
-      access_unit_->payloadUsedSize = static_cast<int>(packet.bytes.size());
-      access_unit_->cts = static_cast<uint64_t>(packet.pts);
-      access_unit_->dts = static_cast<uint64_t>(packet.dts);
-      access_unit_->ctsValid = (packet.pts >= 0);
-      access_unit_->dtsValid = (packet.dts >= 0);
-
-      // Decode and get frame
-      vvdecFrame* frame = nullptr;
-      int res = vvdec_decode(ctx_.get(), access_unit_.get(), &frame);
-      if (res == VVDEC_OK && frame != nullptr) {
-        if (auto result = processFrame(frame)) {
-          frames.push_back(std::move(*result));
-        } else {
-          return Err(OM_CODEC_DECODE_FAILED);
-        }
-      } else if (res != VVDEC_OK && res != VVDEC_TRY_AGAIN) {
-        return Err(OM_CODEC_DECODE_FAILED);
+      auto err = sendAccessUnit(raw, raw_size, packet.pts, packet.dts, packet.is_keyframe, frames);
+      if (err != OM_SUCCESS) {
+        return Err(err);
       }
     } else {
-      // No input data - flush decoder to get remaining frames
       vvdecFrame* frame = nullptr;
-      while (vvdec_flush(ctx_.get(), &frame) == VVDEC_OK && frame != nullptr) {
-        if (auto result = processFrame(frame)) {
-          frames.push_back(std::move(*result));
-        } else {
-          return Err(OM_CODEC_DECODE_FAILED);
+      int res;
+      while ((res = vvdec_flush(ctx_.get(), &frame)) == VVDEC_OK ||
+             res == VVDEC_EOF) {
+        if (frame != nullptr) {
+          if (auto result = processFrame(frame)) {
+            frames.push_back(std::move(*result));
+          } else {
+            return Err(OM_CODEC_DECODE_FAILED);
+          }
         }
+        if (res == VVDEC_EOF) break;
       }
     }
 
@@ -165,10 +195,60 @@ public:
   }
 
   void flush() override {
-    // Flushing is handled in decode() when called with empty packet
   }
 
 private:
+  // Send one normalised Annex-B buffer to vvdec, collect any resulting frame.
+  auto sendAccessUnit(const uint8_t* data, size_t size,
+                      int64_t pts, int64_t dts,
+                      bool is_rap,
+                      std::vector<Frame>& out_frames) -> OMError {
+
+    if (size > static_cast<size_t>(access_unit_->payloadSize)) {
+      vvdec_accessUnit_alloc_payload(access_unit_.get(),
+                                     static_cast<int>(size));
+    }
+
+    std::memcpy(access_unit_->payload, data, size);
+    access_unit_->payloadUsedSize = static_cast<int>(size);
+    access_unit_->cts = static_cast<uint64_t>(pts);
+    access_unit_->dts = static_cast<uint64_t>(dts);
+    access_unit_->ctsValid = (pts >= 0);
+    access_unit_->dtsValid = (dts >= 0);
+    access_unit_->rap = is_rap;
+
+    vvdecFrame* frame = nullptr;
+    int res = vvdec_decode(ctx_.get(), access_unit_.get(), &frame);
+
+    if (res == VVDEC_OK) {
+      // Decoder produced a frame (may be nullptr for parameter sets).
+      if (frame != nullptr) {
+        if (auto result = processFrame(frame)) {
+          out_frames.push_back(std::move(*result));
+        } else {
+          return OM_CODEC_DECODE_FAILED;
+        }
+      }
+    } else if (res == VVDEC_TRY_AGAIN) {
+      // Decoder buffering; not an error - just no output yet.
+    } else if (res == VVDEC_EOF) {
+      // End of stream signalled during normal decode; drain remaining frames.
+      while (frame != nullptr) {
+        if (auto result = processFrame(frame)) {
+          out_frames.push_back(std::move(*result));
+        } else {
+          return OM_CODEC_DECODE_FAILED;
+        }
+        frame = nullptr;
+        vvdec_flush(ctx_.get(), &frame);
+      }
+    } else {
+      return OM_CODEC_DECODE_FAILED;
+    }
+
+    return OM_SUCCESS;
+  }
+
   auto processFrame(vvdecFrame* frame) -> std::optional<Frame> {
     OMPixelFormat pixel_format;
 
@@ -197,19 +277,20 @@ private:
 
     Picture out_pic(pixel_format, frame->width, frame->height);
 
-    // Copy Y plane
     copyPlane(out_pic.planes.data[0], frame->planes[0].ptr,
-              frame->width * frame->planes[0].bytesPerSample, frame->height, frame->planes[0].stride);
+              frame->width * frame->planes[0].bytesPerSample,
+              frame->height, frame->planes[0].stride);
 
-    // Copy U and V planes if not grayscale
     if (frame->colorFormat != VVDEC_CF_YUV400_PLANAR) {
       uint32_t chroma_w = frame->planes[1].width;
       uint32_t chroma_h = frame->planes[1].height;
 
       copyPlane(out_pic.planes.data[1], frame->planes[1].ptr,
-                chroma_w * frame->planes[1].bytesPerSample, chroma_h, frame->planes[1].stride);
+                chroma_w * frame->planes[1].bytesPerSample,
+                chroma_h, frame->planes[1].stride);
       copyPlane(out_pic.planes.data[2], frame->planes[2].ptr,
-                chroma_w * frame->planes[2].bytesPerSample, chroma_h, frame->planes[2].stride);
+                chroma_w * frame->planes[2].bytesPerSample,
+                chroma_h, frame->planes[2].stride);
     }
 
     Frame out_frame = {};

@@ -48,7 +48,7 @@ integration while maintaining a simple, intuitive API.
 |---------|:--------:|:--------:|-----------------------|
 | AV1     |    ✅     |    🔧    | dav1d (decoding only) |
 | H264    |    ✅     |    🔧    | OpenH264, FFmpeg      |
-| VVC     |    🔧    |    🔧    | VVdeC, VVenC          |
+| VVC     |    🔧    |    🔧    | VVdeC (Broken), VVenC |
 | EVC     | Untested | Untested | xevd, xeve            |
 | VP8/VP9 |    🔧    |    🔧    | libvpx                |
 
