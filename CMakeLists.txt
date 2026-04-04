@@ -106,7 +106,7 @@ if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
 endif ()
 
 if (WIN32)
-    target_sources(OpenMedia PRIVATE src/audio/wmf.cpp)
+    target_sources(OpenMedia PRIVATE src/audio/wmf_audio.cpp)
     #target_sources(OpenMedia PRIVATE src/video/wmf.cpp) # doesn't work
 endif ()
 

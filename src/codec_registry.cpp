@@ -111,8 +111,8 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_VORBIS);
   registry->registerCodec(&CODEC_OPUS);
 #if defined(_WIN32)
-  registry->registerCodec(&CODEC_WMF_AAC);;
-  registry->registerCodec(&CODEC_WMF_MP3);;
+  registry->registerCodec(&CODEC_WMF_AAC);
+  registry->registerCodec(&CODEC_WMF_MP3);
 #endif
 
   // Video - Software
