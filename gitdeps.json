@@ -70,6 +70,7 @@
   "third_party/external/vvdec": {
     "url": "https://github.com/fraunhoferhhi/vvdec",
     "commit": "7df9d1f978433092d06537b3fe2f92a7fc33adcc",
+    "patches": ["third_party/vvdec.patch"],
     "option": ["vvdec", "vvc_dec", "vvc_all"]
   },
   "third_party/external/vvenc": {

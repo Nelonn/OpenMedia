@@ -1,0 +1,42 @@
+diff --git a/source/Lib/vvdec/CMakeLists.txt b/source/Lib/vvdec/CMakeLists.txt
+index 6c90032..23c49c0 100644
+--- a/source/Lib/vvdec/CMakeLists.txt
++++ b/source/Lib/vvdec/CMakeLists.txt
+@@ -127,6 +127,18 @@ if( VVDEC_ENABLE_X86_SIMD )
+   add_library( ${LIB_NAME}_x86_simd OBJECT ${X86_SSE41_SRC_FILES} ${X86_AVX2_SRC_FILES} )
+   target_link_libraries( ${LIB_NAME}_x86_simd ${INTEL_ITT_LINK_TARGET} )
+ 
++  if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
++    target_compile_options(${LIB_NAME}_x86_simd PRIVATE
++            -mssse3
++            -msse4.1
++            -msse4.2
++            -mavx
++            -mavx2
++            -mavx512f
++            -fno-tree-vectorize
++    )
++  endif ()
++
+   # disble LTO for the files compiled with special architecture flags
+   set_target_properties( ${LIB_NAME}_x86_simd PROPERTIES
+                                               INTERPROCEDURAL_OPTIMIZATION                OFF
+@@ -192,6 +204,18 @@ endif()
+ 
+ add_library( ${LIB_NAME} ${SRC_FILES} $<$<TARGET_EXISTS:${LIB_NAME}_x86_simd>:$<TARGET_OBJECTS:${LIB_NAME}_x86_simd>> $<$<TARGET_EXISTS:${LIB_NAME}_arm_simd>:$<TARGET_OBJECTS:${LIB_NAME}_arm_simd>> ${INC_FILES} ${NATVIS_FILES} ${RESOURCE_FILE} )
+ 
++if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
++  target_compile_options(${LIB_NAME} PRIVATE
++          -mssse3
++          -msse4.1
++          -msse4.2
++          -mavx
++          -mavx2
++          -mavx512f
++          -fno-tree-vectorize
++  )
++endif ()
++
+ target_compile_definitions( ${LIB_NAME} PUBLIC $<$<STREQUAL:$<TARGET_PROPERTY:${LIB_NAME},TYPE>,SHARED_LIBRARY>:${LIB_NAME_UC}_DYN_LINK> )
+ 
+ target_include_directories( ${LIB_NAME} SYSTEM INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../../include> $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}> )
