@@ -1,5 +1,7 @@
 #include "avutil.hpp"
 
+#include <openmedia/log.hpp>
+
 namespace openmedia {
 
 auto LibAVUtil::getInstance() -> LibAVUtil& {
@@ -43,10 +45,47 @@ auto LibAVUtil::load() -> bool {
   av_get_sample_fmt_name = library_.getProcAddress<decltype(av_get_sample_fmt_name)>("av_get_sample_fmt_name");
   av_dict_set = library_.getProcAddress<PFN<int(AVDictionary**, const char*, const char*, int)>>("av_dict_set");
   av_dict_free = library_.getProcAddress<PFN<void(AVDictionary**)>>("av_dict_free");
+  av_log_set_callback = library_.getProcAddress<PFN<void(void (*)(void*, int, const char*, va_list))>>("av_log_set_callback");
 
   if (!av_malloc || !av_free || !av_frame_alloc || !av_frame_free || !av_frame_unref) {
     return false;
   }
+
+  av_log_set_callback([](void* userdata, int level, const char* format, va_list ap) {
+    if (!format) return;
+    va_list args_copy;
+    va_copy(args_copy, ap);
+    int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
+    va_end(args_copy);
+    if (required_size <= 0) {
+      return;
+    }
+    std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
+    std::vsnprintf(buffer.data(), buffer.size(), format, ap);
+    std::string_view message(buffer.data(), static_cast<size_t>(required_size));
+    OMLogLevel om_level;
+    switch (level) {
+      case AV_LOG_PANIC:
+      case AV_LOG_FATAL:
+        om_level = OM_LEVEL_FATAL;
+        break;
+      case AV_LOG_ERROR:
+        om_level = OM_LEVEL_ERROR;
+        break;
+      case AV_LOG_WARNING:
+        om_level = OM_LEVEL_WARNING;
+        break;
+      case AV_LOG_INFO:
+        om_level = OM_LEVEL_INFO;
+        break;
+      case AV_LOG_VERBOSE:
+      case AV_LOG_DEBUG:
+      default:
+        om_level = OM_LEVEL_VERBOSE;
+        break;
+    }
+    log(OM_CATEGORY_NONE, om_level, message);
+  });
 
   loaded_ = true;
   return true;

@@ -39,6 +39,7 @@ public:
   PFN<const char*(AVSampleFormat)> av_get_sample_fmt_name = nullptr;
   PFN<int(AVDictionary**, const char*, const char*, int)> av_dict_set = nullptr;
   PFN<void(AVDictionary**)> av_dict_free = nullptr;
+  PFN<void(void (*)(void*, int, const char*, va_list))> av_log_set_callback = nullptr;
 
 private:
   LibAVUtil() = default;

@@ -91,7 +91,6 @@ private:
 
 class DX11Decoder final : public Decoder {
   std::unique_ptr<OMDX11Context, DX11DecoderContextDeleter> hw_context_;
-  LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   OMMediaType media_type_ = OM_MEDIA_NONE;

@@ -193,17 +193,14 @@ struct AMFContextInitResult {
   amf::AMFContext2Ptr context2;
 };
 
-static auto initAMFContext(const HardwareDevice* hw_device, const LoggerRef& logger)
+static auto initAMFContext(const std::optional<HWDevice>& hw_device)
     -> AMFContextInitResult {
   AMFContextInitResult result = {};
 
   amf::AMFContextPtr ctx;
   AMF_RESULT res = G_AMF_FACTORY->CreateContext(&ctx);
   if (res != AMF_OK || !ctx) {
-    if (logger) {
-      logger->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                  "Failed to create AMF context");
-    }
+    log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create AMF context");
     result.status = res;
     return result;
   }
@@ -226,18 +223,13 @@ static auto initAMFContext(const HardwareDevice* hw_device, const LoggerRef& log
         res = result.context->InitDX11(d3d11_dev);
         if (res == AMF_OK) {
           result.device_type = HWDeviceType::DX11;
-          if (logger) {
-            logger->log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D11 device");
-          }
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D11 device");
         }
         break;
       }
       case HWDeviceType::DX12: {
         if (!result.context2) {
-          if (logger) {
-            logger->log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR,
-                        "AMFContext2 not available for DX12");
-          }
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMFContext2 not available for DX12");
           res = AMF_FAIL;
         } else {
           ID3D12Device* d3d12_dev = static_cast<ID3D12Device*>(hw_device->device);
@@ -245,18 +237,13 @@ static auto initAMFContext(const HardwareDevice* hw_device, const LoggerRef& log
         }
         if (res == AMF_OK) {
           result.device_type = HWDeviceType::DX12;
-          if (logger) {
-            logger->log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D12 device");
-          }
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D12 device");
         }
         break;
       }
       case HWDeviceType::VULKAN: {
         if (!result.context1) {
-          if (logger) {
-            logger->log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR,
-                        "AMFContext1 not available for Vulkan");
-          }
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMFContext1 not available for Vulkan");
           res = AMF_FAIL;
         } else {
           VkDevice vk_dev = static_cast<VkDevice>(hw_device->device);
@@ -264,9 +251,7 @@ static auto initAMFContext(const HardwareDevice* hw_device, const LoggerRef& log
         }
         if (res == AMF_OK) {
           result.device_type = HWDeviceType::VULKAN;
-          if (logger) {
-            logger->log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with Vulkan device"));
-          }
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with Vulkan device");
         }
         break;
       }
@@ -276,10 +261,7 @@ static auto initAMFContext(const HardwareDevice* hw_device, const LoggerRef& log
     }
 
     if (res != AMF_OK && hw_device->type != HWDeviceType::NONE) {
-      if (logger) {
-        logger->log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING,
-                    "Failed to initialize hardware backend, falling back to host memory");
-      }
+      log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING, "Failed to initialize hardware backend, falling back to host memory");
       result.device_type = HWDeviceType::NONE;
       res = AMF_OK; // Reset to OK since we're falling back gracefully
     }
@@ -314,7 +296,6 @@ class AMFDecoder final : public Decoder {
   amf::AMFContext1Ptr amf_context1_; // Vulkan
   amf::AMFContext2Ptr amf_context2_; // DX12
   amf::AMFComponentPtr decoder_;
-  LoggerRef logger_;
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -338,11 +319,11 @@ public:
 
     if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 &&
         codec_id_ != OM_CODEC_VP9 && codec_id_ != OM_CODEC_AV1) {
-      logger_ = options.logger ? options.logger : Logger::refDefault();
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
-                     "AMF decoder only supports H264, H265, VP9, and AV1");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING, "AMF decoder only supports H264, H265, VP9, and AV1");
+      return OM_CODEC_NOT_SUPPORTED;
+    }
+
+    if (!options.hw_device.has_value()) {
       return OM_CODEC_NOT_SUPPORTED;
     }
 
@@ -357,17 +338,12 @@ public:
       extradata_.assign(options.extradata.begin(), options.extradata.end());
     }
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
-
     if (!load_amf_runtime()) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to load AMF runtime");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to load AMF runtime");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
-    auto init_result = initAMFContext(options.hw_device, logger_);
+    auto init_result = initAMFContext(options.hw_device);
     if (init_result.status != AMF_OK) {
       return OM_CODEC_HWACCEL_FAILED;
     }
@@ -385,10 +361,7 @@ public:
     amf::AMFComponentPtr comp;
     AMF_RESULT res = G_AMF_FACTORY->CreateComponent(amf_context_.GetPtr(), decoder_id, &comp);
     if (res != AMF_OK || !comp) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to create AMF decoder component");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create AMF decoder component");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
@@ -411,10 +384,7 @@ public:
     output_format_amf_ = amf::AMF_SURFACE_NV12;
     res = decoder_->Init(output_format_amf_, width_, height_);
     if (res != AMF_OK) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to initialize AMF decoder");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to initialize AMF decoder");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
@@ -586,7 +556,6 @@ class AMFEncoder final : public Encoder {
   amf::AMFContext1Ptr amf_context1_; // For Vulkan
   amf::AMFContext2Ptr amf_context2_; // For DX12
   amf::AMFComponentPtr encoder_;
-  LoggerRef logger_;
   bool initialized_ = false;
   VideoFormat input_format_ = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -611,10 +580,7 @@ public:
     codec_id_ = options.format.codec_id;
 
     if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 && codec_id_ != OM_CODEC_AV1) {
-      logger_ = options.logger ? options.logger : Logger::refDefault();
-      if (logger_) {
-        logger_->log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, "AMF encoder only supports H264, H265, and AV1");
-      }
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, "AMF encoder only supports H264, H265, and AV1");
       return OM_CODEC_NOT_SUPPORTED;
     }
 
@@ -636,17 +602,12 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
-
     if (!load_amf_runtime()) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR,
-                     "Failed to load AMF runtime");
-      }
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "Failed to load AMF runtime");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
-    auto init_result = initAMFContext(options.hw_device, logger_);
+    auto init_result = initAMFContext(options.hw_device);
     if (init_result.status != AMF_OK) {
       return OM_CODEC_HWACCEL_FAILED;
     }
@@ -663,29 +624,20 @@ public:
 
     AMF_RESULT res = G_AMF_FACTORY->CreateComponent(amf_context_.GetPtr(), encoder_id, &encoder_);
     if (res != AMF_OK || !encoder_) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR,
-                     "Failed to create AMF encoder component");
-      }
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "Failed to create AMF encoder component");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
     res = configureEncoder();
     if (res != AMF_OK) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR,
-                     "Failed to configure AMF encoder");
-      }
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "Failed to configure AMF encoder");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
     input_format_amf_ = amf::AMF_SURFACE_NV12;
     res = encoder_->Init(input_format_amf_, width_, height_);
     if (res != AMF_OK) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR,
-                     "Failed to initialize AMF encoder");
-      }
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "Failed to initialize AMF encoder");
       return OM_CODEC_HWACCEL_FAILED;
     }
 

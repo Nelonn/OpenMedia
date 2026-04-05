@@ -28,9 +28,9 @@ auto profileToString(OMCodecId codec, OMProfile profile) -> std::string_view;
 
 struct OPENMEDIA_ABI DecoderOptions {
   MediaFormat format;
+  std::optional<HWDevice> hw_device;
   Rational time_base = {};
   std::span<const uint8_t> extradata;
-  LoggerRef logger;
   Dictionary extra;
 };
 
@@ -157,7 +157,7 @@ struct OPENMEDIA_ABI RateControlParams {
 
 struct OPENMEDIA_ABI EncoderOptions {
   MediaFormat format;
-  LoggerRef logger;
+  std::optional<HWDevice> hw_device;
   Dictionary extra;
   RateControlParams rate_control;
 };

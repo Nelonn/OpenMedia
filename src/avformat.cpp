@@ -448,7 +448,7 @@ public:
     close();
   }
 
-  auto open(std::unique_ptr<OutputStream> output, LoggerRef logger = {}) -> OMError override {
+  auto open(std::unique_ptr<OutputStream> output) -> OMError override {
     auto& format_loader = LibAVFormat::getInstance();
     auto& codec_loader = LibAVCodec::getInstance();
     auto& util_loader = LibAVUtil::getInstance();

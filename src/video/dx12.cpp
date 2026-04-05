@@ -92,7 +92,6 @@ static auto getCodecD3D12(OMCodecId codec_id, OMProfile profile) -> GUID {
 
 class DX12Decoder final : public Decoder {
   std::unique_ptr<OMDX12Context, DX12DecoderContextDeleter> hw_context_;
-  LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   OMMediaType media_type_ = OM_MEDIA_NONE;

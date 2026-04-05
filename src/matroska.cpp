@@ -406,7 +406,6 @@ public:
 };
 
 class MatroskaMuxer final : public BaseMuxer {
-  LoggerRef logger_;
   std::unique_ptr<OutputStreamMkvWriter> mkv_writer_;
   std::unique_ptr<mkvmuxer::Segment> segment_;
   std::map<int32_t, uint64_t> track_index_to_tracknum_;
@@ -419,11 +418,9 @@ public:
   MatroskaMuxer() = default;
   ~MatroskaMuxer() override { close(); }
 
-  auto open(std::unique_ptr<OutputStream> output, LoggerRef logger) -> OMError override {
-    logger_ = logger ? logger : Logger::refDefault();
-
+  auto open(std::unique_ptr<OutputStream> output) -> OMError override {
     if (!output || !output->isValid()) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Invalid output stream provided");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Invalid output stream provided");
       return OM_IO_INVALID_STREAM;
     }
 
@@ -431,7 +428,7 @@ public:
 
     segment_ = std::make_unique<mkvmuxer::Segment>();
     if (!segment_->Init(mkv_writer_.get())) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to initialize Matroska segment");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to initialize Matroska segment");
       return OM_FORMAT_MUXING_FAILED;
     }
 
@@ -471,11 +468,11 @@ public:
     }
 
     if (!writing_started_) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_WARNING, "Finalizing muxer without writing any frames");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_WARNING, "Finalizing muxer without writing any frames");
     }
 
     if (!segment_->Finalize()) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to finalize Matroska segment");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to finalize Matroska segment");
       return OM_FORMAT_MUXING_FAILED;
     }
 
@@ -485,7 +482,7 @@ public:
 
   auto addTrack(const Track& track) -> int32_t override {
     if (!opened_ || finalized_) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Cannot add track: muxer not in valid state");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Cannot add track: muxer not in valid state");
       return -1;
     }
 
@@ -496,12 +493,12 @@ public:
     } else if (track.format.type == OM_MEDIA_AUDIO) {
       track_number = addAudioTrack(track);
     } else {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Unsupported track type for Matroska muxing");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Unsupported track type for Matroska muxing");
       return -1;
     }
 
     if (track_number == 0) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to add track to Matroska segment");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to add track to Matroska segment");
       return -1;
     }
 
@@ -518,18 +515,18 @@ public:
 
   auto writePacket(const Packet& packet) -> OMError override {
     if (!opened_ || finalized_) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Cannot write packet: muxer not in valid state");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Cannot write packet: muxer not in valid state");
       return OM_FORMAT_MUXING_FAILED;
     }
 
     if (packet.stream_index < 0) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Invalid stream index in packet");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Invalid stream index in packet");
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
     auto it = track_index_to_tracknum_.find(packet.stream_index);
     if (it == track_index_to_tracknum_.end()) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, std::format("No track found for stream index, {}", packet.stream_index));
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, std::format("No track found for stream index, {}", packet.stream_index));
       return OM_FORMAT_STREAM_NOT_FOUND;
     }
 
@@ -567,7 +564,7 @@ public:
         }
       }
     } else {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Packet has no valid PTS or DTS");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Packet has no valid PTS or DTS");
       return OM_FORMAT_INVALID_TIMESTAMP;
     }
 
@@ -579,7 +576,7 @@ public:
 
     if (!segment_->AddFrame(packet.bytes.data(), packet.bytes.size(),
                             track_number, timestamp_ns, is_key)) {
-      logger_->log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to add frame to Matroska segment");
+      log(OM_CATEGORY_MUXER, OM_LEVEL_ERROR, "Failed to add frame to Matroska segment");
       return OM_FORMAT_MUXING_FAILED;
     }
 
