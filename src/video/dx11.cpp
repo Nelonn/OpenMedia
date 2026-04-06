@@ -118,11 +118,8 @@ public:
     if (options.format.codec_id != OM_CODEC_H264 &&
         options.format.codec_id != OM_CODEC_H265 &&
         options.format.codec_id != OM_CODEC_VP9) {
-      logger_ = options.logger ? options.logger : Logger::refDefault();
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
+      log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
                      "DX11 decoder only supports H264, H265, and VP9");
-      }
       return OM_CODEC_NOT_SUPPORTED;
     }
 
@@ -138,8 +135,6 @@ public:
       extradata_.assign(options.extradata.begin(), options.extradata.end());
     }
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
-
     if (!selectDecoderGuid()) {
       return OM_CODEC_NOT_SUPPORTED;
     }
@@ -151,20 +146,15 @@ public:
 
     hw_context_.reset(HWD3D11Context_create(init));
     if (!hw_context_) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to create DX11 hardware context");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create DX11 hardware context");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
     // Create Media Foundation decoder transform
     HRESULT hr = createDecoderTransform();
     if (FAILED(hr)) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
                      "Failed to create decoder transform");
-      }
       return OM_CODEC_HWACCEL_FAILED;
     }
 
