@@ -378,19 +378,19 @@ public:
   explicit OutputStreamMkvWriter(std::unique_ptr<OutputStream> output)
       : output_(std::move(output)) {}
 
-  auto Write(const void* buf, uint32_t len) -> int32_t override {
+  auto Write(const void* buf, mkvmuxer::uint32 len) -> mkvmuxer::int32 override {
     if (!output_ || !output_->isValid() || !buf || len == 0) return -1;
     const auto data = std::span<const uint8_t>(static_cast<const uint8_t*>(buf), len);
     const size_t written = output_->write(data);
     return (written == len) ? 0 : -1;
   }
 
-  auto Position() const -> int64_t override {
+  auto Position() const -> mkvmuxer::int64 override {
     if (!output_) return -1;
     return output_->tell();
   }
 
-  auto Position(int64_t position) -> int32_t override {
+  auto Position(mkvmuxer::int64 position) -> mkvmuxer::int32 override {
     if (!output_ || !output_->canSeek()) return -1;
     return output_->seek(position, Whence::BEG) ? 0 : -1;
   }
@@ -399,7 +399,7 @@ public:
     return output_ && output_->canSeek();
   }
 
-  void ElementStartNotify(uint64_t element_id, int64_t position) override {
+  void ElementStartNotify(mkvmuxer::uint64 element_id, mkvmuxer::int64 position) override {
     (void) element_id;
     (void) position;
   }

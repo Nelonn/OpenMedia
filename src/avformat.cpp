@@ -88,7 +88,7 @@ static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
     case AV_CODEC_ID_HEVC: return OM_CODEC_H265;
     case AV_CODEC_ID_VVC: return OM_CODEC_H266;
     case AV_CODEC_ID_EVC: return OM_CODEC_EVC;
-    case AV_CODEC_ID_LCEVC: return OM_CODEC_LCEVC;
+    //case AV_CODEC_ID_LCEVC: return OM_CODEC_LCEVC;
     case AV_CODEC_ID_VP8: return OM_CODEC_VP8;
     case AV_CODEC_ID_VP9: return OM_CODEC_VP9;
     case AV_CODEC_ID_AV1: return OM_CODEC_AV1;
