@@ -22,6 +22,9 @@
 #include <memory>
 #include <openmedia/video.hpp>
 #include <vector>
+#include <hw_dx11_priv.hpp>
+#include <hw_dx12_priv.hpp>
+#include <hw_vulkan_priv.hpp>
 
 namespace openmedia {
 
@@ -219,7 +222,7 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
   if (hw_device) {
     switch (hw_device->type) {
       case HWDeviceType::DX11: {
-        ID3D11Device* d3d11_dev = static_cast<ID3D11Device*>(hw_device->device);
+        ID3D11Device* d3d11_dev = static_cast<OMDX11Context*>(hw_device->context)->device.Get();
         res = result.context->InitDX11(d3d11_dev);
         if (res == AMF_OK) {
           result.device_type = HWDeviceType::DX11;
@@ -232,7 +235,7 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
           log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMFContext2 not available for DX12");
           res = AMF_FAIL;
         } else {
-          ID3D12Device* d3d12_dev = static_cast<ID3D12Device*>(hw_device->device);
+          ID3D12Device* d3d12_dev = static_cast<OMDX12Context*>(hw_device->context)->device.Get();
           res = result.context2->InitDX12(d3d12_dev);
         }
         if (res == AMF_OK) {
@@ -246,7 +249,7 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
           log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMFContext1 not available for Vulkan");
           res = AMF_FAIL;
         } else {
-          VkDevice vk_dev = static_cast<VkDevice>(hw_device->device);
+          VkDevice vk_dev = static_cast<OMVulkanContext*>(hw_device->context)->vk_device;
           res = result.context1->InitVulkan(vk_dev);
         }
         if (res == AMF_OK) {
