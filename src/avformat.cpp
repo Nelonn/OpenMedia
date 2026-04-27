@@ -35,14 +35,20 @@ auto LibAVFormat::load() -> bool {
   }
 
 #if defined(_WIN32)
-  const char* library_name = "avformat-62.dll";
+  library_.open("avformat-62.dll");
 #elif defined(__APPLE__)
-  const char* library_name = "libavformat-62.dylib";
+  static constexpr const char* kAppleCandidates[] = {
+      "/opt/homebrew/lib/libavformat.dylib",
+      "/opt/homebrew/lib/libavformat.62.dylib",
+      "libavformat-62.dylib",
+  };
+  for (const char* candidate : kAppleCandidates) {
+    library_.open(candidate);
+    if (library_.success()) break;
+  }
 #else
-  const char* library_name = "libavformat-62.so";
+  library_.open("libavformat-62.so");
 #endif
-
-  library_.open(library_name);
   if (!library_.success()) {
     return false;
   }

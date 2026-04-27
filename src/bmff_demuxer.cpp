@@ -1182,7 +1182,7 @@ public:
 
     for (size_t i = 0; i < samples_.size(); ++i) {
       const auto& s = samples_[i];
-      if (s.stream_index == 0) continue;
+      if (stream_idx >= 0 && s.stream_index != stream_idx) continue;
       if (mode != SeekMode::DONT_SYNC && !s.is_keyframe) continue;
 
       const int64_t diff = s.dts - target_ts;

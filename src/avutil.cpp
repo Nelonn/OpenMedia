@@ -14,14 +14,20 @@ auto LibAVUtil::load() -> bool {
   if (loaded_) return true;
 
 #if defined(_WIN32)
-  const char* library_name = "avutil-60.dll";
+  library_.open("avutil-60.dll");
 #elif defined(__APPLE__)
-  const char* library_name = "libavutil-60.dylib";
+  static constexpr const char* kAppleCandidates[] = {
+      "/opt/homebrew/lib/libavutil.dylib",
+      "/opt/homebrew/lib/libavutil.60.dylib",
+      "libavutil-60.dylib",
+  };
+  for (const char* candidate : kAppleCandidates) {
+    library_.open(candidate);
+    if (library_.success()) break;
+  }
 #else
-  const char* library_name = "libavutil-60.so";
+  library_.open("libavutil-60.so");
 #endif
-
-  library_.open(library_name);
   if (!library_.success()) {
     return false;
   }

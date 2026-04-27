@@ -102,6 +102,22 @@ private:
 // ---------------------------------------------------------------------------
 namespace detail {
 
+static auto id3v2TagSize(std::span<const uint8_t> data) noexcept -> size_t {
+    if (data.size() < 10) return 0;
+    if (data[0] != 'I' || data[1] != 'D' || data[2] != '3') return 0;
+    if (data[3] == 0xFF || data[4] == 0xFF) return 0;
+    if (data[6] & 0x80 || data[7] & 0x80 || data[8] & 0x80 || data[9] & 0x80)
+        return 0;
+
+    size_t tag_size = (static_cast<size_t>(data[6] & 0x7F) << 21) |
+                      (static_cast<size_t>(data[7] & 0x7F) << 14) |
+                      (static_cast<size_t>(data[8] & 0x7F) << 7) |
+                      static_cast<size_t>(data[9] & 0x7F);
+    tag_size += 10;
+    if (data[5] & 0x10) tag_size += 10;
+    return tag_size;
+}
+
 static auto getBitsPerComponent(OMPixelFormat fmt) noexcept -> uint8_t {
     switch (fmt) {
         case OM_FORMAT_YUV420P10:
@@ -171,6 +187,45 @@ static auto normaliseBits(std::vector<uint8_t> src,
         std::memcpy(dst.data() + i * 4, &s, 4);
     }
     return dst;
+}
+
+static auto s32ToS16(std::span<const uint8_t> src) -> std::vector<uint8_t> {
+    const size_t samples = src.size() / sizeof(int32_t);
+    std::vector<uint8_t> dst(samples * sizeof(int16_t));
+    for (size_t i = 0; i < samples; ++i) {
+        int32_t s32 = 0;
+        std::memcpy(&s32, src.data() + i * sizeof(int32_t), sizeof(s32));
+        const int16_t s16 = static_cast<int16_t>(std::clamp(s32 >> 16,
+                                                            int32_t(INT16_MIN),
+                                                            int32_t(INT16_MAX)));
+        std::memcpy(dst.data() + i * sizeof(int16_t), &s16, sizeof(s16));
+    }
+    return dst;
+}
+
+struct PreparedAudio {
+    std::vector<uint8_t> bytes;
+    OMSampleFormat sample_format = OM_SAMPLE_UNKNOWN;
+};
+
+static auto prepareForAudioSink(const AudioSamples& samples) -> PreparedAudio {
+    PreparedAudio prepared;
+    prepared.sample_format = samples.format.sample_format;
+    prepared.bytes = detail::interleave(samples);
+
+    const uint8_t bits = samples.bits_per_sample != 0
+        ? samples.bits_per_sample
+        : samples.format.bits_per_sample;
+
+    if (prepared.sample_format == OM_SAMPLE_S32) {
+        prepared.bytes = detail::normaliseBits(std::move(prepared.bytes), bits);
+#if defined(__APPLE__)
+        prepared.bytes = detail::s32ToS16(prepared.bytes);
+        prepared.sample_format = OM_SAMPLE_S16;
+#endif
+    }
+
+    return prepared;
 }
 
 static auto formatTime(double seconds) -> std::string {
@@ -272,9 +327,25 @@ public:
             return false;
         }
 
-        uint8_t probe[2048];
-        const size_t n  = input->read(probe);
-        const DetectedFormat fmt = format_detector_.detect({probe, n});
+        std::vector<uint8_t> probe(2048);
+        size_t n = input->read(probe);
+        probe.resize(n);
+
+        DetectedFormat fmt = format_detector_.detect(probe);
+        if (fmt.container == OM_CONTAINER_MP3) {
+            const size_t id3_size = detail::id3v2TagSize(probe);
+            const int64_t file_size = input->size();
+            if (id3_size > probe.size() &&
+                file_size > 0 &&
+                static_cast<int64_t>(id3_size + 4) <= file_size) {
+                probe.resize(id3_size + 4);
+                input->seek(0, Whence::BEG);
+                n = input->read(probe);
+                probe.resize(n);
+                fmt = format_detector_.detect(probe);
+            }
+        }
+
         if (fmt.isUnknown()) {
             SDL_Log("[Player] Unknown format: %s", path.c_str());
             return false;
@@ -506,7 +577,14 @@ private:
 
     void setupAudioDecoder(const Track& track) {
         if (!makeDecoder(track, audio_decoder_)) return;
+#if defined(__APPLE__)
+        // Keep wall-clock pacing until the audio device is actually primed
+        // and consuming samples. AudioSink switches the master clock to AUDIO
+        // mode at playback start.
+        clock_.setMode(AVClock::Mode::WALL);
+#else
         clock_.setMode(AVClock::Mode::AUDIO);
+#endif
         clock_.reset(0.0);
         audio_time_base_ = track.time_base;
         if (video_stream_index_ < 0) {
@@ -637,31 +715,36 @@ private:
                 const AudioSamples& s = std::get<AudioSamples>(frame.data);
                 if (s.nb_samples == 0) continue;
 
+                auto prepared = detail::prepareForAudioSink(s);
+
                 if (!audio_sink_.isOpen()) {
-                    const size_t bps = getBytesPerSample(s.format.sample_format);
+                    const size_t bps = getBytesPerSample(prepared.sample_format);
                     if (!audio_sink_.open(
-                            detail::toSdlFormat(s.format.sample_format),
+                            detail::toSdlFormat(prepared.sample_format),
                             int(s.format.channels),
                             int(s.format.sample_rate),
                             bps, &clock_))
                         continue;
                 }
 
-                auto pcm = detail::normaliseBits(
-                    detail::interleave(s), s.format.bits_per_sample);
-
                 // Push PCM to the sink.  The sink's own ringbuffer provides
                 // back-pressure; check stop_requested_ between partial writes.
                 size_t written = 0;
-                while (written < pcm.size() && !stop_requested_) {
-                    written += audio_sink_.pushPcm(
-                        pcm.data() + written, pcm.size() - written);
-                    if (written < pcm.size())
+                const double pts_sec = static_cast<double>(frame.pts) * 
+                                       audio_time_base_.num / audio_time_base_.den;
+                while (written < prepared.bytes.size() && !stop_requested_) {
+                    const size_t pushed = audio_sink_.pushPcm(
+                        prepared.bytes.data() + written, prepared.bytes.size() - written);
+                    written += pushed;
+#if defined(__APPLE__)
+                    if (pushed > 0 && !audio_sink_.started()) {
+                        audio_sink_.tickBuffering(pts_sec);
+                    }
+#endif
+                    if (written < prepared.bytes.size())
                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 }
 
-                const double pts_sec = static_cast<double>(frame.pts) * 
-                                       audio_time_base_.num / audio_time_base_.den;
                 audio_sink_.tickBuffering(pts_sec);
             }
         }
@@ -730,25 +813,7 @@ private:
         video_packet_queue_.abort();
         video_frame_queue_.abort();
 
-        // 2. Flush codec internal state.
-        audio_sink_.pause();
-        audio_sink_.clearBuffer();
-        if (audio_decoder_) audio_decoder_->flush();
-        if (video_decoder_) video_decoder_->flush();
-
-        // 3. Reset queues for reuse.
-        audio_packet_queue_.reset();
-        video_packet_queue_.reset();
-        video_frame_queue_.reset();
-
-        // 4. Seek the demuxer.
-        const double target_secs = static_cast<double>(progress) * total_duration_secs_;
-        
-        const int64_t target_us = static_cast<int64_t>(target_secs * 1e9) / 1000;
-
-        if (demuxer_->seek(-1, target_us) == OM_SUCCESS)
-            clock_.reset(target_secs);
-
+        // 2. Wait for decoder threads to exit before touching decoder state.
         if (audio_decoder_thread_.joinable()) {
           audio_decoder_thread_.join();
         }
@@ -756,13 +821,32 @@ private:
           video_decoder_thread_.join();
         }
 
-        // 5. Re-launch decoder threads (they had exited after abort).
+        // 3. Flush codec internal state once the worker threads are gone.
+        audio_sink_.pause();
+        audio_sink_.clearBuffer();
+        if (audio_decoder_) audio_decoder_->flush();
+        if (video_decoder_) video_decoder_->flush();
+
+        // 4. Reset queues for reuse.
+        audio_packet_queue_.reset();
+        video_packet_queue_.reset();
+        video_frame_queue_.reset();
+
+        // 5. Seek the demuxer.
+        const double target_secs = static_cast<double>(progress) * total_duration_secs_;
+        
+        const int64_t target_us = static_cast<int64_t>(target_secs * 1e9) / 1000;
+
+        if (demuxer_->seek(-1, target_us) == OM_SUCCESS)
+            clock_.reset(target_secs);
+
+        // 6. Re-launch decoder threads (they had exited after abort).
         if (has_audio_)
             audio_decoder_thread_ = std::thread([this] { audioDecodeLoop(); });
         if (has_video_)
             video_decoder_thread_ = std::thread([this] { videoDecodeLoop(); });
 
-        // 6. Prime the pipeline by pushing a few packets before returning.
+        // 7. Prime the pipeline by pushing a few packets before returning.
         for (int i = 0; i < 12 && !stop_requested_; ++i) {
             auto res = demuxer_->readPacket();
             if (res.isErr()) break;

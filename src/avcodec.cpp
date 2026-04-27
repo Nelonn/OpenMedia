@@ -8,6 +8,29 @@
 
 namespace openmedia {
 
+namespace {
+
+#if defined(__APPLE__)
+static auto normaliseAppleAlacExtradata(OMCodecId codec_id,
+                                        std::span<const uint8_t> extradata)
+    -> std::vector<uint8_t> {
+  if (codec_id != OM_CODEC_ALAC || extradata.size() != 24) {
+    return std::vector<uint8_t>(extradata.begin(), extradata.end());
+  }
+
+  // FFmpeg's ALAC decoder expects the full 36-byte QuickTime 'alac' atom:
+  // size:4, type:4, version/flags:4, config:24.
+  std::vector<uint8_t> atom;
+  atom.reserve(36);
+  atom.insert(atom.end(), {0x00, 0x00, 0x00, 0x24, 'a', 'l', 'a', 'c',
+                           0x00, 0x00, 0x00, 0x00});
+  atom.insert(atom.end(), extradata.begin(), extradata.end());
+  return atom;
+}
+#endif
+
+} // namespace
+
 auto LibAVCodec::getInstance() -> LibAVCodec& {
   static LibAVCodec instance;
   return instance;
@@ -26,14 +49,20 @@ auto LibAVCodec::load() -> bool {
   }
 
 #if defined(_WIN32)
-  const char* library_name = "avcodec-62.dll";
+  library_.open("avcodec-62.dll");
 #elif defined(__APPLE__)
-  const char* library_name = "libavcodec-62.dylib";
+  static constexpr const char* kAppleCandidates[] = {
+      "/opt/homebrew/lib/libavcodec.dylib",
+      "/opt/homebrew/lib/libavcodec.62.dylib",
+      "libavcodec-62.dylib",
+  };
+  for (const char* candidate : kAppleCandidates) {
+    library_.open(candidate);
+    if (library_.success()) break;
+  }
 #else
-  const char* library_name = "libavcodec-62.so";
+  library_.open("libavcodec-62.so");
 #endif
-
-  library_.open(library_name);
   if (!library_.success()) {
     return false;
   }
@@ -100,6 +129,7 @@ public:
     switch (codec_id_) {
       // Audio codecs
       case OM_CODEC_AAC: av_codec_id = AV_CODEC_ID_AAC; break;
+      case OM_CODEC_ALAC: av_codec_id = AV_CODEC_ID_ALAC; break;
       case OM_CODEC_MP3: av_codec_id = AV_CODEC_ID_MP3; break;
       case OM_CODEC_OPUS: av_codec_id = AV_CODEC_ID_OPUS; break;
       case OM_CODEC_VORBIS: av_codec_id = AV_CODEC_ID_VORBIS; break;
@@ -140,15 +170,22 @@ public:
       codec_ctx_->coded_height = options.format.video.height;
     }
 
-    if (!options.extradata.empty()) {
-      codec_ctx_->extradata_size = static_cast<int>(options.extradata.size());
+    std::vector<uint8_t> normalised_extradata;
+    std::span<const uint8_t> extradata = options.extradata;
+#if defined(__APPLE__)
+    normalised_extradata = normaliseAppleAlacExtradata(codec_id_, options.extradata);
+    extradata = normalised_extradata;
+#endif
+
+    if (!extradata.empty()) {
+      codec_ctx_->extradata_size = static_cast<int>(extradata.size());
       codec_ctx_->extradata = static_cast<uint8_t*>(
-          util_loader.av_malloc(options.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+          util_loader.av_malloc(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
       if (!codec_ctx_->extradata) {
         return OM_COMMON_OUT_OF_MEMORY;
       }
-      memcpy(codec_ctx_->extradata, options.extradata.data(), options.extradata.size());
-      memset(codec_ctx_->extradata + options.extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+      memcpy(codec_ctx_->extradata, extradata.data(), extradata.size());
+      memset(codec_ctx_->extradata + extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
     }
 
     int ret = codec_loader.avcodec_open2(codec_ctx_, codec, nullptr);
@@ -448,13 +485,23 @@ const CodecDescriptor CODEC_FFMPEG_AV1 = {
 };
 
 const CodecDescriptor CODEC_FFMPEG_AAC = {
-    .codec_id = OM_CODEC_AAC,
-    .type = OM_MEDIA_AUDIO,
-    .name = "ffmpeg_aac",
-    .long_name = "AAC (Advanced Audio Coding) (FFmpeg)",
+  .codec_id = OM_CODEC_AAC,
+  .type = OM_MEDIA_AUDIO,
+  .name = "ffmpeg_aac",
+  .long_name = "AAC (Advanced Audio Coding) (FFmpeg)",
     .vendor = "FFmpeg",
     .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_AAC); },
+  .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_AAC); },
+};
+
+const CodecDescriptor CODEC_FFMPEG_ALAC = {
+    .codec_id = OM_CODEC_ALAC,
+    .type = OM_MEDIA_AUDIO,
+    .name = "ffmpeg_alac",
+    .long_name = "ALAC (Apple Lossless Audio Codec) (FFmpeg)",
+    .vendor = "FFmpeg",
+    .flags = CodecFlags::NONE,
+    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_ALAC); },
 };
 
 const CodecDescriptor CODEC_FFMPEG_MP3 = {
