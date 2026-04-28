@@ -102,17 +102,30 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   // Audio codecs
   registry->registerCodec(&CODEC_PCM_S16LE);
   registry->registerCodec(&CODEC_PCM_F32LE);
+#if defined(__APPLE__)
+  registry->registerCodec(&CODEC_AUDIO_TOOLBOX_ALAC);
+#else
   registry->registerCodec(&CODEC_ALAC);
+#endif
 #if defined(OPENMEDIA_FDK_AAC)
   registry->registerCodec(&CODEC_FDK_AAC);
 #endif
+#if defined(__APPLE__)
+  registry->registerCodec(&CODEC_AUDIO_TOOLBOX_MP3);
+#else
   registry->registerCodec(&CODEC_MP3);
+#endif
   registry->registerCodec(&CODEC_FLAC);
   registry->registerCodec(&CODEC_VORBIS);
   registry->registerCodec(&CODEC_OPUS);
 #if defined(_WIN32)
   registry->registerCodec(&CODEC_WMF_AAC);
   registry->registerCodec(&CODEC_WMF_MP3);
+#endif
+#if defined(__APPLE__)
+  registry->registerCodec(&CODEC_AUDIO_TOOLBOX_AAC);
+  registry->registerCodec(&CODEC_AUDIO_TOOLBOX_AC3);
+  registry->registerCodec(&CODEC_AUDIO_TOOLBOX_EAC3);
 #endif
 
   // Video - Software

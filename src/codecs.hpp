@@ -15,6 +15,11 @@ extern const CodecDescriptor CODEC_VORBIS;
 extern const CodecDescriptor CODEC_OPUS;
 extern const CodecDescriptor CODEC_WMF_AAC;
 extern const CodecDescriptor CODEC_WMF_MP3;
+extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_ALAC;
+extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_MP3;
+extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_AAC;
+extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_AC3;
+extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3;
 
 // Audio - FFmpeg
 extern const CodecDescriptor CODEC_FFMPEG_AAC;

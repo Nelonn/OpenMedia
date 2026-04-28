@@ -111,6 +111,12 @@ if (WIN32)
     #target_sources(OpenMedia PRIVATE src/video/wmf.cpp) # doesn't work
 endif ()
 
+if (APPLE)
+    find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+    target_link_libraries(OpenMedia PRIVATE ${AUDIOTOOLBOX_FRAMEWORK})
+    target_sources(OpenMedia PRIVATE src/audio/audio_toolbox.cpp)
+endif ()
+
 if (OPENMEDIA_AMF)
     target_sources(OpenMedia PRIVATE src/video/amf.cpp)
     target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/amf-headers)
@@ -351,8 +357,12 @@ if (OPENMEDIA_WAV)
     target_sources(OpenMedia PRIVATE src/audio/wav_demuxer.cpp)
 endif ()
 
-if (OPENMEDIA_MP3)
+if (OPENMEDIA_MP3 AND NOT APPLE)
     target_sources(OpenMedia PRIVATE src/audio/mp3_decoder.cpp)
+    target_sources(OpenMedia PRIVATE src/audio/mp3_demuxer.cpp)
+endif ()
+
+if (OPENMEDIA_MP3 AND APPLE)
     target_sources(OpenMedia PRIVATE src/audio/mp3_demuxer.cpp)
 endif ()
 

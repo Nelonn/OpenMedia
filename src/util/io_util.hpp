@@ -249,7 +249,7 @@ private:
     invalidateCache();
     if (!input_->seek(pos, Whence::BEG)) return false;
     cache_pos_ = pos;
-    const size_t to_read = std::min(DEFAULT_CACHE_SIZE, stream_size_ - pos);
+    const size_t to_read = std::min(DEFAULT_CACHE_SIZE, static_cast<size_t>(stream_size_ - pos));
     const size_t n = input_->read(std::span<uint8_t>(cache_.data(), to_read));
     cache_size_ = n;
     return n > 0;
