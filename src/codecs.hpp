@@ -43,6 +43,7 @@ extern const CodecDescriptor CODEC_FFMPEG_EVC;
 extern const CodecDescriptor CODEC_FFMPEG_VP8;
 extern const CodecDescriptor CODEC_FFMPEG_VP9;
 extern const CodecDescriptor CODEC_FFMPEG_AV1;
+extern const CodecDescriptor CODEC_FFMPEG_PRORES;
 
 // Video - DirectX11
 extern const CodecDescriptor CODEC_DX11_H264;

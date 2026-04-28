@@ -117,6 +117,7 @@ public:
       case OM_CODEC_VP9: av_codec_id = AV_CODEC_ID_VP9; break;
       case OM_CODEC_AV1: av_codec_id = AV_CODEC_ID_AV1; break;
       case OM_CODEC_MPEG4: av_codec_id = AV_CODEC_ID_MPEG4; break;
+      case OM_CODEC_PRORES: av_codec_id = AV_CODEC_ID_PRORES; break;
       default: return OM_CODEC_NOT_SUPPORTED;
     }
 
@@ -125,35 +126,54 @@ public:
       return OM_CODEC_NOT_SUPPORTED;
     }
 
-    codec_ctx_ = codec_loader.avcodec_alloc_context3(codec);
-    if (!codec_ctx_) {
-      return OM_COMMON_OUT_OF_MEMORY;
-    }
-
-    codec_ctx_->pkt_timebase.num = options.time_base.num;
-    codec_ctx_->pkt_timebase.den = options.time_base.den;
-
-    if (options.format.type == OM_MEDIA_VIDEO) {
-      codec_ctx_->framerate.num = options.format.video.framerate.num;
-      codec_ctx_->framerate.den = options.format.video.framerate.den;
-      codec_ctx_->coded_width = options.format.video.width;
-      codec_ctx_->coded_height = options.format.video.height;
-    }
-
-    if (!options.extradata.empty()) {
-      codec_ctx_->extradata_size = static_cast<int>(options.extradata.size());
-      codec_ctx_->extradata = static_cast<uint8_t*>(
-          util_loader.av_malloc(options.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
-      if (!codec_ctx_->extradata) {
+    auto configure_context = [&](bool minimal) -> OMError {
+      codec_ctx_ = codec_loader.avcodec_alloc_context3(codec);
+      if (!codec_ctx_) {
         return OM_COMMON_OUT_OF_MEMORY;
       }
-      memcpy(codec_ctx_->extradata, options.extradata.data(), options.extradata.size());
-      memset(codec_ctx_->extradata + options.extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
-    }
 
-    int ret = codec_loader.avcodec_open2(codec_ctx_, codec, nullptr);
-    if (ret < 0) {
-      return avErrorToOmError(ret);
+      if (!minimal) {
+        if (options.time_base.den > 0) {
+          codec_ctx_->pkt_timebase.num = options.time_base.num;
+          codec_ctx_->pkt_timebase.den = options.time_base.den;
+        }
+
+        if (options.format.type == OM_MEDIA_VIDEO) {
+          if (options.format.video.framerate.den > 0) {
+            codec_ctx_->framerate.num = options.format.video.framerate.num;
+            codec_ctx_->framerate.den = options.format.video.framerate.den;
+          }
+          codec_ctx_->coded_width = options.format.video.width;
+          codec_ctx_->coded_height = options.format.video.height;
+        }
+
+        if (!options.extradata.empty()) {
+          codec_ctx_->extradata_size = static_cast<int>(options.extradata.size());
+          codec_ctx_->extradata = static_cast<uint8_t*>(
+              util_loader.av_malloc(options.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+          if (!codec_ctx_->extradata) {
+            return OM_COMMON_OUT_OF_MEMORY;
+          }
+          memcpy(codec_ctx_->extradata, options.extradata.data(), options.extradata.size());
+          memset(codec_ctx_->extradata + options.extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        }
+      }
+
+      const int ret = codec_loader.avcodec_open2(codec_ctx_, codec, nullptr);
+      if (ret < 0) {
+        codec_loader.avcodec_free_context(&codec_ctx_);
+        return avErrorToOmError(ret);
+      }
+
+      return OM_SUCCESS;
+    };
+
+    OMError err = configure_context(false);
+    if (err != OM_SUCCESS) {
+      err = configure_context(true);
+      if (err != OM_SUCCESS) {
+        return err;
+      }
     }
 
     frame_ = util_loader.av_frame_alloc();
@@ -445,6 +465,16 @@ const CodecDescriptor CODEC_FFMPEG_AV1 = {
     .vendor = "FFmpeg",
     .flags = CodecFlags::NONE,
     .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_AV1); },
+};
+
+const CodecDescriptor CODEC_FFMPEG_PRORES = {
+    .codec_id = OM_CODEC_PRORES,
+    .type = OM_MEDIA_VIDEO,
+    .name = "ffmpeg_prores",
+    .long_name = "Apple ProRes (FFmpeg)",
+    .vendor = "FFmpeg",
+    .flags = CodecFlags::NONE,
+    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_PRORES); },
 };
 
 const CodecDescriptor CODEC_FFMPEG_AAC = {

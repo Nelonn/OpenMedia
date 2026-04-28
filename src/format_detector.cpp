@@ -25,7 +25,6 @@ void FormatDetector::addStandardContainers() {
     if (data.size() >= 8 && load_u32(data.data() + 4) == magic_u32('f', 't', 'y', 'p')) {
       const uint32_t brand = data.size() >= 12 ? load_u32(data.data() + 8) : 0;
       if (brand == magic_u32('w', 'e', 'b', 'm')) return DetectedFormat::fromContainer(OM_CONTAINER_WEBM);
-      if (brand == magic_u32('q', 't', ' ', ' ')) return DetectedFormat::fromContainer(OM_CONTAINER_MOV);
       return DetectedFormat::fromContainer(OM_CONTAINER_MP4);
     }
     if (v0 == magic_u32('O', 'g', 'g', 'S')) return DetectedFormat::fromContainer(OM_CONTAINER_OGG);

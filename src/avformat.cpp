@@ -93,6 +93,7 @@ static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
     case AV_CODEC_ID_VP9: return OM_CODEC_VP9;
     case AV_CODEC_ID_AV1: return OM_CODEC_AV1;
     case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
+    case AV_CODEC_ID_PRORES: return OM_CODEC_PRORES;
     case AV_CODEC_ID_THEORA: return OM_CODEC_THEORA;
 
     // Audio codecs
@@ -406,6 +407,7 @@ static auto omCodecIdToAvCodecId(OMCodecId codec_id) -> AVCodecID {
     case OM_CODEC_VP9: return AV_CODEC_ID_VP9;
     case OM_CODEC_AV1: return AV_CODEC_ID_AV1;
     case OM_CODEC_MPEG4: return AV_CODEC_ID_MPEG4;
+    case OM_CODEC_PRORES: return AV_CODEC_ID_PRORES;
     case OM_CODEC_AAC: return AV_CODEC_ID_AAC;
     case OM_CODEC_MP3: return AV_CODEC_ID_MP3;
     case OM_CODEC_OPUS: return AV_CODEC_ID_OPUS;

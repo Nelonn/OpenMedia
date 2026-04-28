@@ -20,6 +20,7 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_VP9: return {"VP9", "VP9", OM_MEDIA_VIDEO};
     case OM_CODEC_AV1: return {"AV1", "AV1 (AOMedia Video 1)", OM_MEDIA_VIDEO};
     case OM_CODEC_MPEG4: return {"MPEG-4", "MPEG-4 Video", OM_MEDIA_VIDEO};
+    case OM_CODEC_PRORES: return {"Apple ProRes", "Apple ProRes", OM_MEDIA_VIDEO};
     case OM_CODEC_THEORA:
       return {"Theora", "Theora", OM_MEDIA_VIDEO};
 
@@ -112,6 +113,18 @@ auto profileToString(OMCodecId codec, OMProfile profile) -> std::string_view {
         case OM_PROFILE_AV1_MAIN: return "Main";
         case OM_PROFILE_AV1_HIGH: return "High";
         case OM_PROFILE_AV1_PROFESSIONAL: return "Professional";
+        default: break;
+      }
+      break;
+
+    case OM_CODEC_PRORES:
+      switch (profile) {
+        case OM_PROFILE_PRORES_PROXY: return "Proxy";
+        case OM_PROFILE_PRORES_LT: return "LT";
+        case OM_PROFILE_PRORES_STANDARD: return "422";
+        case OM_PROFILE_PRORES_HQ: return "422 HQ";
+        case OM_PROFILE_PRORES_4444: return "4444";
+        case OM_PROFILE_PRORES_XQ: return "4444 XQ";
         default: break;
       }
       break;

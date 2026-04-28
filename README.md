@@ -44,14 +44,15 @@ integration while maintaining a simple, intuitive API.
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Codec     | Decoding | Encoding | Backends                      |
-|-----------|:--------:|:--------:|-------------------------------|
-| AV1       |    ✅     |    🔧    | dav1d (decoding only)         |
-| H264      |    ✅     |    🔧    | OpenH264, FFmpeg              |
-| H265/HEVC |    ✅     |    🔧    | FFmpeg                        |
-| H266/VVC  |    ✅     |    🔧    | FFmpeg, VVdeC (Broken), VVenC |
-| EVC       | Untested | Untested | FFmpeg, xevd, xeve            |
-| VP8/VP9   | Untested |    🔧    | FFmpeg, libvpx                |
+| Codec        | Decoding | Encoding | Backends                      |
+|--------------|:--------:|:--------:|-------------------------------|
+| AV1          |    ✅     |    🔧    | dav1d (decoding only)         |
+| H264         |    ✅     |    🔧    | OpenH264, FFmpeg              |
+| H265/HEVC    |    ✅     |    🔧    | FFmpeg                        |
+| H266/VVC     |    ✅     |    🔧    | FFmpeg, VVdeC (Broken), VVenC |
+| Apple ProRes |    ✅     |    🔧    | FFmpeg                        |
+| EVC          | Untested | Untested | FFmpeg, xevd, xeve            |
+| VP8/VP9      | Untested |    🔧    | FFmpeg, libvpx                |
 
 ### Image Codecs
 

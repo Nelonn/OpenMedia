@@ -146,6 +146,7 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_FFMPEG_VP8);
   registry->registerCodec(&CODEC_FFMPEG_VP9);
   registry->registerCodec(&CODEC_FFMPEG_AV1);
+  registry->registerCodec(&CODEC_FFMPEG_PRORES);
 #endif
 
   // Video - DirectX11

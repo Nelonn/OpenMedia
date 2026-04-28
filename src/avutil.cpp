@@ -62,7 +62,7 @@ auto LibAVUtil::load() -> bool {
     }
     std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
     std::vsnprintf(buffer.data(), buffer.size(), format, ap);
-    std::string_view message(buffer.data(), static_cast<size_t>(required_size));
+    std::string_view message(buffer.data(), static_cast<size_t>(required_size) - 1);
     OMLogLevel om_level;
     switch (level) {
       case AV_LOG_PANIC:
