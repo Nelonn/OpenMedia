@@ -6,7 +6,7 @@ include(Options.cmake)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 file(DOWNLOAD
-        https://raw.githubusercontent.com/aui-framework/aui/b09bbf34115f55dd63a5a34948b7f62ce60b2918/aui.boot.cmake
+        https://raw.githubusercontent.com/aui-framework/aui/df77317f6d1d8a08bd6d0f6e4b36a75e6037afea/aui.boot.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 include(${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 
@@ -87,7 +87,7 @@ add_library(OpenMedia::OpenMedia ALIAS OpenMedia)
 if (OPENMEDIA_VULKAN_VIDEO)
     if (AUI_BOOT)
         auib_import(VulkanHeaders https://github.com/KhronosGroup/Vulkan-Headers
-                VERSION 49f1a381e2aec33ef32adf4a377b5a39ec016ec4)
+                VERSION f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8)
     elseif (NOT TARGET Vulkan::Headers)
         add_subdirectory(third_party/external/Vulkan-Headers)
     endif ()

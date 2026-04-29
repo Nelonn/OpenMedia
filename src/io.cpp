@@ -10,7 +10,7 @@
 
 namespace openmedia {
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(__MINGW32__)
 static auto utf8_to_wstring(const std::string& str) -> std::wstring {
   std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
   return converter.from_bytes(str);
@@ -26,7 +26,7 @@ private:
 public:
   explicit FileInputStream(const std::string& filename)
       : size_(0), is_open_(false) {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(__MINGW32__)
     file_stream_.open(utf8_to_wstring(filename), std::ios::in | std::ios::binary);
 #else
     file_stream_.open(filename, std::ios::in | std::ios::binary);

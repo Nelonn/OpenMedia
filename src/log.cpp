@@ -1,3 +1,5 @@
+#define _SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING
+
 #include <openmedia/log.hpp>
 
 #if defined(__ANDROID__)
@@ -99,14 +101,14 @@ public:
   }
 };
 
-static std::atomic<std::shared_ptr<Logger>> LOGGER{std::make_shared<DefaultLogger>()};
+static std::shared_ptr<Logger> LOGGER{std::make_shared<DefaultLogger>()};
 
 void setLogger(std::unique_ptr<Logger>&& logger) {
-  LOGGER.store(std::move(logger));
+  std::atomic_store(&LOGGER, std::shared_ptr<Logger>(std::move(logger)));
 }
 
 void log(OMLogCategory category, OMLogLevel level, std::string_view message) {
-  if (auto logger = LOGGER.load()) {
+  if (auto logger = std::atomic_load(&LOGGER)) {
     logger->log(category, level, message);
   }
 }
