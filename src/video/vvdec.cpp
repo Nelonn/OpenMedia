@@ -35,7 +35,6 @@ struct VvdecAccessUnitDeleter {
 
 static void vvdec_log_callback(void* opaque, int level, const char* format, va_list ap) {
   if (!opaque || !format) return;
-  //Logger* logger = static_cast<Logger*>(opaque);
   va_list args_copy;
   va_copy(args_copy, ap);
   int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
@@ -44,8 +43,7 @@ static void vvdec_log_callback(void* opaque, int level, const char* format, va_l
   std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
   std::vsnprintf(buffer.data(), buffer.size(), format, ap);
   std::string_view message(buffer.data(), static_cast<size_t>(required_size));
-  std::cerr << "VVdec: " << message << std::endl;
-  //logger->log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
+  log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
 }
 
 static constexpr uint8_t ANNEX_B_START_CODE[] = {0x00, 0x00, 0x00, 0x01};
@@ -84,7 +82,6 @@ class VvdecDecoder final : public Decoder {
   std::unique_ptr<vvdecDecoder, VvdecDecoderDeleter> ctx_;
   std::unique_ptr<vvdecParams, VvdecParamsDeleter> params_;
   std::unique_ptr<vvdecAccessUnit, VvdecAccessUnitDeleter> access_unit_;
-  LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   bool extradata_sent_ = false;
@@ -99,8 +96,6 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
-
     params_.reset(vvdec_params_alloc());
     if (!params_) return OM_CODEC_OPEN_FAILED;
     vvdec_params_default(params_.get());
@@ -109,7 +104,7 @@ public:
     params_->logLevel = VVDEC_INFO;
     params_->filmGrainSynthesis = true;
     params_->errHandlingFlags = VVDEC_ERR_HANDLING_TRY_CONTINUE;
-    params_->opaque = logger_.get();
+    params_->opaque = nullptr;
 
     vvdecDecoder* raw_ctx = vvdec_decoder_open(params_.get());
     if (!raw_ctx) return OM_CODEC_OPEN_FAILED;

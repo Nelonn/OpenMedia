@@ -43,6 +43,7 @@ static auto isContainerBox(uint32_t type) -> bool {
       ATOM('m', 'i', 'n', 'f'),
       ATOM('d', 'i', 'n', 'f'),
       ATOM('s', 't', 'b', 'l'),
+      ATOM('w', 'a', 'v', 'e'),
       ATOM('u', 'd', 't', 'a'),
       ATOM('m', 'e', 't', 'a'),
       ATOM('i', 'l', 's', 't'),
@@ -1570,6 +1571,23 @@ private:
       } else if (fmt == ATOM('m', 'p', '4', 'v') || fmt == ATOM('M', 'P', '4', 'V')) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_MPEG4;
+        if (!seekAndParseVideoEntry(entry_body, st)) {
+          fatal_ = true;
+          return;
+        }
+        parseBoxes(entry_pos + 86, entry_end);
+
+      } else if (fmt == ATOM('a', 'p', 'c', 'h') || fmt == ATOM('a', 'p', 'c', 'n') ||
+                 fmt == ATOM('a', 'p', 'c', 's') || fmt == ATOM('a', 'p', 'c', 'o') ||
+                 fmt == ATOM('a', 'p', '4', 'h') || fmt == ATOM('a', 'p', '4', 'x')) {
+        st.format.type = OM_MEDIA_VIDEO;
+        st.format.codec_id = OM_CODEC_PRORES;
+        if (fmt == ATOM('a', 'p', 'c', 'o')) st.format.profile = OM_PROFILE_PRORES_PROXY;
+        if (fmt == ATOM('a', 'p', 'c', 's')) st.format.profile = OM_PROFILE_PRORES_LT;
+        if (fmt == ATOM('a', 'p', 'c', 'n')) st.format.profile = OM_PROFILE_PRORES_STANDARD;
+        if (fmt == ATOM('a', 'p', 'c', 'h')) st.format.profile = OM_PROFILE_PRORES_HQ;
+        if (fmt == ATOM('a', 'p', '4', 'h')) st.format.profile = OM_PROFILE_PRORES_4444;
+        if (fmt == ATOM('a', 'p', '4', 'x')) st.format.profile = OM_PROFILE_PRORES_XQ;
         if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;

@@ -1,169 +1,154 @@
-#include <openmedia/hw_dx12.h>
-#include <openmedia/log.hpp>
+#include "hw_dx12_priv.hpp"
+
 #include <d3d12video.h>
-#include <dxgidebug.h>
 #include <dxgi1_6.h>
+#include <dxgidebug.h>
 #include <memory>
+#include <openmedia/log.hpp>
 #include <vector>
 
 using namespace openmedia;
 
-struct OMDX12Context {
-  ID3D12Device* device = nullptr;
-  ID3D12CommandQueue* command_queue = nullptr;
-  ID3D12VideoDevice* video_device = nullptr;
-  ID3D12VideoDecodeCommandList* decode_command_list = nullptr;
-  ID3D12Fence* fence = nullptr;
-  HANDLE fence_event = nullptr;
-  UINT64 fence_value = 0;
-  int adapter_index = -1;
-  bool owns_device = false;
-
-  OMDX12Context() = default;
-
-  ~OMDX12Context() {
-    if (fence_event) {
-      CloseHandle(fence_event);
-      fence_event = nullptr;
+OMDX12Context::~OMDX12Context() {
+  if (fence_event) {
+    CloseHandle(fence_event);
+    fence_event = nullptr;
+  }
+  if (decode_command_list) {
+    decode_command_list->Release();
+    decode_command_list = nullptr;
+  }
+  if (video_device) {
+    video_device->Release();
+    video_device = nullptr;
+  }
+  if (fence) {
+    fence->Release();
+    fence = nullptr;
+  }
+  if (owns_device) {
+    if (command_queue) {
+      command_queue->Release();
+      command_queue = nullptr;
     }
-    if (decode_command_list) {
-      decode_command_list->Release();
-      decode_command_list = nullptr;
-    }
-    if (video_device) {
-      video_device->Release();
-      video_device = nullptr;
-    }
-    if (fence) {
-      fence->Release();
-      fence = nullptr;
-    }
-    if (owns_device) {
-      if (command_queue) {
-        command_queue->Release();
-        command_queue = nullptr;
-      }
-      if (device) {
-        device->Release();
-        device = nullptr;
-      }
+    if (device) {
+      device->Release();
+      device = nullptr;
     }
   }
+}
 
-  bool initialize(const OMDX12Init& init) {
-    adapter_index = init.adapter_index;
+auto OMDX12Context::initialize(const OMDX12Init& init) -> bool {
+  adapter_index = init.adapter_index;
 
-    if (init.device) {
-      device = init.device;
-      device->AddRef();
+  if (init.device) {
+    device = init.device;
+    device->AddRef();
 
-      if (init.command_queue) {
-        command_queue = init.command_queue;
-        command_queue->AddRef();
-      }
-    } else {
-      owns_device = true;
+    if (init.command_queue) {
+      command_queue = init.command_queue;
+      command_queue->AddRef();
+    }
+  } else {
+    owns_device = true;
 
-      HRESULT hr = S_OK;
+    HRESULT hr = S_OK;
 
-      IDXGIAdapter1* adapter = nullptr;
-      if (adapter_index >= 0) {
-        IDXGIFactory7* factory = nullptr;
-        hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-        if (FAILED(hr)) {
-          return false;
-        }
-
-        factory->EnumAdapters1(adapter_index, &adapter);
-        factory->Release();
-
-        if (!adapter) {
-          return false;
-        }
+    IDXGIAdapter1* adapter = nullptr;
+    if (adapter_index >= 0) {
+      IDXGIFactory7* factory = nullptr;
+      hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+      if (FAILED(hr)) {
+        return false;
       }
 
-      hr = D3D12CreateDevice(
+      factory->EnumAdapters1(adapter_index, &adapter);
+      factory->Release();
+
+      if (!adapter) {
+        return false;
+      }
+    }
+
+    hr = D3D12CreateDevice(
         adapter,
         D3D_FEATURE_LEVEL_11_0,
-        IID_PPV_ARGS(&device)
-      );
+        IID_PPV_ARGS(&device));
 
-      if (adapter) {
-        adapter->Release();
-      }
-
-      if (FAILED(hr)) {
-        return false;
-      }
-
-      D3D12_COMMAND_QUEUE_DESC queue_desc = {};
-      queue_desc.Type = D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE;
-      queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-      queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-      queue_desc.NodeMask = 0;
-
-      hr = device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue));
-      if (FAILED(hr)) {
-        return false;
-      }
+    if (adapter) {
+      adapter->Release();
     }
 
-    HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&video_device));
     if (FAILED(hr)) {
       return false;
     }
 
-    hr = device->CreateCommandAllocator(
+    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+    queue_desc.Type = D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE;
+    queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+    queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    queue_desc.NodeMask = 0;
+
+    hr = device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue));
+    if (FAILED(hr)) {
+      return false;
+    }
+  }
+
+  HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&video_device));
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  hr = device->CreateCommandAllocator(
       D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE,
-      IID_PPV_ARGS(&decode_command_list)
-    );
+      IID_PPV_ARGS(&decode_command_list));
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  fence_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+  if (!fence_event) {
+    return false;
+  }
+
+  return true;
+}
+
+auto OMDX12Context::signalFence() -> bool {
+  if (!command_queue || !fence) return false;
+
+  HRESULT hr = command_queue->Signal(fence.Get(), fence_value + 1);
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  fence_value++;
+  return true;
+}
+
+auto OMDX12Context::waitForFence(UINT64 timeout_ms) -> bool {
+  if (!fence || !fence_event) return false;
+
+  if (fence->GetCompletedValue() < fence_value) {
+    HRESULT hr = fence->SetEventOnCompletion(fence_value, fence_event);
     if (FAILED(hr)) {
       return false;
     }
 
-    hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-    if (FAILED(hr)) {
+    DWORD result = WaitForSingleObject(fence_event, timeout_ms);
+    if (result != WAIT_OBJECT_0) {
       return false;
     }
-
-    fence_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!fence_event) {
-      return false;
-    }
-
-    return true;
   }
 
-  bool signal_fence() {
-    if (!command_queue || !fence) return false;
-    
-    HRESULT hr = command_queue->Signal(fence, fence_value + 1);
-    if (FAILED(hr)) {
-      return false;
-    }
-    
-    fence_value++;
-    return true;
-  }
-
-  bool wait_for_fence(UINT64 timeout_ms = 1000) {
-    if (!fence || !fence_event) return false;
-
-    if (fence->GetCompletedValue() < fence_value) {
-      HRESULT hr = fence->SetEventOnCompletion(fence_value, fence_event);
-      if (FAILED(hr)) {
-        return false;
-      }
-
-      DWORD result = WaitForSingleObject(fence_event, timeout_ms);
-      if (result != WAIT_OBJECT_0) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-};
+  return true;
+}
 
 /*struct OMDX12Picture {
   ID3D12Resource* texture = nullptr;
@@ -210,17 +195,17 @@ void HWD3D12Context_delete(OMDX12Context* context) {
 
 ID3D12Device* HWD3D12Context_getDevice(OMDX12Context* context) {
   if (!context) return nullptr;
-  return context->device;
+  return context->device.Get();
 }
 
 ID3D12VideoDevice* HWD3D12Context_getVideoDevice(OMDX12Context* context) {
   if (!context) return nullptr;
-  return context->video_device;
+  return context->video_device.Get();
 }
 
 ID3D12VideoDecodeCommandList* HWD3D12Context_getDecodeCommandList(OMDX12Context* context) {
   if (!context) return nullptr;
-  return context->decode_command_list;
+  return context->decode_command_list.Get();
 }
 
 OMDX12Picture* HWD3D12Context_createPicture(OMDX12Context* context) {

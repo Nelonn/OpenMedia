@@ -482,9 +482,40 @@ private:
         opts.format    = track.format;
         opts.time_base = track.time_base;
         opts.extradata = track.extradata;
-        if (dec->configure(opts) != OM_SUCCESS) {
+        const OMError err = dec->configure(opts);
+        if (err != OM_SUCCESS) {
+            if (track.format.type == OM_MEDIA_VIDEO) {
+                SDL_Log("[Player] Decoder configure failed err=%d codec=%s codec_id=%d tb=%d/%d %ux%u extradata=%zu profile=%u level=%d",
+                        int(err),
+                        getCodecMeta(track.format.codec_id).name.data(),
+                        int(track.format.codec_id),
+                        track.time_base.num, track.time_base.den,
+                        track.format.video.width, track.format.video.height,
+                        track.extradata.size(),
+                        unsigned(track.format.profile),
+                        track.format.level);
+            } else if (track.format.type == OM_MEDIA_AUDIO) {
+                SDL_Log("[Player] Decoder configure failed err=%d codec=%s codec_id=%d tb=%d/%d rate=%u ch=%u depth=%u extradata=%zu profile=%u level=%d",
+                        int(err),
+                        getCodecMeta(track.format.codec_id).name.data(),
+                        int(track.format.codec_id),
+                        track.time_base.num, track.time_base.den,
+                        track.format.audio.sample_rate,
+                        track.format.audio.channels,
+                        track.format.audio.bit_depth,
+                        track.extradata.size(),
+                        unsigned(track.format.profile),
+                        track.format.level);
+            } else {
+                SDL_Log("[Player] Decoder configure failed err=%d codec_id=%d tb=%d/%d extradata=%zu profile=%u level=%d",
+                        int(err),
+                        int(track.format.codec_id),
+                        track.time_base.num, track.time_base.den,
+                        track.extradata.size(),
+                        unsigned(track.format.profile),
+                        track.format.level);
+            }
             dec.reset();
-            SDL_Log("[Player] Decoder configure failed");
             return false;
         }
         return true;
@@ -695,6 +726,7 @@ private:
                 VideoFrame vf;
                 vf.width   = pic.width;
                 vf.height  = pic.height;
+                vf.pixel_format = static_cast<uint32_t>(pic.format);
                 vf.pts     = int64_t(frame.pts);
                 vf.pts_sec = static_cast<double>(vf.pts) *
                              video_time_base_.num / video_time_base_.den;
@@ -708,11 +740,13 @@ private:
                 const uint8_t* u = pic.planes.getData(1);
                 const uint8_t* v = pic.planes.getData(2);
 
-                // YUV420P: Y plane is full size, U/V planes are half width and height
-                vf.y_plane.assign(y, y + vf.y_stride * pic.height);
-                const uint32_t uv_h = (pic.height + 1) / 2;
-                vf.u_plane.assign(u, u + vf.u_stride * uv_h);
-                vf.v_plane.assign(v, v + vf.v_stride * uv_h);
+                const auto y_dims = pic.getPlaneDimensions(0);
+                const auto u_dims = pic.getPlaneDimensions(1);
+                const auto v_dims = pic.getPlaneDimensions(2);
+
+                vf.y_plane.assign(y, y + vf.y_stride * y_dims.second);
+                vf.u_plane.assign(u, u + vf.u_stride * u_dims.second);
+                vf.v_plane.assign(v, v + vf.v_stride * v_dims.second);
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.

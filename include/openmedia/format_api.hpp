@@ -37,7 +37,7 @@ class OPENMEDIA_ABI Muxer {
 public:
   virtual ~Muxer() = default;
 
-  virtual auto open(std::unique_ptr<OutputStream> output, LoggerRef logger = {}) -> OMError = 0;
+  virtual auto open(std::unique_ptr<OutputStream> output) -> OMError = 0;
   virtual void close() = 0;
 
   virtual auto addTrack(const Track& track) -> int32_t = 0;
