@@ -179,7 +179,7 @@ private:
 public:
   explicit FileOutputStream(const std::string& filename)
       : is_open_(false) {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(__MINGW32__)
     file_stream_.open(utf8_to_wstring(filename), std::ios::out | std::ios::binary | std::ios::trunc);
 #else
     file_stream_.open(filename, std::ios::out | std::ios::binary | std::ios::trunc);
