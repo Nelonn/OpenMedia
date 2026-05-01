@@ -167,7 +167,7 @@ endif ()
 if (OPENMEDIA_MATROSKA)
     if (AUI_BOOT)
         auib_import(webm https://github.com/Nelonn/libwebm
-                VERSION f93f4a26cea155f32d46c52290777d4ba6757dbd)
+                VERSION 97c21a1c8ff698b417c6eadb378527ae45ca4a3c)
     elseif (NOT TARGET webm::webm)
         add_subdirectory(third_party/external/libwebm)
     endif ()
