@@ -9,24 +9,10 @@
 using namespace openmedia;
 
 OMDX11Context::~OMDX11Context() {
-  if (video_context) {
-    video_context->Release();
-    video_context = nullptr;
-  }
-  if (video_device) {
-    video_device->Release();
-    video_device = nullptr;
-  }
-  if (owns_device) {
-    if (device_context) {
-      device_context->Release();
-      device_context = nullptr;
-    }
-    if (device) {
-      device->Release();
-      device = nullptr;
-    }
-  }
+  video_context.Reset();
+  video_device.Reset();
+  device_context.Reset();
+  device.Reset();
 }
 
 auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
@@ -34,11 +20,9 @@ auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
 
   if (init.device) {
     device = init.device;
-    device->AddRef();
 
     if (init.device_context) {
       device_context = init.device_context;
-      device_context->AddRef();
     } else {
       device->GetImmediateContext(&device_context);
     }

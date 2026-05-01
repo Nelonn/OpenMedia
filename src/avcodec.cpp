@@ -3,6 +3,7 @@
 #include <memory>
 #include <openmedia/codec_api.hpp>
 #include <openmedia/codec_registry.hpp>
+#include <span>
 #include <vector>
 #include <codecs.hpp>
 
@@ -177,15 +178,21 @@ public:
           codec_ctx_->coded_height = options.format.video.height;
         }
 
-        if (!options.extradata.empty()) {
-          codec_ctx_->extradata_size = static_cast<int>(options.extradata.size());
+        std::span<const uint8_t> extradata = options.extradata;
+#if defined(__APPLE__)
+        std::vector<uint8_t> normalized_extradata =
+            normaliseAppleAlacExtradata(codec_id_, options.extradata);
+        extradata = normalized_extradata;
+#endif
+        if (!extradata.empty()) {
+          codec_ctx_->extradata_size = static_cast<int>(extradata.size());
           codec_ctx_->extradata = static_cast<uint8_t*>(
-              util_loader.av_malloc(options.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+              util_loader.av_malloc(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
           if (!codec_ctx_->extradata) {
             return OM_COMMON_OUT_OF_MEMORY;
           }
-          memcpy(codec_ctx_->extradata, options.extradata.data(), options.extradata.size());
-          memset(codec_ctx_->extradata + options.extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+          memcpy(codec_ctx_->extradata, extradata.data(), extradata.size());
+          memset(codec_ctx_->extradata + extradata.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
         }
       }
 
