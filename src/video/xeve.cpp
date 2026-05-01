@@ -54,7 +54,6 @@ static auto setupImageBuffer(XEVE_IMGB* imgb, const Picture& pic, int cs) -> voi
 
 class XeveEncoder final : public Encoder {
   std::unique_ptr<void, XeveEncoderDeleter> ctx_;
-  LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat input_format_ = {};
   int input_cs_ = 0;
@@ -72,8 +71,6 @@ public:
     if (options.format.type != OM_MEDIA_VIDEO) {
       return OM_CODEC_INVALID_PARAMS;
     }
-
-    logger_ = options.logger ? options.logger : Logger::refDefault();
 
     input_format_.width = options.format.video.width;
     input_format_.height = options.format.video.height;

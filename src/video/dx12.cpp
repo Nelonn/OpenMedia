@@ -92,7 +92,6 @@ static auto getCodecD3D12(OMCodecId codec_id, OMProfile profile) -> GUID {
 
 class DX12Decoder final : public Decoder {
   std::unique_ptr<OMDX12Context, DX12DecoderContextDeleter> hw_context_;
-  LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   OMMediaType media_type_ = OM_MEDIA_NONE;
@@ -133,11 +132,7 @@ public:
         options.format.codec_id != OM_CODEC_H265 &&
         options.format.codec_id != OM_CODEC_VP9 &&
         options.format.codec_id != OM_CODEC_AV1) {
-      logger_ = options.logger ? options.logger : Logger::refDefault();
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
-                     "DX12 decoder only supports H264, H265, VP9, and AV1");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING, "DX12 decoder only supports H264, H265, VP9, and AV1");
       return OM_CODEC_NOT_SUPPORTED;
     }
 
@@ -153,8 +148,6 @@ public:
       extradata_.assign(options.extradata.begin(), options.extradata.end());
     }
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
-
     OMDX12Init init = {};
     init.device = nullptr;
     init.command_queue = nullptr;
@@ -162,10 +155,7 @@ public:
 
     hw_context_.reset(HWD3D12Context_create(init));
     if (!hw_context_) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to create DX12 hardware context");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create DX12 hardware context");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
@@ -173,20 +163,14 @@ public:
     decode_command_list_ = HWD3D12Context_getDecodeCommandList(hw_context_.get());
 
     if (!video_device_ || !decode_command_list_) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to get video interfaces");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to get video interfaces");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
     HRESULT hr = hw_context_->device->CreateCommandAllocator(
         D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE, IID_PPV_ARGS(&command_allocator_));
     if (FAILED(hr)) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to create command allocator");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create command allocator");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
@@ -202,19 +186,13 @@ public:
 
     hr = createVideoDecoder();
     if (FAILED(hr)) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to create video decoder");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create video decoder");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
     hr = createDecoderHeap();
     if (FAILED(hr)) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Failed to create decoder heap");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create decoder heap");
       return OM_CODEC_HWACCEL_FAILED;
     }
 
@@ -287,10 +265,7 @@ private:
         sizeof(support));
 
     if (FAILED(hr) || !support.Supported) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "Decoder configuration not supported by hardware");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Decoder configuration not supported by hardware");
       return E_FAIL;
     }
 

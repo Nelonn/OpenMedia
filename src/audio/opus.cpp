@@ -129,7 +129,6 @@ class OpusEncoder final : public Encoder {
   int application_ = OPUS_APPLICATION_AUDIO;
   AudioFormat input_format_;
   std::vector<uint8_t> extradata_;
-  LoggerRef logger_;
 
 public:
   OpusEncoder() {
@@ -145,8 +144,6 @@ public:
   }
 
   auto configure(const EncoderOptions& options) -> OMError override {
-    logger_ = options.logger;
-
     if (options.format.type != OM_MEDIA_AUDIO) {
       return OM_CODEC_INVALID_PARAMS;
     }

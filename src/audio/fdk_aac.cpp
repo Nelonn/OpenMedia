@@ -38,7 +38,6 @@ class FDKAACDecoder final : public Decoder {
   HANDLE_AACDECODER decoder_ = nullptr;
   AudioFormat output_format_;
   bool initialized_ = false;
-  LoggerRef logger_ = {};
   std::vector<INT_PCM> decode_buffer_;
   CStreamInfo* stream_info_ = nullptr;
 
@@ -55,7 +54,6 @@ public:
     if (options.format.codec_id != OM_CODEC_AAC) {
       return OM_CODEC_INVALID_PARAMS;
     }
-    logger_ = options.logger ? options.logger : Logger::refDefault();
 
     const TRANSPORT_TYPE transport =
         options.extradata.empty() ? TT_MP4_ADTS : TT_MP4_RAW;
@@ -67,10 +65,7 @@ public:
 
     if (options.format.profile != OM_PROFILE_NONE &&
         aotFromProfile(options.format.profile) == AOT_NONE) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "FDK AAC: Unsupported profile requested");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "FDK AAC: Unsupported profile requested");
       aacDecoder_Close(decoder_);
       decoder_ = nullptr;
       return OM_CODEC_INVALID_PARAMS;
@@ -81,19 +76,13 @@ public:
       UINT conf_size = static_cast<UINT>(options.extradata.size());
 
       if (aacDecoder_ConfigRaw(decoder_, &conf, &conf_size) != AAC_DEC_OK) {
-        if (logger_) {
-          logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                       "FDK AAC: Failed to configure decoder");
-        }
+        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "FDK AAC: Failed to configure decoder");
         return OM_CODEC_INVALID_PARAMS;
       }
     }
 
     if (aacDecoder_SetParam(decoder_, AAC_CONCEAL_METHOD, 0) != AAC_DEC_OK) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR,
-                     "FDK AAC: Unable to set concealment method");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "FDK AAC: Unable to set concealment method");
       return OM_CODEC_INVALID_PARAMS;
     }
 
@@ -152,10 +141,7 @@ public:
     }
 
     if (error != AAC_DEC_OK) {
-      if (logger_) {
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING,
-                     "FDK AAC: Decode frame failed");
-      }
+      log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING, "FDK AAC: Decode frame failed");
       return Err(OM_CODEC_DECODE_FAILED);
     }
 

@@ -34,7 +34,6 @@ static auto codecIdToMFCodec(OMCodecId codec) -> GUID {
 
 class WMFAudioDecoder final : public Decoder {
   ComPtr<IMFTransform> decoder_;
-  LoggerRef logger_;
   AudioFormat output_format_ = {};
   int64_t timescale_ = 0;
   bool initialized_ = false;
@@ -80,8 +79,6 @@ public:
   }
 
   auto configure(const DecoderOptions& options) -> OMError override {
-    logger_ = options.logger ? options.logger : Logger::refDefault();
-
     GUID codec = codecIdToMFCodec(options.format.codec_id);
     if (codec == MFAudioFormat_Base) {
       return OM_CODEC_NOT_FOUND;
@@ -90,7 +87,7 @@ public:
     HRESULT hr = FindDecoder(&decoder_, codec);
     if (FAILED(hr)) {
       _com_error err(hr);
-      logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("Failed to find decoder: {}", err.ErrorMessage()));
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("Failed to find decoder: {}", err.ErrorMessage()));
       return OM_CODEC_OPEN_FAILED;
     }
 
@@ -138,7 +135,7 @@ public:
     hr = decoder_->SetInputType(0, input_type.Get(), 0);
     if (FAILED(hr)) {
       _com_error err(hr);
-      logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("SetInputType failed: {}", err.ErrorMessage()));
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("SetInputType failed: {}", err.ErrorMessage()));
       return OM_CODEC_OPEN_FAILED;
     }
 
@@ -186,7 +183,7 @@ public:
       HRESULT hr = decoder_->ProcessInput(0, sample.Get(), 0);
       if (FAILED(hr)) {
         _com_error err(hr);
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("ProcessInput failed: {}", err.ErrorMessage()));
+        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("ProcessInput failed: {}", err.ErrorMessage()));
         return Err(OM_CODEC_DECODE_FAILED);
       }
     }
@@ -196,7 +193,7 @@ public:
       HRESULT hr = decoder_->GetOutputStreamInfo(0, &info);
       if (FAILED(hr)) {
         _com_error err(hr);
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("GetOutputStreamInfo failed: {}", err.ErrorMessage()));
+        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("GetOutputStreamInfo failed: {}", err.ErrorMessage()));
         break;
       }
 
@@ -219,7 +216,7 @@ public:
 
       if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
         _com_error err(hr);
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_VERBOSE, std::format("ProcessOutput warned: {}", err.ErrorMessage()));
+        log(OM_CATEGORY_DECODER, OM_LEVEL_VERBOSE, std::format("ProcessOutput warned: {}", err.ErrorMessage()));
         break;
       }
       if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
@@ -228,7 +225,7 @@ public:
       }
       if (FAILED(hr)) {
         _com_error err(hr);
-        logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("ProcessOutput failed: {}", err.ErrorMessage()));
+        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("ProcessOutput failed: {}", err.ErrorMessage()));
         break;
       }
 
