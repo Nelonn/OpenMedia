@@ -49,6 +49,7 @@ extern const CodecDescriptor CODEC_FFMPEG_EVC;
 extern const CodecDescriptor CODEC_FFMPEG_VP8;
 extern const CodecDescriptor CODEC_FFMPEG_VP9;
 extern const CodecDescriptor CODEC_FFMPEG_AV1;
+extern const CodecDescriptor CODEC_FFMPEG_PRORES;
 
 // Video - DirectX11
 extern const CodecDescriptor CODEC_DX11_H264;
@@ -60,9 +61,10 @@ extern const CodecDescriptor CODEC_DX12_VP9;
 extern const CodecDescriptor CODEC_DX12_AV1;
 
 // Video - AMD AMF
-//extern const CodecDescriptor CODEC_AMF_H264;
-//extern const CodecDescriptor CODEC_AMF_H265;
-//extern const CodecDescriptor CODEC_AMF_AV1;
+extern const CodecDescriptor CODEC_AMF_H264;
+extern const CodecDescriptor CODEC_AMF_H265;
+extern const CodecDescriptor CODEC_AMF_AV1;
+extern const CodecDescriptor CODEC_AMF_VP9;
 
 // Image
 extern const CodecDescriptor CODEC_PNG;

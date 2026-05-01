@@ -1,11 +1,10 @@
-#include <openmedia/hw_vulkan.h>
+#include "hw_vulkan_priv.hpp"
+
 #include <memory>
 
-struct OMVulkanContext {
-  explicit OMVulkanContext(OMVulkanInit init) {
+OMVulkanContext::OMVulkanContext(OMVulkanInit init) {
 
-  }
-};
+}
 
 OMVulkanContext* HWVulkanContext_create(OMVulkanInit init) {
   auto* context = static_cast<OMVulkanContext*>(malloc(sizeof(OMVulkanContext)));

@@ -1,3 +1,5 @@
+#define _SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING
+
 #include <openmedia/log.hpp>
 
 #if defined(__ANDROID__)
@@ -8,6 +10,7 @@
 #include <windows.h>
 #endif
 
+#include <atomic>
 #include <format>
 #include <iostream>
 #include <ctime>
@@ -82,7 +85,9 @@ public:
 
   void log(OMLogCategory category, OMLogLevel level, std::string_view message) override {
 #if defined(__ANDROID__)
-    __android_log_write(levelToAndroidPriority(level), "OpenMedia", message.data());
+    auto prefix = std::format("OpenMedia/{}", categoryToString(category));
+    std::string msg(message);
+    __android_log_write(levelToAndroidPriority(level), prefix.c_str(), msg.c_str());
 #else
     auto formatted = std::format("[{}] [{}] {}\n",
                                  categoryToString(category),
@@ -96,9 +101,16 @@ public:
   }
 };
 
-auto Logger::refDefault() noexcept -> LoggerRef {
-  static auto const default_logger = std::make_shared<DefaultLogger>();
-  return default_logger;
+static std::shared_ptr<Logger> LOGGER{std::make_shared<DefaultLogger>()};
+
+void setLogger(std::unique_ptr<Logger>&& logger) {
+  std::atomic_store(&LOGGER, std::shared_ptr<Logger>(std::move(logger)));
+}
+
+void log(OMLogCategory category, OMLogLevel level, std::string_view message) {
+  if (auto logger = std::atomic_load(&LOGGER)) {
+    logger->log(category, level, message);
+  }
 }
 
 } // namespace openmedia

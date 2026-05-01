@@ -1,90 +1,81 @@
-#include <openmedia/hw_dx11.h>
-#include <openmedia/log.hpp>
+#include "hw_dx11_priv.hpp"
+
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <memory>
+#include <openmedia/log.hpp>
 #include <vector>
 
 using namespace openmedia;
 
-struct OMDX11Context {
-  ID3D11Device* device = nullptr;
-  ID3D11DeviceContext* device_context = nullptr;
-  ID3D11VideoDevice* video_device = nullptr;
-  ID3D11VideoContext* video_context = nullptr;
-  int adapter_index = -1;
-  bool owns_device = false;
-
-  OMDX11Context() = default;
-
-  ~OMDX11Context() {
-    if (video_context) {
-      video_context->Release();
-      video_context = nullptr;
+OMDX11Context::~OMDX11Context() {
+  if (video_context) {
+    video_context->Release();
+    video_context = nullptr;
+  }
+  if (video_device) {
+    video_device->Release();
+    video_device = nullptr;
+  }
+  if (owns_device) {
+    if (device_context) {
+      device_context->Release();
+      device_context = nullptr;
     }
-    if (video_device) {
-      video_device->Release();
-      video_device = nullptr;
-    }
-    if (owns_device) {
-      if (device_context) {
-        device_context->Release();
-        device_context = nullptr;
-      }
-      if (device) {
-        device->Release();
-        device = nullptr;
-      }
+    if (device) {
+      device->Release();
+      device = nullptr;
     }
   }
+}
 
-  bool initialize(const OMDX11Init& init) {
-    adapter_index = init.adapter_index;
+auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
+  adapter_index = init.adapter_index;
 
-    if (init.device) {
-      device = init.device;
-      device->AddRef();
+  if (init.device) {
+    device = init.device;
+    device->AddRef();
 
-      if (init.device_context) {
-        device_context = init.device_context;
-        device_context->AddRef();
-      } else {
-        device->GetImmediateContext(&device_context);
-      }
+    if (init.device_context) {
+      device_context = init.device_context;
+      device_context->AddRef();
     } else {
-      // Create our own D3D11 device
-      owns_device = true;
+      device->GetImmediateContext(&device_context);
+    }
+  } else {
+    // Create our own D3D11 device
+    owns_device = true;
 
-      HRESULT hr = S_OK;
-      UINT create_device_flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    HRESULT hr = S_OK;
+    UINT create_device_flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 
 #ifdef _DEBUG
-      create_device_flags |= D3D11_CREATE_DEVICE_DEBUG;
+    create_device_flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
 
-      D3D_FEATURE_LEVEL feature_levels[] = {
+    D3D_FEATURE_LEVEL feature_levels[] = {
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
-      };
-      D3D_FEATURE_LEVEL feature_level;
+    };
+    D3D_FEATURE_LEVEL feature_level;
 
-      IDXGIAdapter* adapter = nullptr;
-      if (adapter_index >= 0) {
-        IDXGIFactory1* factory = nullptr;
-        hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-        if (FAILED(hr)) {
-          return false;
-        }
-
-        factory->EnumAdapters(adapter_index, &adapter);
-        factory->Release();
-
-        if (!adapter) {
-          return false;
-        }
+    IDXGIAdapter* adapter = nullptr;
+    if (adapter_index >= 0) {
+      IDXGIFactory1* factory = nullptr;
+      hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+      if (FAILED(hr)) {
+        return false;
       }
 
-      hr = D3D11CreateDevice(
+      factory->EnumAdapters(adapter_index, &adapter);
+      factory->Release();
+
+      if (!adapter) {
+        return false;
+      }
+    }
+
+    hr = D3D11CreateDevice(
         adapter,
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
@@ -94,32 +85,30 @@ struct OMDX11Context {
         D3D11_SDK_VERSION,
         &device,
         &feature_level,
-        &device_context
-      );
+        &device_context);
 
-      if (adapter) {
-        adapter->Release();
-      }
-
-      if (FAILED(hr)) {
-        return false;
-      }
+    if (adapter) {
+      adapter->Release();
     }
 
-    // Get video device interfaces
-    HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&video_device));
     if (FAILED(hr)) {
       return false;
     }
-
-    hr = device_context->QueryInterface(IID_PPV_ARGS(&video_context));
-    if (FAILED(hr)) {
-      return false;
-    }
-
-    return true;
   }
-};
+
+  // Get video device interfaces
+  HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&video_device));
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  hr = device_context->QueryInterface(IID_PPV_ARGS(&video_context));
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  return true;
+}
 
 /*struct OMDX11Picture {
   ID3D11VideoDecoderOutputView* decoder_output = nullptr;
@@ -165,17 +154,17 @@ void HWD3D11Context_delete(OMDX11Context* context) {
 
 ID3D11Device* HWD3D11Context_getDevice(OMDX11Context* context) {
   if (!context) return nullptr;
-  return context->device;
+  return context->device.Get();
 }
 
 ID3D11VideoDevice* HWD3D11Context_getVideoDevice(OMDX11Context* context) {
   if (!context) return nullptr;
-  return context->video_device;
+  return context->video_device.Get();
 }
 
 ID3D11VideoContext* HWD3D11Context_getVideoContext(OMDX11Context* context) {
   if (!context) return nullptr;
-  return context->video_context;
+  return context->video_context.Get();
 }
 
 OMDX11Picture* HWD3D11Context_createPicture(OMDX11Context* context) {

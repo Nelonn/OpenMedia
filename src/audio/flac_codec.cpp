@@ -18,7 +18,6 @@ class FLACDecoder final : public Decoder {
   uint8_t packet_reads_ = 0;
   uint64_t packet_sample_offset_ = 0;
   std::optional<AudioFormat> output_format_;
-  LoggerRef logger_ = {};
 
 public:
   FLACDecoder() {
@@ -38,7 +37,6 @@ public:
     if (options.extradata.empty()) {
       return OM_CODEC_INVALID_PARAMS;
     }
-    logger_ = options.logger ? options.logger : Logger::refDefault();
 
     auto status = FLAC__stream_decoder_init_stream(
         decoder_,
@@ -163,11 +161,7 @@ private:
       const FLAC__StreamDecoder* /*decoder*/,
       FLAC__StreamDecoderErrorStatus status,
       void* client_data) {
-    auto* self = static_cast<FLACDecoder*>(client_data);
-    if (self->logger_) {
-      auto str = std::format("FLAC decoder error: {}", FLAC__StreamDecoderErrorStatusString[status]);
-      self->logger_->log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, str);
-    }
+    log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "FLAC decoder error: {}", FLAC__StreamDecoderErrorStatusString[status]);
   }
 };
 
