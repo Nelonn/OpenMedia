@@ -28,6 +28,7 @@ OM_ENUM(OMPixelFormat, uint32_t) {
     OM_FORMAT_GRAY8 = OM_MAGIC('Y800'),
     OM_FORMAT_GRAY16 = OM_MAGIC('Y16 '),
     OM_FORMAT_P010 = OM_MAGIC('P010'),
+    OM_FORMAT_P012 = OM_MAGIC('P012'),
     OM_FORMAT_P016 = OM_MAGIC('P016'),
     OM_FORMAT_YUV420P10 = OM_MAGIC('I010'),
     OM_FORMAT_YUV420P12 = OM_MAGIC('I012'),
@@ -85,6 +86,21 @@ OM_ENUM(OMTransferCharacteristic, uint8_t) {
     OM_TRANSFER_HLG = OM_TRANSFER_ARIB_STD_B67,
 };
 
+OM_ENUM(OMColorPrimaries, uint8_t) {
+    OM_PRIMARIES_UNKNOWN = 0,
+    OM_PRIMARIES_BT709 = 1,
+    OM_PRIMARIES_BT470M = 4,
+    OM_PRIMARIES_BT470BG = 5,
+    OM_PRIMARIES_BT601 = 6,
+    OM_PRIMARIES_SMPTE240M = 7,
+    OM_PRIMARIES_FILM = 8,
+    OM_PRIMARIES_BT2020 = 9,
+    OM_PRIMARIES_SMPTE428 = 10,
+    OM_PRIMARIES_SMPTE431 = 11,
+    OM_PRIMARIES_SMPTE432 = 12,
+    OM_PRIMARIES_EBU3213 = 22,
+};
+
 namespace openmedia {
 
 static auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> uint32_t {
@@ -106,6 +122,7 @@ static auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> u
     case OM_FORMAT_GRAY16:
       return 2;
     case OM_FORMAT_P010:
+    case OM_FORMAT_P012:
     case OM_FORMAT_P016:
     case OM_FORMAT_YUV420P10:
     case OM_FORMAT_YUV420P12:
@@ -130,42 +147,7 @@ static auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> u
   }
 }
 
-enum class HWDeviceType : uint8_t {
-  NONE = 0,
-  VULKAN,
-  DX11,
-  DX12,
-  VAAPI,
-  AMF,
-  CUDA,
-  QSV,
-};
-
-struct OPENMEDIA_ABI HostPicture {
-  std::shared_ptr<Buffer> buffer;
-};
-
-class OPENMEDIA_ABI HardwarePicture {
-protected:
-  HWDeviceType type_ = HWDeviceType::NONE;
-
-public:
-  explicit HardwarePicture(HWDeviceType type)
-      : type_(type) {}
-  virtual ~HardwarePicture() = default;
-
-  auto getType() const noexcept -> HWDeviceType { return type_; }
-};
-
-using PictureBuffer = std::variant<HostPicture, HardwarePicture>;
-
-struct OPENMEDIA_ABI VideoFormat {
-  OMPixelFormat format;
-  uint32_t width;
-  uint32_t height;
-};
-
-static auto getNumPlanes(OMPixelFormat fmt) -> uint32_t {
+static auto getNumPlanes(OMPixelFormat fmt) noexcept -> uint32_t {
   switch (fmt) {
     // Packed RGB / grayscale
     case OM_FORMAT_R8G8B8A8:
@@ -186,6 +168,7 @@ static auto getNumPlanes(OMPixelFormat fmt) -> uint32_t {
     case OM_FORMAT_NV16:
     case OM_FORMAT_NV24:
     case OM_FORMAT_P010:
+    case OM_FORMAT_P012:
     case OM_FORMAT_P016:
       return 2;
 
@@ -214,6 +197,129 @@ static auto getNumPlanes(OMPixelFormat fmt) -> uint32_t {
   }
 }
 
+static auto getPlaneDimensions(OMPixelFormat format, uint32_t plane_idx, uint32_t width, uint32_t height) noexcept -> std::pair<uint32_t, uint32_t> {
+  if (plane_idx >= getNumPlanes(format))
+    return {0, 0};
+
+  switch (format) {
+    // 4:2:0 planar + variants
+    case OM_FORMAT_YUV420P:
+    case OM_FORMAT_YUVJ420P:
+    case OM_FORMAT_YUV420P10:
+    case OM_FORMAT_YUV420P12:
+    case OM_FORMAT_YUV420P16:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {(width + 1) / 2, (height + 1) / 2};
+
+      // 4:2:0 semi-planar
+    case OM_FORMAT_NV12:
+    case OM_FORMAT_NV21:
+    case OM_FORMAT_P010:
+    case OM_FORMAT_P012:
+    case OM_FORMAT_P016:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {width, (height + 1) / 2};
+
+      // 4:2:2 planar + variants
+    case OM_FORMAT_YUV422P:
+    case OM_FORMAT_YUVJ422P:
+    case OM_FORMAT_YUV422P10:
+    case OM_FORMAT_YUV422P12:
+    case OM_FORMAT_YUV422P16:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {(width + 1) / 2, height};
+
+      // 4:2:2 semi-planar
+    case OM_FORMAT_NV16:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {width, height};
+
+      // 4:4:4 planar + variants
+    case OM_FORMAT_YUV444P:
+    case OM_FORMAT_YUVJ444P:
+    case OM_FORMAT_YUV444P10:
+    case OM_FORMAT_YUV444P12:
+    case OM_FORMAT_YUV444P16:
+      return {width, height};
+
+      // 4:4:4 semi-planar
+    case OM_FORMAT_NV24:
+      return {width, height};
+
+      // 4:1:1
+    case OM_FORMAT_YUV411P:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {(width + 3) / 4, height};
+
+      // 4:1:0
+    case OM_FORMAT_YUV410P:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {(width + 3) / 4, (height + 3) / 4};
+
+      // Palette
+    case OM_FORMAT_PAL8:
+      if (plane_idx == 0)
+        return {width, height};
+      else
+        return {256, 1};
+
+    default:
+      return {width, height};
+  }
+}
+
+enum class HWDeviceType : uint8_t {
+  NONE = 0,
+  VULKAN,
+  DX11,
+  DX12,
+  VAAPI,
+  AMF,
+  CUDA,
+  QSV,
+};
+
+struct OPENMEDIA_ABI HWDevice {
+  HWDeviceType type = HWDeviceType::NONE;
+  void* context = nullptr;
+};
+
+struct OPENMEDIA_ABI HostPicture {
+  std::shared_ptr<Buffer> buffer;
+};
+
+class OPENMEDIA_ABI HardwarePicture {
+protected:
+  HWDeviceType type_ = HWDeviceType::NONE;
+
+public:
+  explicit HardwarePicture(HWDeviceType type)
+      : type_(type) {}
+  virtual ~HardwarePicture() = default;
+
+  auto getType() const noexcept -> HWDeviceType { return type_; }
+};
+
+using PictureBuffer = std::variant<HostPicture, HardwarePicture>;
+
+struct OPENMEDIA_ABI VideoFormat {
+  OMPixelFormat format;
+  uint32_t width;
+  uint32_t height;
+};
+
 struct OPENMEDIA_ABI Picture {
   PictureBuffer buffer;
 
@@ -227,7 +333,7 @@ struct OPENMEDIA_ABI Picture {
 
   PlaneSpan<4> planes;
 
-  Picture()
+  Picture() noexcept
       : format(OM_FORMAT_NV12), width(0), height(0), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709) {}
 
   Picture(OMPixelFormat fmt, uint32_t w, uint32_t h)
@@ -261,93 +367,15 @@ struct OPENMEDIA_ABI Picture {
     }
   }
 
-  void unref() {
+  void unref() noexcept {
     planes = PlaneSpan<4> {};
   }
 
-  auto getPlaneDimensions(int plane_idx) const -> std::pair<uint32_t, uint32_t> {
-    if (plane_idx >= getNumPlanes(format))
-      return {0, 0};
-
-    switch (format) {
-      // 4:2:0 planar + variants
-      case OM_FORMAT_YUV420P:
-      case OM_FORMAT_YUVJ420P:
-      case OM_FORMAT_YUV420P10:
-      case OM_FORMAT_YUV420P12:
-      case OM_FORMAT_YUV420P16:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {(width + 1) / 2, (height + 1) / 2};
-
-        // 4:2:0 semi-planar
-      case OM_FORMAT_NV12:
-      case OM_FORMAT_NV21:
-      case OM_FORMAT_P010:
-      case OM_FORMAT_P016:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {width, (height + 1) / 2};
-
-        // 4:2:2 planar + variants
-      case OM_FORMAT_YUV422P:
-      case OM_FORMAT_YUVJ422P:
-      case OM_FORMAT_YUV422P10:
-      case OM_FORMAT_YUV422P12:
-      case OM_FORMAT_YUV422P16:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {(width + 1) / 2, height};
-
-        // 4:2:2 semi-planar
-      case OM_FORMAT_NV16:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {width, height};
-
-        // 4:4:4 planar + variants
-      case OM_FORMAT_YUV444P:
-      case OM_FORMAT_YUVJ444P:
-      case OM_FORMAT_YUV444P10:
-      case OM_FORMAT_YUV444P12:
-      case OM_FORMAT_YUV444P16:
-        return {width, height};
-
-        // 4:4:4 semi-planar
-      case OM_FORMAT_NV24:
-        return {width, height};
-
-        // 4:1:1
-      case OM_FORMAT_YUV411P:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {(width + 3) / 4, height};
-
-        // 4:1:0
-      case OM_FORMAT_YUV410P:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {(width + 3) / 4, (height + 3) / 4};
-
-        // Palette
-      case OM_FORMAT_PAL8:
-        if (plane_idx == 0)
-          return {width, height};
-        else
-          return {256, 1};
-
-      default:
-        return {width, height};
-    }
+  auto getPlaneDimensions(uint32_t plane_idx) const noexcept -> std::pair<uint32_t, uint32_t> {
+    return openmedia::getPlaneDimensions(format, plane_idx, width, height);
   }
 
-  auto getPlaneInfo(int plane_idx, uint32_t plane_width) const -> std::pair<uint32_t, uint32_t> {
+  auto getPlaneInfo(uint32_t plane_idx, uint32_t plane_width) const noexcept -> std::pair<uint32_t, uint32_t> {
     uint32_t bpp = getBytesPerPixel(format, plane_idx);
     uint32_t plane_stride = plane_width * bpp;
     plane_stride = (plane_stride + 15) & ~15;

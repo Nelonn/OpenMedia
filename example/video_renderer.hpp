@@ -19,6 +19,12 @@ static inline auto getSdlPixelFormat(uint8_t bits) -> SDL_PixelFormat {
     return SDL_PIXELFORMAT_RGBA8888; // We'll convert to RGBA manually
 }
 
+static inline auto isNativeSdlYuv420(uint32_t fmt) -> bool {
+    const auto format = static_cast<OMPixelFormat>(fmt);
+    return format == OM_FORMAT_YUV420P ||
+           format == OM_FORMAT_YUVJ420P;
+}
+
 // VideoRenderer
 //
 // Consumes VideoFrames from a FrameQueue, compares each frame's pts_sec
@@ -123,7 +129,7 @@ private:
 
     if (!texture_) return;
 
-    if (vf.bits_per_component <= 8) {
+    if (vf.bits_per_component <= 8 && isNativeSdlYuv420(vf.pixel_format)) {
       // Standard 8-bit YUV420P - use SDL's native YUV upload
       SDL_UpdateYUVTexture(
           texture_, nullptr,
@@ -141,6 +147,7 @@ private:
     const uint32_t w = vf.width;
     const uint32_t h = vf.height;
     std::vector<uint32_t> rgba(w * h);
+    const auto format = static_cast<OMPixelFormat>(vf.pixel_format);
 
     // Helper: clamp value to 8-bit range with proper scaling
     auto yuvToRgba = [&](uint16_t y, uint16_t u, uint16_t v) -> uint32_t {
@@ -163,16 +170,37 @@ private:
     const auto* u_data = reinterpret_cast<const uint16_t*>(vf.u_plane.data());
     const auto* v_data = reinterpret_cast<const uint16_t*>(vf.v_plane.data());
 
-    const int uv_h = (h + 1) / 2;
-
     for (uint32_t y = 0; y < h; ++y) {
       for (uint32_t x = 0; x < w; ++x) {
-        // Y plane: row y, stride in uint16_t units
         const uint16_t y_val = y_data[y * (vf.y_stride / 2) + x];
-        
-        // UV planes: subsampled 2x1, so use (y/2, x/2)
-        const uint32_t uv_y = y / 2;
-        const uint32_t uv_x = x / 2;
+
+        uint32_t uv_x = x;
+        uint32_t uv_y = y;
+        switch (format) {
+          case OM_FORMAT_YUV420P10:
+          case OM_FORMAT_YUV420P12:
+          case OM_FORMAT_YUV420P16:
+            uv_x = x / 2;
+            uv_y = y / 2;
+            break;
+          case OM_FORMAT_YUV422P10:
+          case OM_FORMAT_YUV422P12:
+          case OM_FORMAT_YUV422P16:
+            uv_x = x / 2;
+            uv_y = y;
+            break;
+          case OM_FORMAT_YUV444P10:
+          case OM_FORMAT_YUV444P12:
+          case OM_FORMAT_YUV444P16:
+            uv_x = x;
+            uv_y = y;
+            break;
+          default:
+            uv_x = x / 2;
+            uv_y = y / 2;
+            break;
+        }
+
         const uint16_t u_val = u_data[uv_y * (vf.u_stride / 2) + uv_x];
         const uint16_t v_val = v_data[uv_y * (vf.v_stride / 2) + uv_x];
 

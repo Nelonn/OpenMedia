@@ -2,6 +2,8 @@ name: Test Build
 
 on:
   push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
@@ -27,17 +29,17 @@ jobs:
           - { os: windows-11-arm,    compiler: MSVC }
           - { os: windows-11-arm,    compiler: Clang }
 
-          - { os: macos-latest,      compiler: Clang }
-          - { os: macos-latest,      compiler: AppleClang }
+          - { os: macos-26,      compiler: Clang }
+          - { os: macos-26,      compiler: AppleClang }
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Run gitdeps
-        uses: Nelonn/gitdeps@v0.2.3
-        with:
-          gitdeps_ver: 0.2.3
-          gitdeps_args: -e examples
+      #- name: Run gitdeps
+      #  uses: Nelonn/gitdeps@v0.2.3
+      #  with:
+      #    gitdeps_ver: 0.2.3
+      #    gitdeps_args: -e examples
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -95,7 +97,7 @@ jobs:
           echo "CXX=clang++" >> $env:GITHUB_ENV
 
       - name: CMake Configure
-        run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAUI_BOOT=OFF -DOPENMEDIA_EXAMPLES=ON -DOPENMEDIA_INSTALL=OFF ${{ runner.os == 'Windows' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' || '' }}
+        run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DOPENMEDIA_EXAMPLES=ON -DOPENMEDIA_INSTALL=OFF ${{ runner.os == 'Windows' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' || '' }}
 
       - name: CMake Build
         run: cmake --build build --target OpenMediaExample

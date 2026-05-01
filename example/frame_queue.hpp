@@ -19,6 +19,7 @@ struct VideoFrame {
     int      v_stride = 0;
     uint32_t width    = 0;
     uint32_t height   = 0;
+    uint32_t pixel_format = 0;
     int64_t  pts      = 0;      // native timebase units
     double   pts_sec  = 0.0;    // pre-computed seconds (set by decoder)
     uint8_t  bits_per_component = 8; // 8, 10, 12, or 16

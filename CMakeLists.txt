@@ -6,7 +6,7 @@ include(Options.cmake)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 file(DOWNLOAD
-        https://raw.githubusercontent.com/aui-framework/aui/b09bbf34115f55dd63a5a34948b7f62ce60b2918/aui.boot.cmake
+        https://raw.githubusercontent.com/aui-framework/aui/df77317f6d1d8a08bd6d0f6e4b36a75e6037afea/aui.boot.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 include(${CMAKE_CURRENT_BINARY_DIR}/aui.boot.cmake)
 
@@ -87,13 +87,14 @@ add_library(OpenMedia::OpenMedia ALIAS OpenMedia)
 if (OPENMEDIA_VULKAN_VIDEO)
     if (AUI_BOOT)
         auib_import(VulkanHeaders https://github.com/KhronosGroup/Vulkan-Headers
-                VERSION 49f1a381e2aec33ef32adf4a377b5a39ec016ec4)
+                VERSION f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8)
     elseif (NOT TARGET Vulkan::Headers)
         add_subdirectory(third_party/external/Vulkan-Headers)
     endif ()
     target_link_libraries(OpenMedia PRIVATE Vulkan::Headers)
     target_sources(OpenMedia PRIVATE include/openmedia/hw_vulkan.h)
     target_sources(OpenMedia PRIVATE src/hw_vulkan.cpp)
+    target_sources(OpenMedia PRIVATE src/hw_vulkan_priv.hpp)
 endif ()
 
 if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
@@ -117,12 +118,19 @@ if (APPLE)
 endif ()
 
 if (OPENMEDIA_AMF)
-    #target_sources(OpenMedia PRIVATE src/video/amf.cpp)
+    target_sources(OpenMedia PRIVATE src/video/amf.cpp)
+    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/amf-headers)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_AMF)
+    if (WIN32)
+        target_link_libraries(OpenMedia PRIVATE d3d11.lib dxgi.lib dxguid.lib)
+        target_include_directories(OpenMedia PRIVATE ${CMAKE_WINDOWS_KITS_INCLUDE_DIRS})
+    endif ()
 endif ()
 
 if (OPENMEDIA_DX11_VIDEO)
     target_sources(OpenMedia PRIVATE include/openmedia/hw_dx11.h)
     target_sources(OpenMedia PRIVATE src/hw_dx11.cpp)
+    target_sources(OpenMedia PRIVATE src/hw_dx11_priv.hpp)
     target_sources(OpenMedia PRIVATE src/video/dx11.cpp)
     target_link_libraries(OpenMedia PRIVATE d3d11.lib dxgi.lib dxva2.lib mf.lib mfplat.lib mfuuid.lib mfreadwrite.lib)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DX11_VIDEO)
@@ -131,6 +139,7 @@ endif ()
 if (OPENMEDIA_DX12_VIDEO)
     target_sources(OpenMedia PRIVATE include/openmedia/hw_dx12.h)
     target_sources(OpenMedia PRIVATE src/hw_dx12.cpp)
+    target_sources(OpenMedia PRIVATE src/hw_dx12_priv.hpp)
     target_sources(OpenMedia PRIVATE src/video/dx12.cpp)
     target_link_libraries(OpenMedia PRIVATE d3d12.lib dxgi.lib dxva2.lib mf.lib mfplat.lib mfuuid.lib mfreadwrite.lib)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DX12_VIDEO)
@@ -158,7 +167,7 @@ endif ()
 if (OPENMEDIA_MATROSKA)
     if (AUI_BOOT)
         auib_import(webm https://github.com/Nelonn/libwebm
-                VERSION f93f4a26cea155f32d46c52290777d4ba6757dbd)
+                VERSION 97c21a1c8ff698b417c6eadb378527ae45ca4a3c)
     elseif (NOT TARGET webm::webm)
         add_subdirectory(third_party/external/libwebm)
     endif ()
@@ -279,7 +288,7 @@ endif ()
 if (OPENMEDIA_JPEG)
     auib_import(libjpeg-turbo
             https://github.com/libjpeg-turbo/libjpeg-turbo
-            VERSION 3.1.3
+            VERSION 3.1.90
             CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib)
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)

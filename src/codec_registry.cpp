@@ -170,6 +170,7 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_FFMPEG_VP8);
   registry->registerCodec(&CODEC_FFMPEG_VP9);
   registry->registerCodec(&CODEC_FFMPEG_AV1);
+  registry->registerCodec(&CODEC_FFMPEG_PRORES);
 #endif
 
   // Video - DirectX11
@@ -186,9 +187,12 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #endif
 
   // Video - AMD AMF
-  //registry->registerCodec(&CODEC_AMF_H264);
-  //registry->registerCodec(&CODEC_AMF_H265);
-  //registry->registerCodec(&CODEC_AMF_AV1);
+#if defined(OPENMEDIA_AMF)
+  registry->registerCodec(&CODEC_AMF_H264);
+  registry->registerCodec(&CODEC_AMF_H265);
+  registry->registerCodec(&CODEC_AMF_AV1);
+  registry->registerCodec(&CODEC_AMF_VP9);
+#endif
 
   // Image codecs
   registry->registerCodec(&CODEC_PNG);

@@ -46,7 +46,6 @@ static auto xevdColorSpaceToPixelFormat(int cs) -> OMPixelFormat {
 
 class XevdDecoder final : public Decoder {
   std::unique_ptr<void, XevdDecoderDeleter> ctx_;
-  LoggerRef logger_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   int output_cs_ = 0;
@@ -60,8 +59,6 @@ public:
     if (options.format.codec_id != OM_CODEC_EVC) {
       return OM_CODEC_INVALID_PARAMS;
     }
-
-    logger_ = options.logger ? options.logger : Logger::refDefault();
 
     XEVD_CDSC cdsc = {};
     cdsc.threads = 1;

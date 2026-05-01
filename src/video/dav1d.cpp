@@ -26,8 +26,7 @@ struct Dav1dPictureDeleter {
 };
 
 static void dav1d_log_callback(void* cookie, const char* format, va_list ap) {
-  if (!cookie || !format) return;
-  Logger* logger = static_cast<Logger*>(cookie);
+  if (!format) return;
   va_list args_copy;
   va_copy(args_copy, ap);
   int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
@@ -38,12 +37,11 @@ static void dav1d_log_callback(void* cookie, const char* format, va_list ap) {
   std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
   std::vsnprintf(buffer.data(), buffer.size(), format, ap);
   std::string_view message(buffer.data(), static_cast<size_t>(required_size));
-  logger->log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
+  log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
 }
 
 class Dav1dDecoder final : public Decoder {
   std::unique_ptr<Dav1dContext, Dav1dContextDeleter> ctx_;
-  LoggerRef logger_ = {};
   Dav1dSettings settings_ = {};
   bool initialized_ = false;
   VideoFormat output_format_ = {};
@@ -58,14 +56,11 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
     dav1d_default_settings(&settings_);
     settings_.n_threads = 1;
     settings_.max_frame_delay = 1;
-    if (logger_) {
-      settings_.logger.cookie = logger_.get();
-      settings_.logger.callback = dav1d_log_callback;
-    }
+    settings_.logger.cookie = nullptr;
+    settings_.logger.callback = dav1d_log_callback;
 
     Dav1dContext* raw_ctx = nullptr;
     if (dav1d_open(&raw_ctx, &settings_) < 0) {

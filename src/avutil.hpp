@@ -39,6 +39,7 @@ public:
   PFN<const char*(AVSampleFormat)> av_get_sample_fmt_name = nullptr;
   PFN<int(AVDictionary**, const char*, const char*, int)> av_dict_set = nullptr;
   PFN<void(AVDictionary**)> av_dict_free = nullptr;
+  PFN<void(void (*)(void*, int, const char*, va_list))> av_log_set_callback = nullptr;
 
 private:
   LibAVUtil() = default;
@@ -53,6 +54,7 @@ private:
 auto avPixelFormatToOmPixelFormat(AVPixelFormat av_fmt) -> OMPixelFormat;
 auto avColorSpaceToOmColorSpace(AVColorSpace av_cs) -> OMColorSpace;
 auto avColorTransferToOmTransfer(AVColorTransferCharacteristic av_trc) -> OMTransferCharacteristic;
+auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries;
 
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat;
 

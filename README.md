@@ -33,25 +33,26 @@ integration while maintaining a simple, intuitive API.
 | Codec   | Decoding | Encoding | Backends                |
 |---------|:--------:|:--------:|-------------------------|
 | AAC     |    ✅     |    🔧    | libfdk-aac, WMF, FFmpeg |
-| ALAC    |    ✅     |    🔧    | libalac                 |
-| FLAC    |    ✅     |    🔧    | libFLAC                 |
-| Opus    |    ✅     |    ✅     | libopus                 |
-| Vorbis  |    ✅     |    🔧    | libvorbis               |
-| MP3     |    ✅     |    🔧    | minimp3                 |
+| ALAC    |    ✅     |    🔧    | libalac, FFmpeg         |
+| FLAC    |    ✅     |    🔧    | libFLAC, FFmpeg         |
+| Opus    |    ✅     |    ✅     | libopus, FFmpeg         |
+| Vorbis  |    ✅     |    🔧    | libvorbis, FFmpeg       |
+| MP3     |    ✅     |    🔧    | minimp3, WMF, FFmpeg    |
 | WAV/PCM |    ✅     |    🔧    | OpenMedia               |
 
 ### Video Codecs
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Codec     | Decoding | Encoding | Backends                      |
-|-----------|:--------:|:--------:|-------------------------------|
-| AV1       |    ✅     |    🔧    | dav1d (decoding only)         |
-| H264      |    ✅     |    🔧    | OpenH264, FFmpeg              |
-| H265/HEVC |    ✅     |    🔧    | FFmpeg                        |
-| H266/VVC  |    ✅     |    🔧    | FFmpeg, VVdeC (Broken), VVenC |
-| EVC       | Untested | Untested | FFmpeg, xevd, xeve            |
-| VP8/VP9   | Untested |    🔧    | FFmpeg, libvpx                |
+| Codec        | Decoding | Encoding | Backends                      |
+|--------------|:--------:|:--------:|-------------------------------|
+| AV1          |    ✅     |    🔧    | dav1d (decoding only)         |
+| H264         |    ✅     |    🔧    | OpenH264, FFmpeg              |
+| H265/HEVC    |    ✅     |    🔧    | FFmpeg                        |
+| H266/VVC     |    ✅     |    🔧    | FFmpeg, VVdeC (Broken), VVenC |
+| Apple ProRes |    ✅     |    🔧    | FFmpeg                        |
+| EVC          | Untested | Untested | FFmpeg, xevd, xeve            |
+| VP8/VP9      | Untested |    🔧    | FFmpeg, libvpx                |
 
 ### Image Codecs
 
@@ -121,7 +122,7 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 ```bash
 mkdir build && cd build
-cmake .. -DOPENMEDIA_EXAMPLE_PLAYER=ON
+cmake .. -DOPENMEDIA_EXAMPLES=ON
 cmake --build .
 ```
 
