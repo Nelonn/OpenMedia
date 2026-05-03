@@ -286,10 +286,15 @@ if (OPENMEDIA_WEBP)
 endif ()
 
 if (OPENMEDIA_JPEG)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" proc_lower)
+    set(_allow_jpeg_simd ON)
+    if(WIN32 AND proc_lower MATCHES "arm")
+        set(_allow_jpeg_simd OFF)
+    endif()
     auib_import(libjpeg-turbo
             https://github.com/libjpeg-turbo/libjpeg-turbo
             VERSION 3.1.90
-            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib)
+            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_SIMD=${_allow_jpeg_simd})
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/jpeg_decoder.cpp)
