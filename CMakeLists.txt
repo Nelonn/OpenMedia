@@ -241,7 +241,8 @@ endif ()
 if (OPENMEDIA_OPUS)
     if (AUI_BOOT)
         auib_import(Opus https://github.com/aui-framework/opus
-                VERSION df980346de0b5e14dbdb922951fae21f4ea6c1c0)
+                VERSION df980346de0b5e14dbdb922951fae21f4ea6c1c0
+                CMAKE_ARGS -DOPUS_MAY_HAVE_NEON=OFF)
     elseif (NOT TARGET Opus::opus)
         add_subdirectory(third_party/external/opus)
     endif ()
