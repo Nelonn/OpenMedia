@@ -238,7 +238,7 @@ if (OPENMEDIA_FLAC)
     target_sources(OpenMedia PRIVATE src/audio/flac_format.cpp)
 endif ()
 
-if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # TODO: fix opus
+if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # TODO: fix opus
     if (AUI_BOOT)
         auib_import(Opus https://github.com/aui-framework/opus
                 VERSION df980346de0b5e14dbdb922951fae21f4ea6c1c0)
@@ -247,6 +247,7 @@ if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # T
     endif ()
     target_link_libraries(OpenMedia PRIVATE Opus::opus)
     target_sources(OpenMedia PRIVATE src/audio/opus.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPUS)
 endif ()
 
 if (OPENMEDIA_VORBIS)

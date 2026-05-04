@@ -117,7 +117,9 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #endif
   registry->registerCodec(&CODEC_FLAC);
   registry->registerCodec(&CODEC_VORBIS);
+#if defined(OPENMEDIA_OPUS)
   registry->registerCodec(&CODEC_OPUS);
+#endif
 #if defined(_WIN32)
   registry->registerCodec(&CODEC_WMF_AAC);
   registry->registerCodec(&CODEC_WMF_MP3);
