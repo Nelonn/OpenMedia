@@ -98,9 +98,15 @@ if (OPENMEDIA_VULKAN_VIDEO)
 endif ()
 
 if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" proc_lower)
+    set(_allow_zlib_arm_intrin ON)
+    if(WIN32 AND (CMAKE_C_COMPILER_ID STREQUAL "Clang") AND proc_lower MATCHES "arm")
+        set(_allow_zlib_arm_intrin OFF)
+    endif()
     if (AUI_BOOT)
         auib_import(ZLIB https://github.com/Nelonn/zlib-ng
-                VERSION 381792764c59489a0c968968c1ddd8a2a6d8556c)
+                VERSION 381792764c59489a0c968968c1ddd8a2a6d8556c
+                CMAKE_ARGS -DWITH_ARMV8=${_allow_zlib_arm_intrin} -DWITH_NEON=${_allow_zlib_arm_intrin})
     elseif (NOT TARGET ZLIB::ZLIB)
         add_subdirectory(third_party/external/zlib-ng)
     endif ()
