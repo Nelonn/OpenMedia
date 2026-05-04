@@ -139,6 +139,7 @@ private:
     fmt.planar = true;
 
     AudioSamples samples(fmt, nb_samples);
+    samples.bits_per_sample = fmt.bits_per_sample;
 
     for (unsigned c = 0; c < fmt.channels; ++c) {
       const FLAC__int32* src = buffer[c];

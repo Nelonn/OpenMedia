@@ -207,6 +207,7 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
     result.status = res;
     return result;
   }
+  result.context = ctx;
 
   amf::AMFContext1Ptr ctx1;
   amf::AMFContext2Ptr ctx2;
@@ -367,6 +368,7 @@ public:
       log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create AMF decoder component");
       return OM_CODEC_HWACCEL_FAILED;
     }
+    decoder_ = comp;
 
     // Set extradata if available (for H264/H265 Annex B or AVCC)
     if (!extradata_.empty()) {
@@ -428,7 +430,11 @@ public:
       return Err(OM_CODEC_DECODE_FAILED);
     }
 
-    return processOutput(frames);
+    auto result = processOutput(frames);
+    if (!result.isOk()) {
+      return Err(result.unwrapErr());
+    }
+    return Ok(std::move(frames));
   }
 
   void flush() override {
@@ -458,7 +464,7 @@ private:
     return decoder_->SubmitInput(buf);
   }
 
-  auto processOutput(std::vector<Frame>& frames) -> Result<std::vector<Frame>, OMError> {
+  auto processOutput(std::vector<Frame>& frames) -> Result<bool, OMError> {
     if (!decoder_) return Err(OM_COMMON_NOT_INITIALIZED);
 
     amf::AMFDataPtr data;
@@ -466,12 +472,12 @@ private:
 
     if (res == AMF_EOF) {
       // End of stream
-      return Ok(std::move(frames));
+      return Ok(false);
     }
 
     if (res == AMF_INPUT_FULL) {
       // Need more input
-      return Ok(std::move(frames));
+      return Ok(false);
     }
 
     if (res != AMF_OK || !data) {
@@ -499,6 +505,11 @@ private:
       pic = &std::get<Picture>(frame.data);
     }
 
+    pic->format = get_om_format(output_format_amf_);
+    pic->width = width_;
+    pic->height = height_;
+    pic->planes = {};
+
     auto& host_pic = pic->buffer.emplace<HostPicture>();
 
     amf::AMFSurfacePtr host_surface;
@@ -510,32 +521,45 @@ private:
 
     if (res == AMF_OK && host_surface) {
       size_t total_size = 0;
+      const size_t plane_count = std::min<size_t>(host_surface->GetPlanesCount(), 4);
 
-      for (size_t i = 0; i < host_surface->GetPlanesCount(); i++) {
-        total_size += host_surface->GetPlaneAt(i)->GetHPitch() * host_surface->GetPlaneAt(i)->GetHeight();
+      for (size_t i = 0; i < plane_count; i++) {
+        amf::AMFPlane* plane = host_surface->GetPlaneAt(i);
+        if (!plane) {
+          continue;
+        }
+        const int pitch = plane->GetHPitch();
+        const int height = plane->GetHeight();
+        if (pitch <= 0 || height <= 0) {
+          continue;
+        }
+        total_size += static_cast<size_t>(pitch) * static_cast<size_t>(height);
       }
 
       host_pic.buffer = BufferPool::getInstance().get(total_size);
       uint8_t* dst = host_pic.buffer->bytes().data();
       size_t offset = 0;
 
-      for (size_t i = 0; i < host_surface->GetPlanesCount(); i++) {
+      for (size_t i = 0; i < plane_count; i++) {
         amf::AMFPlane* plane = host_surface->GetPlaneAt(i);
+        if (!plane) {
+          continue;
+        }
         uint8_t* src = static_cast<uint8_t*>(plane->GetNative());
         int pitch = plane->GetHPitch();
         int height = plane->GetHeight();
+        if (!src || pitch <= 0 || height <= 0) {
+          continue;
+        }
 
-        memcpy(dst + offset, src, static_cast<size_t>(pitch) * height);
-        offset += static_cast<size_t>(pitch) * height;
+        pic->planes.setData(i, dst + offset, static_cast<uint32_t>(pitch));
+        memcpy(dst + offset, src, static_cast<size_t>(pitch) * static_cast<size_t>(height));
+        offset += static_cast<size_t>(pitch) * static_cast<size_t>(height);
       }
     }
 
-    pic->format = get_om_format(output_format_amf_);
-    pic->width = width_;
-    pic->height = height_;
-
     frames.push_back(std::move(frame));
-    return Ok(std::move(frames));
+    return Ok(true);
   }
 
   auto drainFrames(std::vector<Frame>& frames) -> Result<std::vector<Frame>, OMError> {
@@ -545,7 +569,10 @@ private:
 
     while (true) {
       auto result = processOutput(frames);
-      if (!result.isOk() || result.unwrap().empty()) {
+      if (!result.isOk()) {
+        return Err(result.unwrapErr());
+      }
+      if (!result.unwrap()) {
         break;
       }
     }

@@ -22,6 +22,7 @@ extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_AC3;
 extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3;
 
 // Audio - FFmpeg
+extern const CodecDescriptor CODEC_FFMPEG_ALAC;
 extern const CodecDescriptor CODEC_FFMPEG_AAC;
 extern const CodecDescriptor CODEC_FFMPEG_MP3;
 extern const CodecDescriptor CODEC_FFMPEG_OPUS;

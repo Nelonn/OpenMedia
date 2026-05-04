@@ -14,28 +14,11 @@ OMDX12Context::~OMDX12Context() {
     CloseHandle(fence_event);
     fence_event = nullptr;
   }
-  if (decode_command_list) {
-    decode_command_list->Release();
-    decode_command_list = nullptr;
-  }
-  if (video_device) {
-    video_device->Release();
-    video_device = nullptr;
-  }
-  if (fence) {
-    fence->Release();
-    fence = nullptr;
-  }
-  if (owns_device) {
-    if (command_queue) {
-      command_queue->Release();
-      command_queue = nullptr;
-    }
-    if (device) {
-      device->Release();
-      device = nullptr;
-    }
-  }
+  decode_command_list.Reset();
+  video_device.Reset();
+  fence.Reset();
+  command_queue.Reset();
+  device.Reset();
 }
 
 auto OMDX12Context::initialize(const OMDX12Init& init) -> bool {
@@ -43,11 +26,9 @@ auto OMDX12Context::initialize(const OMDX12Init& init) -> bool {
 
   if (init.device) {
     device = init.device;
-    device->AddRef();
 
     if (init.command_queue) {
       command_queue = init.command_queue;
-      command_queue->AddRef();
     }
   } else {
     owns_device = true;
