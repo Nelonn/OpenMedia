@@ -374,7 +374,7 @@ endif ()
 if (OPENMEDIA_DAV1D)
     if (AUI_BOOT)
         auib_import(dav1d https://github.com/Nelonn/dav1d
-                VERSION 3c2dd7e0a7a5f3282cf7ca9e2fe66e6bd5813e72)
+                VERSION cc89a75e7174b0796ae6f6c424a2183d53730256)
     elseif (NOT TARGET dav1d::dav1d)
         add_subdirectory(third_party/external/dav1d)
     endif ()
