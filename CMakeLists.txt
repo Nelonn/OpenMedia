@@ -294,7 +294,7 @@ if (OPENMEDIA_JPEG)
     auib_import(libjpeg-turbo
             https://github.com/libjpeg-turbo/libjpeg-turbo
             VERSION 3.1.90
-            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_SIMD=${_allow_jpeg_simd})
+            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_TOOLS=OFF -DWITH_SIMD=${_allow_jpeg_simd})
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/jpeg_decoder.cpp)
@@ -374,7 +374,7 @@ endif ()
 if (OPENMEDIA_DAV1D)
     if (AUI_BOOT)
         auib_import(dav1d https://github.com/Nelonn/dav1d
-                VERSION 952d5b5db330928908e733d423675b335690c94e)
+                VERSION 3c2dd7e0a7a5f3282cf7ca9e2fe66e6bd5813e72)
     elseif (NOT TARGET dav1d::dav1d)
         add_subdirectory(third_party/external/dav1d)
     endif ()
