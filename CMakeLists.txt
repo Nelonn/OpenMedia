@@ -100,7 +100,7 @@ endif ()
 if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
     if (AUI_BOOT)
         auib_import(ZLIB https://github.com/Nelonn/zlib-ng
-                VERSION 381792764c59489a0c968968c1ddd8a2a6d8556c)
+                VERSION 788c485d828c017b884946470bff1cc4373cc056)
     elseif (NOT TARGET ZLIB::ZLIB)
         add_subdirectory(third_party/external/zlib-ng)
     endif ()
@@ -238,7 +238,7 @@ if (OPENMEDIA_FLAC)
     target_sources(OpenMedia PRIVATE src/audio/flac_format.cpp)
 endif ()
 
-if (OPENMEDIA_OPUS)
+if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # TODO: fix opus
     if (AUI_BOOT)
         auib_import(Opus https://github.com/aui-framework/opus
                 VERSION df980346de0b5e14dbdb922951fae21f4ea6c1c0)
@@ -247,6 +247,7 @@ if (OPENMEDIA_OPUS)
     endif ()
     target_link_libraries(OpenMedia PRIVATE Opus::opus)
     target_sources(OpenMedia PRIVATE src/audio/opus.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPUS)
 endif ()
 
 if (OPENMEDIA_VORBIS)
@@ -286,10 +287,15 @@ if (OPENMEDIA_WEBP)
 endif ()
 
 if (OPENMEDIA_JPEG)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" proc_lower)
+    set(_allow_jpeg_simd ON)
+    if(WIN32 AND proc_lower MATCHES "arm")
+        set(_allow_jpeg_simd OFF)
+    endif()
     auib_import(libjpeg-turbo
             https://github.com/libjpeg-turbo/libjpeg-turbo
             VERSION 3.1.90
-            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib)
+            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_TOOLS=OFF -DWITH_SIMD=${_allow_jpeg_simd})
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/jpeg_decoder.cpp)
@@ -369,7 +375,7 @@ endif ()
 if (OPENMEDIA_DAV1D)
     if (AUI_BOOT)
         auib_import(dav1d https://github.com/Nelonn/dav1d
-                VERSION 952d5b5db330928908e733d423675b335690c94e)
+                VERSION 87301c133c40ab9f296ccbb778fbaca37d6ce704)
     elseif (NOT TARGET dav1d::dav1d)
         add_subdirectory(third_party/external/dav1d)
     endif ()

@@ -97,7 +97,7 @@ jobs:
           echo "CXX=clang++" >> $env:GITHUB_ENV
 
       - name: CMake Configure
-        run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DOPENMEDIA_EXAMPLES=ON -DOPENMEDIA_INSTALL=OFF ${{ runner.os == 'Windows' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' || '' }}
+        run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DOPENMEDIA_EXAMPLES=ON -DOPENMEDIA_INSTALL=OFF ${{ runner.os == 'Windows' && runner.arch == 'ARM64' && matrix.compiler == 'Clang' && '-DCMAKE_SYSTEM_PROCESSOR="arm64" -DCMAKE_C_FLAGS="-target aarch64-pc-windows-msvc" -DCMAKE_CXX_FLAGS="-target aarch64-pc-windows-msvc"' || '' }} ${{ runner.os == 'Windows' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' || '' }}
 
       - name: CMake Build
         run: cmake --build build --target OpenMediaExample
