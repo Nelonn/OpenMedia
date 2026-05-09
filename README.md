@@ -116,7 +116,6 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 - CMake 3.21+
 - C++20 compatible compiler (Clang, MSVC, GCC)
-- Optional: gitdeps
 
 ### Example Build
 
