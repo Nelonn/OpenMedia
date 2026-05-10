@@ -148,7 +148,6 @@ public:
   auto configure(const DecoderOptions& options) -> OMError override {
     closeConverter();
 
-    logger_ = options.logger ? options.logger : Logger::refDefault();
     if (options.format.type != OM_MEDIA_AUDIO || options.format.codec_id != codec_id_) {
       return OM_CODEC_INVALID_PARAMS;
     }
@@ -348,17 +347,13 @@ private:
   }
 
   void logStatus(OMLogLevel level, std::string_view operation, OSStatus status) const {
-    if (!logger_) {
-      return;
-    }
-    logger_->log(OM_CATEGORY_DECODER,
-                 level,
-                 std::format("AudioToolbox {} failed: {}", operation, static_cast<int32_t>(status)));
+    log(OM_CATEGORY_DECODER,
+        level,
+        std::format("AudioToolbox {} failed: {}", operation, static_cast<int32_t>(status)));
   }
 
   OMCodecId codec_id_ = OM_CODEC_NONE;
   AudioConverterRef converter_ = nullptr;
-  LoggerRef logger_ = {};
   AudioStreamBasicDescription input_format_ = {};
   AudioStreamBasicDescription output_stream_description_ = {};
   AudioFormat output_format_ = {};
