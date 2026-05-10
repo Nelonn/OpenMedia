@@ -50,6 +50,17 @@ extern const CodecDescriptor CODEC_FFMPEG_VP9;
 extern const CodecDescriptor CODEC_FFMPEG_AV1;
 extern const CodecDescriptor CODEC_FFMPEG_PRORES;
 
+// Video - VideoToolbox
+#if defined(__APPLE__)
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H263;
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H264;
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H265;
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG2;
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG4;
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_AV1;
+extern const CodecDescriptor CODEC_VIDEOTOOLBOX_PRORES;
+#endif
+
 // Video - DirectX11
 extern const CodecDescriptor CODEC_DX11_H264;
 

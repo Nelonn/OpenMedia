@@ -27,6 +27,8 @@ auto LibAVCodec::load() -> bool {
 
 #if defined(_WIN32)
   const char* library_name = "avcodec-62.dll";
+#elif defined(OPENMEDIA_FFMPEG_AVCODEC_LIBRARY)
+  const char* library_name = OPENMEDIA_FFMPEG_AVCODEC_LIBRARY;
 #elif defined(__APPLE__)
   const char* library_name = "libavcodec-62.dylib";
 #else

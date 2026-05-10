@@ -36,6 +36,8 @@ auto LibAVFormat::load() -> bool {
 
 #if defined(_WIN32)
   const char* library_name = "avformat-62.dll";
+#elif defined(OPENMEDIA_FFMPEG_AVFORMAT_LIBRARY)
+  const char* library_name = OPENMEDIA_FFMPEG_AVFORMAT_LIBRARY;
 #elif defined(__APPLE__)
   const char* library_name = "libavformat-62.dylib";
 #else
