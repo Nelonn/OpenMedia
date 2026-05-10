@@ -153,6 +153,18 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   //registry->registerCodec(&CODEC_WMF_VIDEO_AV1);
 #endif
 
+#if defined(__APPLE__)
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_H263);
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_H264);
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_H265);
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_MPEG2);
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_MPEG4);
+  // CoreMedia defines a VP9 codec type, but VideoToolbox cannot create a VP9
+  // decompression session on macOS. Keep VP9 on software/FFmpeg backends.
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_AV1);
+  registry->registerCodec(&CODEC_VIDEOTOOLBOX_PRORES);
+#endif
+
 #if defined(OPENMEDIA_AVCODEC)
   registry->registerCodec(&CODEC_FFMPEG_H264);
   registry->registerCodec(&CODEC_FFMPEG_H265);

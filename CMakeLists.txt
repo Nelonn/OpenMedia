@@ -109,9 +109,24 @@ if (WIN32)
 endif ()
 
 if (APPLE)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(OpenMedia PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-Wno-elaborated-enum-base>)
+    endif ()
+
     find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
-    target_link_libraries(OpenMedia PRIVATE ${AUDIOTOOLBOX_FRAMEWORK})
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+    find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+    target_link_libraries(OpenMedia PRIVATE
+            ${AUDIOTOOLBOX_FRAMEWORK}
+            ${COREFOUNDATION_FRAMEWORK}
+            ${COREMEDIA_FRAMEWORK}
+            ${COREVIDEO_FRAMEWORK}
+            ${VIDEOTOOLBOX_FRAMEWORK})
     target_sources(OpenMedia PRIVATE src/audio/audio_toolbox.cpp)
+    target_sources(OpenMedia PRIVATE src/video/video_toolbox.cpp)
 endif ()
 
 if (OPENMEDIA_AMF)
@@ -147,6 +162,12 @@ if (OPENMEDIA_FFMPEG)
 
     if (FFMPEG_FOUND)
         target_include_directories(OpenMedia PRIVATE ${FFMPEG_INCLUDE_DIRS})
+        if (APPLE)
+            target_compile_definitions(OpenMedia PRIVATE
+                    "OPENMEDIA_FFMPEG_AVUTIL_LIBRARY=\"${FFMPEG_avutil_LIBRARY}\""
+                    "OPENMEDIA_FFMPEG_AVCODEC_LIBRARY=\"${FFMPEG_avcodec_LIBRARY}\""
+                    "OPENMEDIA_FFMPEG_AVFORMAT_LIBRARY=\"${FFMPEG_avformat_LIBRARY}\"")
+        endif ()
         target_sources(OpenMedia PRIVATE src/avutil.cpp src/avutil.hpp)
         target_sources(OpenMedia PRIVATE src/avcodec.cpp src/avcodec.hpp)
         target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_AVCODEC)

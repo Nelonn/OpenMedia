@@ -17,6 +17,8 @@ auto LibAVUtil::load() -> bool {
 
 #if defined(_WIN32)
   const char* library_name = "avutil-60.dll";
+#elif defined(OPENMEDIA_FFMPEG_AVUTIL_LIBRARY)
+  const char* library_name = OPENMEDIA_FFMPEG_AVUTIL_LIBRARY;
 #elif defined(__APPLE__)
   const char* library_name = "libavutil-60.dylib";
 #else
