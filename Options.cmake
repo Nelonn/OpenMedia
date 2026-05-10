@@ -8,12 +8,7 @@ option(AUI_BOOT "AUI Boot compatibility" ON)
 option(OPENMEDIA_INSTALL "Install OpenMedia" ON)
 
 # Universal
-if (APPLE OR LINUX)
-    set(OPENMEDIA_FFMPEG_DEFAULT ON)
-else ()
-    set(OPENMEDIA_FFMPEG_DEFAULT OFF)
-endif ()
-option(OPENMEDIA_FFMPEG "FFmpeg" ${OPENMEDIA_FFMPEG_DEFAULT})
+option(OPENMEDIA_FFMPEG "FFmpeg" ${LINUX})
 
 # Container
 option(OPENMEDIA_MATROSKA "MKV/MKA/WEBM" ON)
