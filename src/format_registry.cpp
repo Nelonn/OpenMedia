@@ -76,6 +76,9 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
 #if defined(OPENMEDIA_MATROSKA)
   registry->registerFormat(&FORMAT_MATROSKA);
 #endif
+#if defined(__ANDROID__)
+  registry->registerFormat(&FORMAT_MEDIAEXTRACTOR);
+#endif
 #if defined(OPENMEDIA_AVFORMAT)
   registry->registerFormat(&FORMAT_FFMPEG_BMFF);
   registry->registerFormat(&FORMAT_FFMPEG_MATROSKA);

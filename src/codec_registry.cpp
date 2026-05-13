@@ -197,6 +197,15 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_AMF_VP9);
 #endif
 
+#if defined(__ANDROID__)
+  registry->registerCodec(&CODEC_MEDIACODEC_H264);
+  registry->registerCodec(&CODEC_MEDIACODEC_H265);
+  registry->registerCodec(&CODEC_MEDIACODEC_VP8);
+  registry->registerCodec(&CODEC_MEDIACODEC_VP9);
+  registry->registerCodec(&CODEC_MEDIACODEC_AV1);
+  registry->registerCodec(&CODEC_MEDIACODEC_AAC);
+#endif
+
   // Image codecs
   registry->registerCodec(&CODEC_PNG);
   registry->registerCodec(&CODEC_JPEG);
