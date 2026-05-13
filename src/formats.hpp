@@ -6,6 +6,7 @@ namespace openmedia {
 
 extern const FormatDescriptor FORMAT_BMFF;
 extern const FormatDescriptor FORMAT_MATROSKA;
+extern const FormatDescriptor FORMAT_MEDIAEXTRACTOR;
 extern const FormatDescriptor FORMAT_FFMPEG_BMFF;
 extern const FormatDescriptor FORMAT_FFMPEG_MATROSKA;
 

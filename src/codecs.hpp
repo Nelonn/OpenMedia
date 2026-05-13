@@ -51,7 +51,6 @@ extern const CodecDescriptor CODEC_FFMPEG_AV1;
 extern const CodecDescriptor CODEC_FFMPEG_PRORES;
 
 // Video - VideoToolbox
-#if defined(__APPLE__)
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H263;
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H264;
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H265;
@@ -59,7 +58,6 @@ extern const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG2;
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG4;
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_AV1;
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_PRORES;
-#endif
 
 // Video - DirectX11
 extern const CodecDescriptor CODEC_DX11_H264;
@@ -75,6 +73,16 @@ extern const CodecDescriptor CODEC_AMF_H264;
 extern const CodecDescriptor CODEC_AMF_H265;
 extern const CodecDescriptor CODEC_AMF_AV1;
 extern const CodecDescriptor CODEC_AMF_VP9;
+
+// Video - MediaCodec
+extern const CodecDescriptor CODEC_MEDIACODEC_H264;
+extern const CodecDescriptor CODEC_MEDIACODEC_H265;
+extern const CodecDescriptor CODEC_MEDIACODEC_VP8;
+extern const CodecDescriptor CODEC_MEDIACODEC_VP9;
+extern const CodecDescriptor CODEC_MEDIACODEC_AV1;
+
+// Audio - MediaCodec
+extern const CodecDescriptor CODEC_MEDIACODEC_AAC;
 
 // Image
 extern const CodecDescriptor CODEC_PNG;
