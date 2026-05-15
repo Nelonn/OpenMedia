@@ -39,7 +39,12 @@ public:
   PFN<int(AVPacket*, int)> av_grow_packet = nullptr;
   PFN<void(AVPacket*, int)> av_shrink_packet = nullptr;
 
+  PFN<AVCodecParserContext*(int)> av_parser_init = nullptr;
+  PFN<int(AVCodecParserContext*, AVCodecContext*, uint8_t**, int*, const uint8_t*, int, int64_t, int64_t, int64_t)> av_parser_parse2 = nullptr;
+  PFN<void(AVCodecParserContext*)> av_parser_close = nullptr;
+
 private:
+
   LibAVCodec() = default;
   LibAVCodec(const LibAVCodec&) = delete;
   LibAVCodec& operator=(const LibAVCodec&) = delete;

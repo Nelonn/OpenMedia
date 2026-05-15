@@ -181,6 +181,13 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_DX11_H264);
 #endif
 
+#if defined(OPENMEDIA_VAAPI)
+  registry->registerCodec(&CODEC_VAAPI_H264);
+  registry->registerCodec(&CODEC_VAAPI_H265);
+  registry->registerCodec(&CODEC_VAAPI_VP9);
+  registry->registerCodec(&CODEC_VAAPI_AV1);
+#endif
+
   // Video - DirectX12
 #if defined(OPENMEDIA_DX12_VIDEO)
   //registry->registerCodec(&CODEC_DX12_H264);

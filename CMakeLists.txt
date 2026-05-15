@@ -157,6 +157,20 @@ if (OPENMEDIA_DX12_VIDEO)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DX12_VIDEO)
 endif ()
 
+if (OPENMEDIA_VAAPI)
+    target_sources(OpenMedia PRIVATE include/openmedia/hw_vaapi.h)
+    target_sources(OpenMedia PRIVATE src/hw_vaapi.cpp)
+    target_sources(OpenMedia PRIVATE src/hw_vaapi_priv.hpp)
+    target_sources(OpenMedia PRIVATE src/video/vaapi_loader.cpp src/video/vaapi_loader.hpp)
+    target_sources(OpenMedia PRIVATE src/video/vaapi.cpp)
+    target_sources(OpenMedia PRIVATE 
+        third_party/h265bitstream/h265_stream.c
+        third_party/h265bitstream/h265_nal.c
+    )
+    target_include_directories(OpenMedia PRIVATE ${PROJECT_SOURCE_DIR}/third_party/h265bitstream)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VAAPI)
+endif ()
+
 if (OPENMEDIA_FFMPEG)
     find_package(FFMPEG COMPONENTS avformat avcodec avutil)
 
