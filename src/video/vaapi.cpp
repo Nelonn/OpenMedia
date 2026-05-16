@@ -18,21 +18,9 @@
 #include <openmedia/video.hpp>
 #include <vector>
 #include "vaapi_loader.hpp"
+#include <util/io_util.hpp>
 
 namespace openmedia {
-
-static uint32_t read_leb128(const uint8_t* data, size_t size, size_t* len) {
-  uint32_t value = 0;
-  for (size_t i = 0; i < 8 && i < size; i++) {
-    value |= (uint32_t) (data[i] & 0x7F) << (i * 7);
-    if (!(data[i] & 0x80)) {
-      if (len) *len = i + 1;
-      return value;
-    }
-  }
-  if (len) *len = 0;
-  return 0;
-}
 
 static void fillPictureParamsH264(const h264::SPS& sps, const h264::PPS& pps, const h264::SliceHeader& slice, VAPictureParameterBufferH264& va_pic_param) {
   std::memset(&va_pic_param, 0, sizeof(va_pic_param));

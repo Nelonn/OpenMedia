@@ -92,6 +92,13 @@ if (OPENMEDIA_VULKAN_VIDEO)
     target_sources(OpenMedia PRIVATE include/openmedia/hw_vulkan.h)
     target_sources(OpenMedia PRIVATE src/hw_vulkan.cpp)
     target_sources(OpenMedia PRIVATE src/hw_vulkan_priv.hpp)
+    target_sources(OpenMedia PRIVATE src/video/vulkan_video.cpp)
+    target_sources(OpenMedia PRIVATE 
+        third_party/h265bitstream/h265_stream.c
+        third_party/h265bitstream/h265_nal.c
+    )
+    target_include_directories(OpenMedia PRIVATE ${PROJECT_SOURCE_DIR}/third_party/h265bitstream)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VULKAN)
 endif ()
 
 if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)

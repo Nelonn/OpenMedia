@@ -1,6 +1,18 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
+#include <vk_video/vulkan_video_codecs_common.h>
+#include <vk_video/vulkan_video_codec_h264std.h>
+#include <vk_video/vulkan_video_codec_h264std_decode.h>
+#include <vk_video/vulkan_video_codec_h264std_encode.h>
+#include <vk_video/vulkan_video_codec_h265std.h>
+#include <vk_video/vulkan_video_codec_h265std_decode.h>
+#include <vk_video/vulkan_video_codec_h265std_encode.h>
+#include <vk_video/vulkan_video_codec_av1std.h>
+#include <vk_video/vulkan_video_codec_av1std_decode.h>
+#include <vk_video/vulkan_video_codec_av1std_encode.h>
+#include <vk_video/vulkan_video_codec_vp9std.h>
+#include <vk_video/vulkan_video_codec_vp9std_decode.h>
 #include <openmedia/macro.h>
 
 #if defined(__cplusplus)
@@ -13,6 +25,9 @@ typedef struct OMVulkanInit {
   VkInstance instance;
   VkPhysicalDevice physical_device;
   VkDevice device;
+  uint32_t queue_family_index;
+  uint32_t video_decode_queue_family_index;
+  uint32_t video_encode_queue_family_index;
 } OMVulkanInit;
 
 typedef struct OMVulkanPicture OMVulkanPicture;
@@ -30,6 +45,8 @@ OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context);
 
 struct OMVulkanPicture {
   VkImage image;
+  VkImageView view;
+  VkDeviceMemory memory;
 };
 
 #if defined(__cplusplus)

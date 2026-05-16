@@ -71,6 +71,23 @@ static auto load_u32_le(const uint8_t* p) -> uint32_t {
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
+static auto read_leb128(const uint8_t* data, size_t size, size_t* len) -> uint32_t {
+  uint32_t value = 0;
+  for (size_t i = 0; i < 8 && i < size; i++) {
+    value |= static_cast<uint32_t>(data[i] & 0x7F) << (i * 7);
+    if (!(data[i] & 0x80)) {
+      if (len) {
+        *len = i + 1;
+      }
+      return value;
+    }
+  }
+  if (len) {
+    *len = 0;
+  }
+  return 0;
+}
+
 static void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, ptrdiff_t stride) {
   for (size_t y = 0; y < height; y++) {
     memcpy(dst, src, width);
