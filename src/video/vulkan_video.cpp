@@ -24,14 +24,10 @@
 #include <h265_stream.h>
 #include <util/io_util.hpp>
 
-namespace openmedia {
+#include <openmedia/hw_vulkan.h>
+#include <hw_vulkan_priv.hpp>
 
-class VulkanHardwarePicture : public HardwarePicture {
-public:
-  OMVulkanPicture* picture = nullptr;
-  VulkanHardwarePicture(OMVulkanPicture* pic)
-      : HardwarePicture(HWDeviceType::VULKAN), picture(pic) {}
-};
+namespace openmedia {
 
 struct VulkanDPBEntry {
   OMVulkanPicture* picture = nullptr;

@@ -43,11 +43,33 @@ void HWVulkanContext_delete(OMVulkanContext* context);
 OPENMEDIA_ABI
 OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context);
 
+OPENMEDIA_ABI
+void HWVulkanPicture_delete(OMVulkanPicture* picture);
+
 struct OMVulkanPicture {
   VkImage image;
   VkImageView view;
   VkDeviceMemory memory;
 };
+
+#if defined(__cplusplus)
+} // extern "C"
+
+#include <openmedia/video.hpp>
+
+namespace openmedia {
+
+class OPENMEDIA_ABI VulkanHardwarePicture : public HardwarePicture {
+public:
+  OMVulkanPicture* picture = nullptr;
+  VulkanHardwarePicture(OMVulkanPicture* pic)
+      : HardwarePicture(HWDeviceType::VULKAN), picture(pic) {}
+};
+
+} // namespace openmedia
+
+extern "C" {
+#endif
 
 #if defined(__cplusplus)
 }

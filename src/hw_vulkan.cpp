@@ -32,6 +32,12 @@ void HWVulkanContext_delete(OMVulkanContext* context) {
 OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context) {
   auto* picture = static_cast<OMVulkanPicture*>(malloc(sizeof(OMVulkanPicture)));
   if (!picture) return nullptr;
-  memset(picture, 0, sizeof(OMVulkanPicture));
+  std::memset(picture, 0, sizeof(OMVulkanPicture));
   return picture;
 }
+
+void HWVulkanPicture_delete(OMVulkanPicture* picture) {
+  if (!picture) return;
+  free(picture);
+}
+
