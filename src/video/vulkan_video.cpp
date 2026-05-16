@@ -1,17 +1,3 @@
-#include <vulkan/vulkan.h>
-#include <vk_video/vulkan_video_codecs_common.h>
-#include <vk_video/vulkan_video_codec_h264std.h>
-#include <vk_video/vulkan_video_codec_h264std_decode.h>
-#include <vk_video/vulkan_video_codec_h264std_encode.h>
-#include <vk_video/vulkan_video_codec_h265std.h>
-#include <vk_video/vulkan_video_codec_h265std_decode.h>
-#include <vk_video/vulkan_video_codec_h265std_encode.h>
-#include <vk_video/vulkan_video_codec_av1std.h>
-#include <vk_video/vulkan_video_codec_av1std_decode.h>
-#include <vk_video/vulkan_video_codec_av1std_encode.h>
-#include <vk_video/vulkan_video_codec_vp9std.h>
-#include <vk_video/vulkan_video_codec_vp9std_decode.h>
-
 #include <openmedia/hw_vulkan.h>
 #include <hw_vulkan_priv.hpp>
 #include <openmedia/video.hpp>
@@ -23,9 +9,6 @@
 #include <h264.h>
 #include <h265_stream.h>
 #include <util/io_util.hpp>
-
-#include <openmedia/hw_vulkan.h>
-#include <hw_vulkan_priv.hpp>
 
 namespace openmedia {
 
@@ -81,20 +64,25 @@ public:
   ~VulkanDecoder() override { release(); }
 
   auto configure(const DecoderOptions& options) -> OMError override {
-    release();
     if (!options.hw_device.has_value() || options.hw_device->type != HWDeviceType::VULKAN) {
+      release();
       return OM_CODEC_HWACCEL_FAILED;
     }
     hw_context_ = static_cast<OMVulkanContext*>(options.hw_device->context);
+    release(); // Now safe to call as hw_context_ is set
+
     codec_id_ = options.format.codec_id;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
 
     if (codec_id_ == OM_CODEC_H264) {
+      h264_profile_ = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR};
       h264_profile_.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_MAIN;
+      h264_profile_.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
       video_profile_.pNext = &h264_profile_;
       video_profile_.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
     } else if (codec_id_ == OM_CODEC_H265) {
+      h265_profile_ = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR};
       h265_profile_.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
       video_profile_.pNext = &h265_profile_;
       video_profile_.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
@@ -321,7 +309,10 @@ private:
 
   void updateSessionParametersH264() {
     if (!has_h264_sps_ || !has_h264_pps_) return;
-    if (session_params_) VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
+    if (session_params_) {
+      VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
+      session_params_ = nullptr;
+    }
 
     StdVideoH264SequenceParameterSet sps = {};
     sps.pic_width_in_mbs_minus1 = (uint16_t)h264_sps_.pic_width_in_mbs_minus1;
@@ -349,21 +340,24 @@ private:
     pps.flags.redundant_pic_cnt_present_flag = h264_pps_.redundant_pic_cnt_present_flag;
     pps.flags.transform_8x8_mode_flag = h264_pps_.transform_8x8_mode_flag;
 
-    VkVideoDecodeH264SessionParametersAddInfoKHR h264_add = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_SESSION_PARAMETERS_ADD_INFO_KHR};
-    h264_add.stdSPSCount = 1;
-    h264_add.pStdSPSs = &sps;
-    h264_add.stdPPSCount = 1;
-    h264_add.pStdPPSs = &pps;
+    VkVideoDecodeH264SessionParametersAddInfoKHR h264_add_info = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_SESSION_PARAMETERS_ADD_INFO_KHR};
+    h264_add_info.stdSPSCount = 1;
+    h264_add_info.pStdSPSs = &sps;
+    h264_add_info.stdPPSCount = 1;
+    h264_add_info.pStdPPSs = &pps;
 
     VkVideoSessionParametersCreateInfoKHR params_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
-    params_info.pNext = &h264_add;
+    params_info.pNext = &h264_add_info;
     params_info.videoSession = video_session_;
     VK(vkCreateVideoSessionParametersKHR)(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
   }
 
   void updateSessionParametersH265() {
     if (!has_h265_sps_ || !has_h265_pps_) return;
-    if (session_params_) VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
+    if (session_params_) {
+      VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
+      session_params_ = nullptr;
+    }
 
     StdVideoH265SequenceParameterSet sps = {};
     sps.pic_width_in_luma_samples = (uint16_t)h265_stream_->sps->pic_width_in_luma_samples;
@@ -378,14 +372,14 @@ private:
     pps.flags.weighted_bipred_flag = h265_stream_->pps->weighted_bipred_flag;
     pps.flags.transform_skip_enabled_flag = h265_stream_->pps->transform_skip_enabled_flag;
 
-    VkVideoDecodeH265SessionParametersAddInfoKHR h265_add = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR};
-    h265_add.stdSPSCount = 1;
-    h265_add.pStdSPSs = &sps;
-    h265_add.stdPPSCount = 1;
-    h265_add.pStdPPSs = &pps;
+    VkVideoDecodeH265SessionParametersAddInfoKHR h265_add_info = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR};
+    h265_add_info.stdSPSCount = 1;
+    h265_add_info.pStdSPSs = &sps;
+    h265_add_info.stdPPSCount = 1;
+    h265_add_info.pStdPPSs = &pps;
 
     VkVideoSessionParametersCreateInfoKHR params_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
-    params_info.pNext = &h265_add;
+    params_info.pNext = &h265_add_info;
     params_info.videoSession = video_session_;
     VK(vkCreateVideoSessionParametersKHR)(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
   }
@@ -562,6 +556,10 @@ private:
   }
 
   void release() {
+    if (!hw_context_) {
+      initialized_ = false;
+      return;
+    }
     if (command_pool_) {
       VK(vkDestroyCommandPool)(hw_context_->vk_device, command_pool_, hw_context_->allocator);
       command_pool_ = VK_NULL_HANDLE;
@@ -625,9 +623,13 @@ public:
   ~VulkanEncoder() override { release(); }
 
   auto configure(const EncoderOptions& options) -> OMError override {
-    release();
-    if (!options.hw_device.has_value() || options.hw_device->type != HWDeviceType::VULKAN) return OM_CODEC_HWACCEL_FAILED;
+    if (!options.hw_device.has_value() || options.hw_device->type != HWDeviceType::VULKAN) {
+      release();
+      return OM_CODEC_HWACCEL_FAILED;
+    }
     hw_context_ = static_cast<OMVulkanContext*>(options.hw_device->context);
+    release();
+
     codec_id_ = options.format.codec_id;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
