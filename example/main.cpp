@@ -26,6 +26,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
   MediaPlayer player;
   player.setRenderer(renderer);
+  if (player.enableVulkan()) {
+    SDL_Log("[Player] Vulkan Video acceleration enabled.");
+  } else {
+    SDL_Log("[Player] Vulkan Video acceleration NOT available.");
+  }
 
   PlayerUI ui(player);
 

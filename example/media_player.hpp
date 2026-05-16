@@ -6,6 +6,8 @@
 #include "video_renderer.hpp"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -218,6 +220,176 @@ public:
         video_renderer_.setRenderer(r);
     }
 
+    static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+        VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+        VkDebugUtilsMessageTypeFlagsEXT messageType,
+        const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+        void* pUserData) {
+        SDL_Log("[Vulkan Validation] %s", pCallbackData->pMessage);
+        return VK_FALSE;
+    }
+
+    auto enableVulkan() -> bool {
+        if (!SDL_Vulkan_LoadLibrary(nullptr)) {
+            SDL_Log("[Vulkan] SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError());
+            return false;
+        }
+
+        auto vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
+        if (!vkGetInstanceProcAddr) {
+            SDL_Log("[Vulkan] SDL_Vulkan_GetVkGetInstanceProcAddr returned nullptr");
+            return false;
+        }
+
+        auto vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(vkGetInstanceProcAddr(nullptr, "vkCreateInstance"));
+        if (!vkCreateInstance) {
+            SDL_Log("[Vulkan] Failed to load vkCreateInstance via vkGetInstanceProcAddr");
+            return false;
+        }
+
+        // Basic Vulkan initialization
+        VkApplicationInfo app_info = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        app_info.apiVersion = VK_API_VERSION_1_3;
+
+        std::vector<const char*> layers;
+        std::vector<const char*> instance_extensions;
+
+        // Attempt to enable validation layer
+        uint32_t layer_count = 0;
+        auto vkEnumerateInstanceLayerProperties = reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
+        if (vkEnumerateInstanceLayerProperties) {
+            vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+            std::vector<VkLayerProperties> available_layers(layer_count);
+            vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
+            for (const auto& layer : available_layers) {
+                if (std::string(layer.layerName) == "VK_LAYER_KHRONOS_validation") {
+                    layers.push_back("VK_LAYER_KHRONOS_validation");
+                    SDL_Log("[Vulkan] Enabling validation layer");
+                    instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+                    break;
+                }
+            }
+        }
+
+        VkInstanceCreateInfo inst_info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        inst_info.pApplicationInfo = &app_info;
+        inst_info.enabledLayerCount = (uint32_t)layers.size();
+        inst_info.ppEnabledLayerNames = layers.data();
+        inst_info.enabledExtensionCount = (uint32_t)instance_extensions.size();
+        inst_info.ppEnabledExtensionNames = instance_extensions.data();
+        
+        VkInstance instance;
+        if (vkCreateInstance(&inst_info, nullptr, &instance) != VK_SUCCESS) {
+            SDL_Log("[Vulkan] vkCreateInstance failed");
+            return false;
+        }
+
+        // Setup Debug Messenger if layer enabled
+        if (!layers.empty()) {
+            auto vkCreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+            if (vkCreateDebugUtilsMessengerEXT) {
+                VkDebugUtilsMessengerCreateInfoEXT debug_info = {VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+                debug_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+                debug_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+                debug_info.pfnUserCallback = debugCallback;
+                
+                VkDebugUtilsMessengerEXT messenger;
+                vkCreateDebugUtilsMessengerEXT(instance, &debug_info, nullptr, &messenger);
+            }
+        }
+        
+        // Load instance functions
+        auto vkEnumeratePhysicalDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(vkGetInstanceProcAddr(instance, "vkEnumeratePhysicalDevices"));
+        auto vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(vkGetInstanceProcAddr(instance, "vkCreateDevice"));
+        auto vkGetPhysicalDeviceQueueFamilyProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties2>(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties2"));
+        auto vkGetPhysicalDeviceProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties"));
+
+        if (!vkEnumeratePhysicalDevices || !vkCreateDevice || !vkGetPhysicalDeviceQueueFamilyProperties2 || !vkGetPhysicalDeviceProperties) {
+            SDL_Log("[Vulkan] Failed to load instance functions via vkGetInstanceProcAddr");
+            return false;
+        }
+        
+        uint32_t device_count = 0;
+        vkEnumeratePhysicalDevices(instance, &device_count, nullptr);
+        std::vector<VkPhysicalDevice> devices(device_count);
+        vkEnumeratePhysicalDevices(instance, &device_count, devices.data());
+        if (devices.empty()) {
+            SDL_Log("[Vulkan] No physical devices found");
+            return false;
+        }
+
+        VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+        uint32_t decode_queue_family = 0xFFFFFFFF;
+        
+        for (uint32_t d_idx = 0; d_idx < devices.size(); ++d_idx) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(devices[d_idx], &props);
+            SDL_Log("[Vulkan] Checking device %u: %s", d_idx, props.deviceName);
+
+            uint32_t qf_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties2(devices[d_idx], &qf_count, nullptr);
+            std::vector<VkQueueFamilyProperties2> qf_props(qf_count, {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2});
+            std::vector<VkQueueFamilyVideoPropertiesKHR> video_props(qf_count, {VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR});
+            for(uint32_t i=0; i<qf_count; ++i) qf_props[i].pNext = &video_props[i];
+            vkGetPhysicalDeviceQueueFamilyProperties2(devices[d_idx], &qf_count, qf_props.data());
+
+            for (uint32_t i = 0; i < qf_count; i++) {
+                if (video_props[i].videoCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) {
+                    SDL_Log("[Vulkan]   Found H264 Decode support in queue family %u", i);
+                    decode_queue_family = i;
+                    physical_device = devices[d_idx];
+                    break;
+                }
+            }
+            if (physical_device != VK_NULL_HANDLE) break;
+        }
+
+        if (physical_device == VK_NULL_HANDLE) {
+            SDL_Log("[Vulkan] No device with H264 Decode support found");
+            return false;
+        }
+        
+        float priority = 1.0f;
+        VkDeviceQueueCreateInfo queue_info = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        queue_info.queueFamilyIndex = decode_queue_family;
+        queue_info.queueCount = 1;
+        queue_info.pQueuePriorities = &priority;
+        
+        std::vector<const char*> extensions = {
+            VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
+            VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
+            VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME
+        };
+        
+        VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+        device_info.queueCreateInfoCount = 1;
+        device_info.pQueueCreateInfos = &queue_info;
+        device_info.enabledExtensionCount = (uint32_t)extensions.size();
+        device_info.ppEnabledExtensionNames = extensions.data();
+        
+        VkDevice device;
+        if (vkCreateDevice(physical_device, &device_info, nullptr, &device) != VK_SUCCESS) {
+            SDL_Log("[Vulkan] vkCreateDevice failed. Extensions might be unsupported?");
+            return false;
+        }
+        
+        OMVulkanInit om_init = {};
+        om_init.instance = instance;
+        om_init.physical_device = physical_device;
+        om_init.device = device;
+        om_init.video_decode_queue_family_index = decode_queue_family;
+        om_init.proc = vkGetInstanceProcAddr;
+        
+        OMVulkanContext* ctx = HWVulkanContext_create(om_init);
+        if (!ctx) {
+            SDL_Log("[Vulkan] HWVulkanContext_create failed");
+            return false;
+        }
+        
+        vulkan_device_ = HWDevice{HWDeviceType::VULKAN, ctx};
+        return true;
+    }
+
     // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
@@ -375,6 +547,7 @@ private:
     FormatDetector format_detector_;
     CodecRegistry  codec_registry_;
     FormatRegistry format_registry_;
+    std::optional<HWDevice> vulkan_device_;
 
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<Decoder> audio_decoder_;
@@ -482,6 +655,9 @@ private:
         opts.format    = track.format;
         opts.time_base = track.time_base;
         opts.extradata = track.extradata;
+        if (track.format.type == OM_MEDIA_VIDEO && vulkan_device_) {
+            opts.hw_device = *vulkan_device_;
+        }
         const OMError err = dec->configure(opts);
         if (err != OM_SUCCESS) {
             if (track.format.type == OM_MEDIA_VIDEO) {
@@ -710,6 +886,10 @@ private:
     // the queue and is woken the instant a slot opens OR abort() is called.
     // There is no spin, no 2 ms sleep, and the thread exits cleanly on stop.
     // -----------------------------------------------------------------------
+
+#include <openmedia/hw_vulkan.h>
+
+// ... inside MediaPlayer ...
     void videoDecodeLoop() {
         while (!stop_requested_) {
             auto maybe_pkt = video_packet_queue_.blockingPop();
@@ -732,21 +912,29 @@ private:
                              video_time_base_.num / video_time_base_.den;
                 vf.bits_per_component = detail::getBitsPerComponent(pic.format);
 
-                vf.y_stride = pic.planes.getLinesize(0);
-                vf.u_stride = pic.planes.getLinesize(1);
-                vf.v_stride = pic.planes.getLinesize(2);
+                if (std::holds_alternative<HardwarePicture>(pic.buffer)) {
+                  const auto& hw = std::get<HardwarePicture>(pic.buffer);
+                  if (hw.getType() == HWDeviceType::VULKAN) {
+                    const auto& vhw = static_cast<const VulkanHardwarePicture&>(hw);
+                    vf.hw_picture = std::make_shared<VulkanHardwarePicture>(vhw.picture);
+                  }
+                } else {
+                  vf.y_stride = pic.planes.getLinesize(0);
+                  vf.u_stride = pic.planes.getLinesize(1);
+                  vf.v_stride = pic.planes.getLinesize(2);
 
-                const uint8_t* y = pic.planes.getData(0);
-                const uint8_t* u = pic.planes.getData(1);
-                const uint8_t* v = pic.planes.getData(2);
+                  const uint8_t* y = pic.planes.getData(0);
+                  const uint8_t* u = pic.planes.getData(1);
+                  const uint8_t* v = pic.planes.getData(2);
 
-                const auto y_dims = pic.getPlaneDimensions(0);
-                const auto u_dims = pic.getPlaneDimensions(1);
-                const auto v_dims = pic.getPlaneDimensions(2);
+                  const auto y_dims = pic.getPlaneDimensions(0);
+                  const auto u_dims = pic.getPlaneDimensions(1);
+                  const auto v_dims = pic.getPlaneDimensions(2);
 
-                vf.y_plane.assign(y, y + vf.y_stride * y_dims.second);
-                vf.u_plane.assign(u, u + vf.u_stride * u_dims.second);
-                vf.v_plane.assign(v, v + vf.v_stride * v_dims.second);
+                  vf.y_plane.assign(y, y + vf.y_stride * y_dims.second);
+                  vf.u_plane.assign(u, u + vf.u_stride * u_dims.second);
+                  vf.v_plane.assign(v, v + vf.v_stride * v_dims.second);
+                }
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
