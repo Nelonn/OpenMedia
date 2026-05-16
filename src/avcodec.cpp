@@ -51,6 +51,8 @@ auto LibAVCodec::load() -> bool {
   avcodec_receive_packet = library_.getProcAddress<PFN<int(AVCodecContext*, AVPacket*)>>("avcodec_receive_packet");
   avcodec_flush_buffers = library_.getProcAddress<PFN<void(AVCodecContext*)>>("avcodec_flush_buffers");
   avcodec_get_type = library_.getProcAddress<PFN<AVMediaType(AVCodecID)>>("avcodec_get_type");
+  avcodec_get_name = library_.getProcAddress<PFN<const char*(AVCodecID)>>("avcodec_get_name");
+  av_codec_iterate = library_.getProcAddress<PFN<const AVCodec*(void**)>>("av_codec_iterate");
   av_packet_alloc = library_.getProcAddress<PFN<AVPacket*()>>("av_packet_alloc");
   av_packet_free = library_.getProcAddress<PFN<void(AVPacket**)>>("av_packet_free");
   av_packet_unref = library_.getProcAddress<PFN<void(AVPacket*)>>("av_packet_unref");
@@ -78,10 +80,25 @@ auto LibAVCodec::isLoaded() const -> bool {
   return loaded_;
 }
 
+template <>
+void AVDeleter<::AVCodecContext>::operator()(::AVCodecContext* ptr) const {
+  if (ptr) LibAVCodec::getInstance().avcodec_free_context(&ptr);
+}
+
+template <>
+void AVDeleter<::AVPacket>::operator()(::AVPacket* ptr) const {
+  if (ptr) LibAVCodec::getInstance().av_packet_free(&ptr);
+}
+
+template <>
+void AVDeleter<::AVCodecParserContext>::operator()(::AVCodecParserContext* ptr) const {
+  if (ptr) LibAVCodec::getInstance().av_parser_close(ptr);
+}
+
 class FFmpegDecoder final : public Decoder {
 public:
-  explicit FFmpegDecoder(OMCodecId codec_id)
-      : codec_id_(codec_id) {}
+  explicit FFmpegDecoder(AVCodecID codec_id)
+      : av_codec_id_(codec_id) {}
 
   ~FFmpegDecoder() override {
     release();
@@ -102,38 +119,13 @@ public:
       }
     }
 
-    AVCodecID av_codec_id = AV_CODEC_ID_NONE;
-    switch (codec_id_) {
-      // Audio codecs
-      case OM_CODEC_AAC: av_codec_id = AV_CODEC_ID_AAC; break;
-      case OM_CODEC_MP3: av_codec_id = AV_CODEC_ID_MP3; break;
-      case OM_CODEC_OPUS: av_codec_id = AV_CODEC_ID_OPUS; break;
-      case OM_CODEC_VORBIS: av_codec_id = AV_CODEC_ID_VORBIS; break;
-      case OM_CODEC_FLAC: av_codec_id = AV_CODEC_ID_FLAC; break;
-      case OM_CODEC_PCM_S16LE: av_codec_id = AV_CODEC_ID_PCM_S16LE; break;
-      case OM_CODEC_PCM_S32LE: av_codec_id = AV_CODEC_ID_PCM_S32LE; break;
-      case OM_CODEC_AC3: av_codec_id = AV_CODEC_ID_AC3; break;
-      case OM_CODEC_EAC3: av_codec_id = AV_CODEC_ID_EAC3; break;
-      // Video codecs
-      case OM_CODEC_H264: av_codec_id = AV_CODEC_ID_H264; break;
-      case OM_CODEC_H265: av_codec_id = AV_CODEC_ID_HEVC; break;
-      case OM_CODEC_H266: av_codec_id = AV_CODEC_ID_VVC; break;
-      case OM_CODEC_EVC: av_codec_id = AV_CODEC_ID_EVC; break;
-      case OM_CODEC_VP8: av_codec_id = AV_CODEC_ID_VP8; break;
-      case OM_CODEC_VP9: av_codec_id = AV_CODEC_ID_VP9; break;
-      case OM_CODEC_AV1: av_codec_id = AV_CODEC_ID_AV1; break;
-      case OM_CODEC_MPEG4: av_codec_id = AV_CODEC_ID_MPEG4; break;
-      case OM_CODEC_PRORES: av_codec_id = AV_CODEC_ID_PRORES; break;
-      default: return OM_CODEC_NOT_SUPPORTED;
-    }
-
-    const AVCodec* codec = codec_loader.avcodec_find_decoder(av_codec_id);
+    const AVCodec* codec = codec_loader.avcodec_find_decoder(av_codec_id_);
     if (!codec) {
       return OM_CODEC_NOT_SUPPORTED;
     }
 
     auto configure_context = [&](bool minimal) -> OMError {
-      codec_ctx_ = codec_loader.avcodec_alloc_context3(codec);
+      codec_ctx_.reset(codec_loader.avcodec_alloc_context3(codec));
       if (!codec_ctx_) {
         return OM_COMMON_OUT_OF_MEMORY;
       }
@@ -165,9 +157,9 @@ public:
         }
       }
 
-      const int ret = codec_loader.avcodec_open2(codec_ctx_, codec, nullptr);
+      const int ret = codec_loader.avcodec_open2(codec_ctx_.get(), codec, nullptr);
       if (ret < 0) {
-        codec_loader.avcodec_free_context(&codec_ctx_);
+        codec_ctx_.reset();
         return avErrorToOmError(ret);
       }
 
@@ -182,8 +174,8 @@ public:
       }
     }
 
-    frame_ = util_loader.av_frame_alloc();
-    packet_ = codec_loader.av_packet_alloc();
+    frame_.reset(util_loader.av_frame_alloc());
+    packet_.reset(codec_loader.av_packet_alloc());
 
     if (!frame_ || !packet_) {
       return OM_COMMON_OUT_OF_MEMORY;
@@ -236,7 +228,7 @@ public:
     std::vector<Frame> frames;
 
     auto pkt_data = packet.bytes;
-    int ret = codec_loader.av_new_packet(packet_, static_cast<int>(pkt_data.size()));
+    int ret = codec_loader.av_new_packet(packet_.get(), static_cast<int>(pkt_data.size()));
     if (ret < 0) {
       return Err(avErrorToOmError(ret));
     }
@@ -245,15 +237,15 @@ public:
     packet_->dts = packet.dts;
     packet_->stream_index = packet.stream_index;
 
-    ret = codec_loader.avcodec_send_packet(codec_ctx_, packet_);
+    ret = codec_loader.avcodec_send_packet(codec_ctx_.get(), packet_.get());
     if (ret < 0) {
-      codec_loader.av_packet_unref(packet_);
+      codec_loader.av_packet_unref(packet_.get());
       return Err(avErrorToOmError(ret));
     }
-    codec_loader.av_packet_unref(packet_);
+    codec_loader.av_packet_unref(packet_.get());
 
     while (true) {
-      int ret = codec_loader.avcodec_receive_frame(codec_ctx_, frame_);
+      int ret = codec_loader.avcodec_receive_frame(codec_ctx_.get(), frame_.get());
       if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) {
         break;
       }
@@ -261,12 +253,12 @@ public:
         return Err(avErrorToOmError(ret));
       }
 
-      auto frame = convertAVFrameToFrame(frame_);
+      auto frame = convertAVFrameToFrame(frame_.get());
       if (frame.has_value()) {
         frames.push_back(std::move(*frame));
       }
 
-      util_loader.av_frame_unref(frame_);
+      util_loader.av_frame_unref(frame_.get());
     }
 
     return Ok(std::move(frames));
@@ -276,7 +268,7 @@ public:
     if (initialized_ && codec_ctx_) {
       auto& codec_loader = LibAVCodec::getInstance();
       if (codec_loader.avcodec_flush_buffers) {
-        codec_loader.avcodec_flush_buffers(codec_ctx_);
+        codec_loader.avcodec_flush_buffers(codec_ctx_.get());
       }
     }
   }
@@ -378,159 +370,109 @@ private:
   }
 
   void release() {
-    auto& util = LibAVUtil::getInstance();
-    auto& codec_loader = LibAVCodec::getInstance();
-
-    if (codec_ctx_) {
-      codec_loader.avcodec_free_context(&codec_ctx_);
-      codec_ctx_ = nullptr;
-    }
-    if (frame_) {
-      util.av_frame_free(&frame_);
-      frame_ = nullptr;
-    }
-    if (packet_) {
-      codec_loader.av_packet_free(&packet_);
-      packet_ = nullptr;
-    }
+    codec_ctx_.reset();
+    frame_.reset();
+    packet_.reset();
     initialized_ = false;
   }
 
-  OMCodecId codec_id_;
-  AVCodecContext* codec_ctx_ = nullptr;
-  AVFrame* frame_ = nullptr;
-  AVPacket* packet_ = nullptr;
+  AVCodecID av_codec_id_;
+  AVPtr<AVCodecContext> codec_ctx_;
+  AVPtr<AVFrame> frame_;
+  AVPtr<AVPacket> packet_;
   bool initialized_ = false;
 };
 
-const CodecDescriptor CODEC_FFMPEG_H264 = {
-    .codec_id = OM_CODEC_H264,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_h264",
-    .long_name = "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_H264); },
+static auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {
+  switch (id) {
+    case AV_CODEC_ID_H264: return OM_CODEC_H264;
+    case AV_CODEC_ID_HEVC: return OM_CODEC_H265;
+    case AV_CODEC_ID_VVC: return OM_CODEC_H266;
+    case AV_CODEC_ID_EVC: return OM_CODEC_EVC;
+    case AV_CODEC_ID_VP8: return OM_CODEC_VP8;
+    case AV_CODEC_ID_VP9: return OM_CODEC_VP9;
+    case AV_CODEC_ID_AV1: return OM_CODEC_AV1;
+    case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
+    case AV_CODEC_ID_PRORES: return OM_CODEC_PRORES;
+    case AV_CODEC_ID_AAC: return OM_CODEC_AAC;
+    case AV_CODEC_ID_MP3: return OM_CODEC_MP3;
+    case AV_CODEC_ID_OPUS: return OM_CODEC_OPUS;
+    case AV_CODEC_ID_VORBIS: return OM_CODEC_VORBIS;
+    case AV_CODEC_ID_FLAC: return OM_CODEC_FLAC;
+    case AV_CODEC_ID_PCM_S16LE: return OM_CODEC_PCM_S16LE;
+    case AV_CODEC_ID_PCM_F32LE: return OM_CODEC_PCM_F32LE;
+    case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
+    case AV_CODEC_ID_AC3: return OM_CODEC_AC3;
+    case AV_CODEC_ID_EAC3: return OM_CODEC_EAC3;
+    case AV_CODEC_ID_MJPEG: return OM_CODEC_JPEG;
+    case AV_CODEC_ID_PNG: return OM_CODEC_PNG;
+    case AV_CODEC_ID_WEBP: return OM_CODEC_WEBP;
+    case AV_CODEC_ID_BMP: return OM_CODEC_BMP;
+    case AV_CODEC_ID_TIFF: return OM_CODEC_TIFF;
+    case AV_CODEC_ID_GIF: return OM_CODEC_GIF;
+    case AV_CODEC_ID_TARGA: return OM_CODEC_TGA;
+    default: return OM_CODEC_NONE;
+  }
+}
+
+struct DynamicFFmpegDescriptors {
+  std::vector<std::unique_ptr<CodecDescriptor>> descriptors;
+  std::vector<std::string> names;
+  std::vector<std::string> long_names;
 };
 
-const CodecDescriptor CODEC_FFMPEG_H265 = {
-    .codec_id = OM_CODEC_H265,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_h265",
-    .long_name = "HEVC (High Efficiency Video Coding) (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_H265); },
-};
+static DynamicFFmpegDescriptors FFMPEG_DESCRIPTORS;
 
-const CodecDescriptor CODEC_FFMPEG_H266 = {
-    .codec_id = OM_CODEC_H266,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_h266",
-    .long_name = "VVC (Versatile Video Coding) (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_H266); },
-};
+void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
+  auto& loader = LibAVCodec::getInstance();
+  if (!loader.load()) return;
 
-const CodecDescriptor CODEC_FFMPEG_EVC = {
-    .codec_id = OM_CODEC_EVC,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_evc",
-    .long_name = "EVC (Essential Video Coding) (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_EVC); },
-};
+  void* opaque = nullptr;
+  while (const AVCodec* codec = loader.av_codec_iterate(&opaque)) {
+    OMCodecId om_id = avCodecIdToOmCodecId(codec->id);
+    if (om_id == OM_CODEC_NONE) continue;
 
-const CodecDescriptor CODEC_FFMPEG_VP8 = {
-    .codec_id = OM_CODEC_VP8,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_vp8",
-    .long_name = "Google VP8 (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_VP8); },
-};
+    auto desc = std::make_unique<CodecDescriptor>();
+    desc->codec_id = om_id;
 
-const CodecDescriptor CODEC_FFMPEG_VP9 = {
-    .codec_id = OM_CODEC_VP9,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_vp9",
-    .long_name = "Google VP9 (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_VP9); },
-};
+    if (om_id == OM_CODEC_JPEG || om_id == OM_CODEC_PNG || om_id == OM_CODEC_WEBP ||
+        om_id == OM_CODEC_BMP || om_id == OM_CODEC_TIFF || om_id == OM_CODEC_GIF ||
+        om_id == OM_CODEC_TGA) {
+      desc->type = OM_MEDIA_IMAGE;
+    } else {
+      desc->type = (codec->type == AVMEDIA_TYPE_VIDEO) ? OM_MEDIA_VIDEO :
+                   (codec->type == AVMEDIA_TYPE_AUDIO) ? OM_MEDIA_AUDIO :
+                   (codec->type == AVMEDIA_TYPE_SUBTITLE) ? OM_MEDIA_SUBTITLE : OM_MEDIA_NONE;
+    }
+    
+    if (desc->type == OM_MEDIA_NONE) continue;
 
-const CodecDescriptor CODEC_FFMPEG_AV1 = {
-    .codec_id = OM_CODEC_AV1,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_av1",
-    .long_name = "Alliance for Open Media AV1 (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_AV1); },
-};
+    std::string name = "ffmpeg_";
+    name += codec->name;
+    FFMPEG_DESCRIPTORS.names.push_back(std::move(name));
+    desc->name = FFMPEG_DESCRIPTORS.names.back();
 
-const CodecDescriptor CODEC_FFMPEG_PRORES = {
-    .codec_id = OM_CODEC_PRORES,
-    .type = OM_MEDIA_VIDEO,
-    .name = "ffmpeg_prores",
-    .long_name = "Apple ProRes (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_PRORES); },
-};
+    if (codec->long_name) {
+      std::string long_name = codec->long_name;
+      long_name += " (FFmpeg)";
+      FFMPEG_DESCRIPTORS.long_names.push_back(std::move(long_name));
+      desc->long_name = FFMPEG_DESCRIPTORS.long_names.back();
+    }
 
-const CodecDescriptor CODEC_FFMPEG_AAC = {
-    .codec_id = OM_CODEC_AAC,
-    .type = OM_MEDIA_AUDIO,
-    .name = "ffmpeg_aac",
-    .long_name = "AAC (Advanced Audio Coding) (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_AAC); },
-};
+    desc->vendor = "FFmpeg";
+    
+    if (loader.avcodec_find_decoder(codec->id)) {
+      AVCodecID av_id = codec->id;
+      desc->decoder_factory = [av_id] {
+        return std::make_unique<FFmpegDecoder>(av_id);
+      };
+    }
 
-const CodecDescriptor CODEC_FFMPEG_MP3 = {
-    .codec_id = OM_CODEC_MP3,
-    .type = OM_MEDIA_AUDIO,
-    .name = "ffmpeg_mp3",
-    .long_name = "MP3 (MPEG audio layer 3) (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_MP3); },
-};
-
-const CodecDescriptor CODEC_FFMPEG_OPUS = {
-    .codec_id = OM_CODEC_OPUS,
-    .type = OM_MEDIA_AUDIO,
-    .name = "ffmpeg_opus",
-    .long_name = "Opus (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_OPUS); },
-};
-
-const CodecDescriptor CODEC_FFMPEG_VORBIS = {
-    .codec_id = OM_CODEC_VORBIS,
-    .type = OM_MEDIA_AUDIO,
-    .name = "ffmpeg_vorbis",
-    .long_name = "Vorbis (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_VORBIS); },
-};
-
-const CodecDescriptor CODEC_FFMPEG_FLAC = {
-    .codec_id = OM_CODEC_FLAC,
-    .type = OM_MEDIA_AUDIO,
-    .name = "ffmpeg_flac",
-    .long_name = "FLAC (Free Lossless Audio Codec) (FFmpeg)",
-    .vendor = "FFmpeg",
-    .flags = CodecFlags::NONE,
-    .decoder_factory = [] { return std::make_unique<FFmpegDecoder>(OM_CODEC_FLAC); },
-};
+    // TODO: Encoder factory if we implement FFmpegEncoder
+    
+    registry->registerCodec(desc.get());
+    FFMPEG_DESCRIPTORS.descriptors.push_back(std::move(desc));
+  }
+}
 
 } // namespace openmedia

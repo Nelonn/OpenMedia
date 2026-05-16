@@ -13,6 +13,14 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
+struct AVFrame;
+struct AVCodec;
+struct AVCodecContext;
+struct AVPacket;
+struct AVCodecParserContext;
+struct AVFormatContext;
+struct AVIOContext;
+
 namespace openmedia {
 
 class LibAVUtil {
@@ -39,6 +47,7 @@ public:
   PFN<const char*(AVSampleFormat)> av_get_sample_fmt_name = nullptr;
   PFN<int(AVDictionary**, const char*, const char*, int)> av_dict_set = nullptr;
   PFN<void(AVDictionary**)> av_dict_free = nullptr;
+  PFN<const char*(AVMediaType)> av_get_media_type_string = nullptr;
   PFN<void(void (*)(void*, int, const char*, va_list))> av_log_set_callback = nullptr;
 
 private:
@@ -57,5 +66,20 @@ auto avColorTransferToOmTransfer(AVColorTransferCharacteristic av_trc) -> OMTran
 auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries;
 
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat;
+
+template <typename T>
+struct AVDeleter {
+  void operator()(T* ptr) const;
+};
+
+template <> void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const;
+template <> void AVDeleter<::AVCodecContext>::operator()(::AVCodecContext* ptr) const;
+template <> void AVDeleter<::AVPacket>::operator()(::AVPacket* ptr) const;
+template <> void AVDeleter<::AVCodecParserContext>::operator()(::AVCodecParserContext* ptr) const;
+template <> void AVDeleter<::AVFormatContext>::operator()(::AVFormatContext* ptr) const;
+template <> void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const;
+
+template <typename T>
+using AVPtr = std::unique_ptr<T, AVDeleter<T>>;
 
 } // namespace openmedia

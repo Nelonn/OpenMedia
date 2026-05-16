@@ -47,6 +47,7 @@ auto LibAVUtil::load() -> bool {
   av_get_sample_fmt_name = library_.getProcAddress<decltype(av_get_sample_fmt_name)>("av_get_sample_fmt_name");
   av_dict_set = library_.getProcAddress<PFN<int(AVDictionary**, const char*, const char*, int)>>("av_dict_set");
   av_dict_free = library_.getProcAddress<PFN<void(AVDictionary**)>>("av_dict_free");
+  av_get_media_type_string = library_.getProcAddress<PFN<const char*(AVMediaType)>>("av_get_media_type_string");
   av_log_set_callback = library_.getProcAddress<PFN<void(void (*)(void*, int, const char*, va_list))>>("av_log_set_callback");
 
   if (!av_malloc || !av_free || !av_frame_alloc || !av_frame_free || !av_frame_unref) {
@@ -206,10 +207,10 @@ auto avChromaLocationToOmChroma(AVChromaLocation av_loc) -> OMChromaLocation {
     default: return OM_CHROMA_LOC_UNSPECIFIED;
   }
 }*/
-
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   switch (av_fmt) {
-    case AV_SAMPLE_FMT_U8: return OM_SAMPLE_U8;
+    case AV_SAMPLE_FMT_U8:
+    case AV_SAMPLE_FMT_U8P: return OM_SAMPLE_U8;
     case AV_SAMPLE_FMT_S16:
     case AV_SAMPLE_FMT_S16P: return OM_SAMPLE_S16;
     case AV_SAMPLE_FMT_S32:
@@ -218,8 +219,13 @@ auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
     case AV_SAMPLE_FMT_FLTP: return OM_SAMPLE_F32;
     case AV_SAMPLE_FMT_DBL:
     case AV_SAMPLE_FMT_DBLP: return OM_SAMPLE_F64;
-    default: return OM_SAMPLE_UNKNOWN;
+    default: return OM_SAMPLE_S16;
   }
+}
+
+template <>
+void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const {
+  if (ptr) LibAVUtil::getInstance().av_frame_free(&ptr);
 }
 
 } // namespace openmedia

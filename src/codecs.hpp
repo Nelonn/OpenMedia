@@ -21,13 +21,6 @@ extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_AAC;
 extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_AC3;
 extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3;
 
-// Audio - FFmpeg
-extern const CodecDescriptor CODEC_FFMPEG_AAC;
-extern const CodecDescriptor CODEC_FFMPEG_MP3;
-extern const CodecDescriptor CODEC_FFMPEG_OPUS;
-extern const CodecDescriptor CODEC_FFMPEG_VORBIS;
-extern const CodecDescriptor CODEC_FFMPEG_FLAC;
-
 // Video - Software
 extern const CodecDescriptor CODEC_DAV1D;
 //extern const CodecDescriptor CODEC_OPENH264;
@@ -39,16 +32,6 @@ extern const CodecDescriptor CODEC_XEVE;
 extern const CodecDescriptor CODEC_WMF_VIDEO_H264;
 extern const CodecDescriptor CODEC_WMF_VIDEO_H265;
 extern const CodecDescriptor CODEC_WMF_VIDEO_AV1;
-
-// Video - FFmpeg
-extern const CodecDescriptor CODEC_FFMPEG_H264;
-extern const CodecDescriptor CODEC_FFMPEG_H265;
-extern const CodecDescriptor CODEC_FFMPEG_H266;
-extern const CodecDescriptor CODEC_FFMPEG_EVC;
-extern const CodecDescriptor CODEC_FFMPEG_VP8;
-extern const CodecDescriptor CODEC_FFMPEG_VP9;
-extern const CodecDescriptor CODEC_FFMPEG_AV1;
-extern const CodecDescriptor CODEC_FFMPEG_PRORES;
 
 // Video - VideoToolbox
 extern const CodecDescriptor CODEC_VIDEOTOOLBOX_H263;
@@ -98,5 +81,8 @@ extern const CodecDescriptor CODEC_GIF;
 extern const CodecDescriptor CODEC_TGA;
 extern const CodecDescriptor CODEC_BMP;
 extern const CodecDescriptor CODEC_TIFF;
+
+struct CodecRegistry;
+void registerFFmpegCodecs(CodecRegistry* registry) noexcept;
 
 }
