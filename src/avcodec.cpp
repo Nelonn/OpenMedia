@@ -61,6 +61,10 @@ auto LibAVCodec::load() -> bool {
   av_grow_packet = library_.getProcAddress<PFN<int(AVPacket*, int)>>("av_grow_packet");
   av_shrink_packet = library_.getProcAddress<PFN<void(AVPacket*, int)>>("av_shrink_packet");
 
+  av_parser_init = library_.getProcAddress<PFN<AVCodecParserContext*(int)>>("av_parser_init");
+  av_parser_parse2 = library_.getProcAddress<PFN<int(AVCodecParserContext*, AVCodecContext*, uint8_t**, int*, const uint8_t*, int, int64_t, int64_t, int64_t)>>("av_parser_parse2");
+  av_parser_close = library_.getProcAddress<PFN<void(AVCodecParserContext*)>>("av_parser_close");
+
   if (!avcodec_find_decoder || !avcodec_alloc_context3 || !avcodec_open2 ||
       !avcodec_free_context || !avcodec_send_packet || !avcodec_receive_frame) {
     return false;
