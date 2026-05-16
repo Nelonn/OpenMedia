@@ -47,6 +47,7 @@ auto LibAVUtil::load() -> bool {
   av_get_sample_fmt_name = library_.getProcAddress<decltype(av_get_sample_fmt_name)>("av_get_sample_fmt_name");
   av_dict_set = library_.getProcAddress<PFN<int(AVDictionary**, const char*, const char*, int)>>("av_dict_set");
   av_dict_free = library_.getProcAddress<PFN<void(AVDictionary**)>>("av_dict_free");
+  av_get_media_type_string = library_.getProcAddress<PFN<const char*(AVMediaType)>>("av_get_media_type_string");
   av_log_set_callback = library_.getProcAddress<PFN<void(void (*)(void*, int, const char*, va_list))>>("av_log_set_callback");
 
   if (!av_malloc || !av_free || !av_frame_alloc || !av_frame_free || !av_frame_unref) {
@@ -206,10 +207,10 @@ auto avChromaLocationToOmChroma(AVChromaLocation av_loc) -> OMChromaLocation {
     default: return OM_CHROMA_LOC_UNSPECIFIED;
   }
 }*/
-
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   switch (av_fmt) {
-    case AV_SAMPLE_FMT_U8: return OM_SAMPLE_U8;
+    case AV_SAMPLE_FMT_U8:
+    case AV_SAMPLE_FMT_U8P: return OM_SAMPLE_U8;
     case AV_SAMPLE_FMT_S16:
     case AV_SAMPLE_FMT_S16P: return OM_SAMPLE_S16;
     case AV_SAMPLE_FMT_S32:
@@ -218,8 +219,52 @@ auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
     case AV_SAMPLE_FMT_FLTP: return OM_SAMPLE_F32;
     case AV_SAMPLE_FMT_DBL:
     case AV_SAMPLE_FMT_DBLP: return OM_SAMPLE_F64;
-    default: return OM_SAMPLE_UNKNOWN;
+    default: return OM_SAMPLE_S16;
   }
+}
+
+auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat {
+  switch (om_fmt) {
+    case OM_FORMAT_R8G8B8A8: return AV_PIX_FMT_RGBA;
+    case OM_FORMAT_B8G8R8A8: return AV_PIX_FMT_BGRA;
+    case OM_FORMAT_YUV420P: return AV_PIX_FMT_YUV420P;
+    case OM_FORMAT_YUV422P: return AV_PIX_FMT_YUV422P;
+    case OM_FORMAT_YUV444P: return AV_PIX_FMT_YUV444P;
+    case OM_FORMAT_YUVJ420P: return AV_PIX_FMT_YUVJ420P;
+    case OM_FORMAT_YUVJ422P: return AV_PIX_FMT_YUVJ422P;
+    case OM_FORMAT_YUVJ444P: return AV_PIX_FMT_YUVJ444P;
+    case OM_FORMAT_NV12: return AV_PIX_FMT_NV12;
+    case AV_PIX_FMT_NV21: return AV_PIX_FMT_NV21;
+    case OM_FORMAT_GRAY8: return AV_PIX_FMT_GRAY8;
+    case OM_FORMAT_GRAY16: return AV_PIX_FMT_GRAY16LE;
+    case OM_FORMAT_P010: return AV_PIX_FMT_P010LE;
+    case OM_FORMAT_YUV420P10: return AV_PIX_FMT_YUV420P10LE;
+    case OM_FORMAT_YUV420P12: return AV_PIX_FMT_YUV420P12LE;
+    case OM_FORMAT_YUV420P16: return AV_PIX_FMT_YUV420P16LE;
+    case OM_FORMAT_YUV422P10: return AV_PIX_FMT_YUV422P10LE;
+    case OM_FORMAT_YUV422P12: return AV_PIX_FMT_YUV422P12LE;
+    case OM_FORMAT_YUV422P16: return AV_PIX_FMT_YUV422P16LE;
+    case OM_FORMAT_YUV444P10: return AV_PIX_FMT_YUV444P10LE;
+    case OM_FORMAT_YUV444P12: return AV_PIX_FMT_YUV444P12LE;
+    case OM_FORMAT_YUV444P16: return AV_PIX_FMT_YUV444P16LE;
+    default: return AV_PIX_FMT_NONE;
+  }
+}
+
+auto omSampleFormatToAvSampleFormat(OMSampleFormat om_fmt) -> AVSampleFormat {
+  switch (om_fmt) {
+    case OM_SAMPLE_U8: return AV_SAMPLE_FMT_U8;
+    case OM_SAMPLE_S16: return AV_SAMPLE_FMT_S16;
+    case OM_SAMPLE_S32: return AV_SAMPLE_FMT_S32;
+    case OM_SAMPLE_F32: return AV_SAMPLE_FMT_FLT;
+    case OM_SAMPLE_F64: return AV_SAMPLE_FMT_DBL;
+    default: return AV_SAMPLE_FMT_NONE;
+  }
+}
+
+template <>
+void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const {
+  if (ptr) LibAVUtil::getInstance().av_frame_free(&ptr);
 }
 
 } // namespace openmedia

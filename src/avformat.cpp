@@ -81,6 +81,23 @@ auto LibAVFormat::isLoaded() const -> bool {
   return loaded_;
 }
 
+template <>
+void AVDeleter<::AVFormatContext>::operator()(::AVFormatContext* ptr) const {
+  if (ptr) {
+    auto& loader = LibAVFormat::getInstance();
+    if (ptr->iformat) {
+      loader.avformat_close_input(&ptr);
+    } else {
+      loader.avformat_free_context(ptr);
+    }
+  }
+}
+
+template <>
+void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const {
+  if (ptr) LibAVFormat::getInstance().avio_context_free(&ptr);
+}
+
 static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
   switch (codec_id) {
     // Video codecs
@@ -109,6 +126,16 @@ static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
     case AV_CODEC_ID_PCM_S32LE: return OM_CODEC_PCM_S32LE;
     case AV_CODEC_ID_AC3: return OM_CODEC_AC3;
     case AV_CODEC_ID_EAC3: return OM_CODEC_EAC3;
+
+    // Image codecs
+    case AV_CODEC_ID_MJPEG: return OM_CODEC_JPEG;
+    case AV_CODEC_ID_PNG: return OM_CODEC_PNG;
+    case AV_CODEC_ID_WEBP: return OM_CODEC_WEBP;
+    case AV_CODEC_ID_BMP: return OM_CODEC_BMP;
+    case AV_CODEC_ID_TIFF: return OM_CODEC_TIFF;
+    case AV_CODEC_ID_GIF: return OM_CODEC_GIF;
+    case AV_CODEC_ID_TARGA: return OM_CODEC_TGA;
+
     default: return OM_CODEC_NONE;
   }
 }
@@ -119,6 +146,7 @@ static auto avMediaTypeToOmMediaType(AVMediaType media_type) -> OMMediaType {
     case AVMEDIA_TYPE_AUDIO: return OM_MEDIA_AUDIO;
     case AVMEDIA_TYPE_SUBTITLE: return OM_MEDIA_SUBTITLE;
     case AVMEDIA_TYPE_DATA: return OM_MEDIA_DATA;
+    case AVMEDIA_TYPE_ATTACHMENT: return OM_MEDIA_ATTACHMENT;
     default: return OM_MEDIA_NONE;
   }
 }
@@ -127,11 +155,11 @@ class FFmpegDemuxer final : public BaseDemuxer {
 private:
   static constexpr size_t IO_BUFFER_SIZE = 32768;
 
-  AVFormatContext* fmt_ctx_ = nullptr;
-  AVIOContext* avio_ctx_ = nullptr;
-  uint8_t* io_buf_ = nullptr;
+  AVPtr<AVFormatContext> fmt_ctx_;
+  AVPtr<AVIOContext> avio_ctx_;
+  std::unique_ptr<uint8_t, void(*)(void*)> io_buf_ {nullptr, [](void* p) { if (p) LibAVUtil::getInstance().av_free(p); }};
 
-  AVPacket* packet_ = nullptr;
+  AVPtr<AVPacket> packet_;
 
   std::mutex seek_mutex_;
   std::atomic_bool stop_reading_ {false};
@@ -164,7 +192,7 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    io_buf_ = static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE));
+    io_buf_.reset(static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE)));
     if (!io_buf_) {
       return OM_COMMON_OUT_OF_MEMORY;
     }
@@ -172,46 +200,46 @@ public:
     InputStream* raw_input = input_.get();
     const bool seekable = raw_input->canSeek();
 
-    avio_ctx_ = format_loader.avio_alloc_context(
-        io_buf_,
+    avio_ctx_.reset(format_loader.avio_alloc_context(
+        io_buf_.get(),
         static_cast<int>(IO_BUFFER_SIZE),
         0, // write_flag = 0 (read-only)
         raw_input,
         &ioRead,
         nullptr,
-        seekable ? &ioSeek : nullptr);
+        seekable ? &ioSeek : nullptr));
 
     if (!avio_ctx_) {
-      util_loader.av_free(io_buf_);
-      io_buf_ = nullptr;
+      io_buf_.reset();
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
     avio_ctx_->seekable = seekable ? AVIO_SEEKABLE_NORMAL : 0;
 
-    fmt_ctx_ = format_loader.avformat_alloc_context();
-    if (!fmt_ctx_) {
-      format_loader.avio_context_free(&avio_ctx_);
-      avio_ctx_ = nullptr;
+    AVFormatContext* fmt_ptr = format_loader.avformat_alloc_context();
+    if (!fmt_ptr) {
+      avio_ctx_.reset();
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
-    fmt_ctx_->pb = avio_ctx_;
+    fmt_ptr->pb = avio_ctx_.get();
 
-    int ret = format_loader.avformat_open_input(&fmt_ctx_, nullptr, nullptr, nullptr);
+    int ret = format_loader.avformat_open_input(&fmt_ptr, nullptr, nullptr, nullptr);
     if (ret < 0) {
+      // avformat_open_input frees fmt_ptr on failure if it was non-NULL
       close();
       return avErrorToOmError(ret);
     }
+    fmt_ctx_.reset(fmt_ptr);
 
-    ret = format_loader.avformat_find_stream_info(fmt_ctx_, nullptr);
+    ret = format_loader.avformat_find_stream_info(fmt_ctx_.get(), nullptr);
     if (ret < 0) {
       close();
       return avErrorToOmError(ret);
     }
 
     // Allocate packet for reading (from avcodec/avutil)
-    packet_ = codec_loader.av_packet_alloc();
+    packet_.reset(codec_loader.av_packet_alloc());
     if (!packet_) {
       close();
       return OM_COMMON_OUT_OF_MEMORY;
@@ -229,14 +257,13 @@ public:
     }
 
     auto& format_loader = LibAVFormat::getInstance();
-    auto& util_loader = LibAVUtil::getInstance();
     auto& codec_loader = LibAVCodec::getInstance();
 
     // Unref previous packet
-    codec_loader.av_packet_unref(packet_);
+    codec_loader.av_packet_unref(packet_.get());
 
     // Read next packet
-    int ret = format_loader.av_read_frame(fmt_ctx_, packet_);
+    int ret = format_loader.av_read_frame(fmt_ctx_.get(), packet_.get());
     if (ret < 0) {
       return Err(avErrorToOmError(ret));
     }
@@ -265,7 +292,7 @@ public:
 
     auto& format_loader = LibAVFormat::getInstance();
 
-    int ret = format_loader.av_seek_frame(fmt_ctx_, stream_idx, timestamp, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
+    int ret = format_loader.av_seek_frame(fmt_ctx_.get(), stream_idx, timestamp, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
@@ -284,8 +311,16 @@ private:
       Track track;
       track.index = stream->index;
       track.id = static_cast<int32_t>(stream->id);
-      track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
       track.format.codec_id = avCodecIdToOmCodecId(stream->codecpar->codec_id);
+      track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
+
+      if (track.format.codec_id == OM_CODEC_JPEG || track.format.codec_id == OM_CODEC_PNG ||
+          track.format.codec_id == OM_CODEC_WEBP || track.format.codec_id == OM_CODEC_BMP ||
+          track.format.codec_id == OM_CODEC_TIFF || track.format.codec_id == OM_CODEC_GIF ||
+          track.format.codec_id == OM_CODEC_TGA) {
+        track.format.type = OM_MEDIA_IMAGE;
+      }
+
       if (stream->codecpar->profile >= 0) {
         track.format.profile = static_cast<OMProfile>(stream->codecpar->profile);
         if (track.format.codec_id == OM_CODEC_AAC) {
@@ -299,7 +334,7 @@ private:
       track.duration = stream->duration;
       track.bitrate = static_cast<uint32_t>(stream->codecpar->bit_rate);
 
-      if (track.format.type == OM_MEDIA_VIDEO) {
+      if (track.format.type == OM_MEDIA_VIDEO || track.format.type == OM_MEDIA_IMAGE) {
         track.format.video.width = static_cast<uint32_t>(stream->codecpar->width);
         track.format.video.height = static_cast<uint32_t>(stream->codecpar->height);
         track.format.video.framerate = {stream->avg_frame_rate.num, stream->avg_frame_rate.den};
@@ -322,28 +357,10 @@ private:
     initialized_ = false;
     stop_reading_.store(true);
 
-    auto& format_loader = LibAVFormat::getInstance();
-    auto& util_loader = LibAVUtil::getInstance();
-    auto& codec_loader = LibAVCodec::getInstance();
-
-    if (packet_) {
-      codec_loader.av_packet_free(&packet_);
-    }
-
-    if (fmt_ctx_) {
-      format_loader.avformat_close_input(&fmt_ctx_);
-      fmt_ctx_ = nullptr;
-    }
-
-    if (avio_ctx_) {
-      format_loader.avio_context_free(&avio_ctx_);
-      avio_ctx_ = nullptr;
-    }
-
-    if (io_buf_) {
-      util_loader.av_free(io_buf_);
-      io_buf_ = nullptr;
-    }
+    packet_.reset();
+    fmt_ctx_.reset();
+    avio_ctx_.reset();
+    io_buf_.reset();
 
     BaseDemuxer::close();
   }
@@ -437,11 +454,11 @@ class FFmpegMuxer final : public BaseMuxer {
 private:
   static constexpr size_t IO_BUFFER_SIZE = 65536; // 64 KiB
 
-  AVFormatContext* fmt_ctx_ = nullptr;
-  AVIOContext* avio_ctx_ = nullptr;
-  uint8_t* io_buf_ = nullptr;
+  AVPtr<AVFormatContext> fmt_ctx_;
+  AVPtr<AVIOContext> avio_ctx_;
+  std::unique_ptr<uint8_t, void(*)(void*)> io_buf_ {nullptr, [](void* p) { if (p) LibAVUtil::getInstance().av_free(p); }};
 
-  AVPacket* packet_ = nullptr;
+  AVPtr<AVPacket> packet_;
 
   std::mutex write_mutex_;
 
@@ -474,43 +491,44 @@ public:
     }
 
     // Allocate IO buffer
-    io_buf_ = static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE));
+    io_buf_.reset(static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE)));
     if (!io_buf_) {
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
     // Setup AVIO context for writing
     OutputStream* raw_output = output_.get();
-    avio_ctx_ = format_loader.avio_alloc_context(
-        io_buf_,
+    avio_ctx_.reset(format_loader.avio_alloc_context(
+        io_buf_.get(),
         static_cast<int>(IO_BUFFER_SIZE),
         1, // write_flag = 1
         raw_output,
         nullptr, // no read callback
         &ioWrite,
-        raw_output->canSeek() ? &ioSeek : nullptr);
+        raw_output->canSeek() ? &ioSeek : nullptr));
 
     if (!avio_ctx_) {
-      util_loader.av_free(io_buf_);
-      io_buf_ = nullptr;
+      io_buf_.reset();
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
     avio_ctx_->seekable = raw_output->canSeek() ? AVIO_SEEKABLE_NORMAL : 0;
 
     // Allocate output context
-    int ret = format_loader.avformat_alloc_output_context2(&fmt_ctx_, nullptr, nullptr, nullptr);
-    if (ret < 0 || !fmt_ctx_) {
+    AVFormatContext* fmt_ptr = nullptr;
+    int ret = format_loader.avformat_alloc_output_context2(&fmt_ptr, nullptr, nullptr, nullptr);
+    if (ret < 0 || !fmt_ptr) {
       close();
       return avErrorToOmError(ret);
     }
+    fmt_ctx_.reset(fmt_ptr);
 
-    fmt_ctx_->pb = avio_ctx_;
+    fmt_ctx_->pb = avio_ctx_.get();
     // Don't write header here - wait until all streams are added
     // Headers will be written when finalize() is called or after all tracks are added
 
     // Allocate packet for writing
-    packet_ = codec_loader.av_packet_alloc();
+    packet_.reset(codec_loader.av_packet_alloc());
     if (!packet_) {
       close();
       return OM_COMMON_OUT_OF_MEMORY;
@@ -527,14 +545,13 @@ public:
 
     auto& util_loader = LibAVUtil::getInstance();
     auto& format_loader = LibAVFormat::getInstance();
-    auto& codec_loader = LibAVCodec::getInstance();
 
     AVCodecID codec_id = omCodecIdToAvCodecId(track.format.codec_id);
     if (codec_id == AV_CODEC_ID_NONE) {
       return -1;
     }
 
-    AVStream* stream = format_loader.avformat_new_stream(fmt_ctx_, nullptr);
+    AVStream* stream = format_loader.avformat_new_stream(fmt_ctx_.get(), nullptr);
     if (!stream) {
       return -1;
     }
@@ -582,7 +599,7 @@ public:
     // If this is the first packet, write the header
     if (!finalized_ && !header_written_) {
       auto& format_loader = LibAVFormat::getInstance();
-      int ret = format_loader.avformat_write_header(fmt_ctx_, nullptr);
+      int ret = format_loader.avformat_write_header(fmt_ctx_.get(), nullptr);
       if (ret < 0) {
         return avErrorToOmError(ret);
       }
@@ -595,9 +612,9 @@ public:
     auto& codec_loader = LibAVCodec::getInstance();
 
     // Fill AVPacket from our Packet
-    codec_loader.av_packet_unref(packet_);
+    codec_loader.av_packet_unref(packet_.get());
 
-    int ret = codec_loader.av_new_packet(packet_, static_cast<int>(packet.bytes.size()));
+    int ret = codec_loader.av_new_packet(packet_.get(), static_cast<int>(packet.bytes.size()));
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
@@ -613,7 +630,7 @@ public:
     }
 
     // Write the packet
-    ret = format_loader.av_interleaved_write_frame(fmt_ctx_, packet_);
+    ret = format_loader.av_interleaved_write_frame(fmt_ctx_.get(), packet_.get());
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
@@ -629,7 +646,7 @@ public:
     // Write header if not already done
     if (!header_written_) {
       auto& format_loader = LibAVFormat::getInstance();
-      int ret = format_loader.avformat_write_header(fmt_ctx_, nullptr);
+      int ret = format_loader.avformat_write_header(fmt_ctx_.get(), nullptr);
       if (ret < 0) {
         return avErrorToOmError(ret);
       }
@@ -638,7 +655,7 @@ public:
 
     // Write trailer
     auto& format_loader = LibAVFormat::getInstance();
-    int ret = format_loader.av_write_trailer(fmt_ctx_);
+    int ret = format_loader.av_write_trailer(fmt_ctx_.get());
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
@@ -655,32 +672,10 @@ private:
       finalize();
     }
 
-    auto& format_loader = LibAVFormat::getInstance();
-    auto& util_loader = LibAVUtil::getInstance();
-    auto& codec_loader = LibAVCodec::getInstance();
-
-    if (packet_) {
-      codec_loader.av_packet_free(&packet_);
-      packet_ = nullptr;
-    }
-
-    if (fmt_ctx_) {
-      if (avio_ctx_ && !(fmt_ctx_->oformat->flags & AVFMT_NOFILE)) {
-        avio_context_free_fn(avio_ctx_);
-      }
-      format_loader.avformat_free_context(fmt_ctx_);
-      fmt_ctx_ = nullptr;
-    }
-
-    if (avio_ctx_) {
-      format_loader.avio_context_free(&avio_ctx_);
-      avio_ctx_ = nullptr;
-    }
-
-    if (io_buf_) {
-      util_loader.av_free(io_buf_);
-      io_buf_ = nullptr;
-    }
+    packet_.reset();
+    fmt_ctx_.reset();
+    avio_ctx_.reset();
+    io_buf_.reset();
 
     BaseMuxer::close();
   }
