@@ -1,7 +1,4 @@
 #include <codecs.hpp>
-
-#if defined(__APPLE__)
-
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
@@ -789,7 +786,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H263 = {
     .long_name = "H.263 (VideoToolbox)",
     .vendor = "Apple",
     .flags = HARDWARE,
-    .caps = CodecCaps {.media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}}},
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}}},
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H263); },
 };
 
@@ -806,7 +803,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H264 = {
                      OM_PROFILE_H264_MAIN,
                      OM_PROFILE_H264_EXTENDED,
                      OM_PROFILE_H264_HIGH},
-        .media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H264); },
 };
@@ -823,7 +820,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H265 = {
                      OM_PROFILE_H265_MAIN_10,
                      OM_PROFILE_H265_MAIN_STILL_PICTURE,
                      OM_PROFILE_H265_REXT},
-        .media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H265); },
 };
@@ -835,7 +832,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG2 = {
     .long_name = "MPEG-2 Video (VideoToolbox)",
     .vendor = "Apple",
     .flags = HARDWARE,
-    .caps = CodecCaps {.media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}}},
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}}},
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_MPEG2); },
 };
 
@@ -846,7 +843,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG4 = {
     .long_name = "MPEG-4 Part 2 Video (VideoToolbox)",
     .vendor = "Apple",
     .flags = HARDWARE,
-    .caps = CodecCaps {.media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}}},
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}}},
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_MPEG4); },
 };
 
@@ -859,7 +856,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_AV1 = {
     .flags = HARDWARE,
     .caps = CodecCaps {
         .profiles = {OM_PROFILE_AV1_MAIN, OM_PROFILE_AV1_HIGH, OM_PROFILE_AV1_PROFESSIONAL},
-        .media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_AV1); },
 };
@@ -878,11 +875,9 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_PRORES = {
                      OM_PROFILE_PRORES_HQ,
                      OM_PROFILE_PRORES_4444,
                      OM_PROFILE_PRORES_XQ},
-        .media = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_PRORES); },
 };
 
 } // namespace openmedia
-
-#endif

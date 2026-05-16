@@ -1,29 +1,43 @@
+#include <opus.h>
+#include <opus_multistream.h>
+#include <algorithm>
 #include <codecs.hpp>
+#include <memory>
 #include <openmedia/audio.hpp>
 #include <openmedia/codec_extra.hpp>
-#include <opus.h>
-#include <algorithm>
-#include <cstring>
+#include <util/cpp.hpp>
+#include <variant>
 #include <vector>
 
 namespace openmedia {
 
+struct OpusDecoderDeleter {
+  void operator()(::OpusDecoder* d) const { opus_decoder_destroy(d); }
+};
+
+struct OpusMSDecoderDeleter {
+  void operator()(::OpusMSDecoder* d) const { opus_multistream_decoder_destroy(d); }
+};
+
+using DecoderPtr = std::unique_ptr<::OpusDecoder, OpusDecoderDeleter>;
+using MSDecoderPtr = std::unique_ptr<::OpusMSDecoder, OpusMSDecoderDeleter>;
+
 class OpusDecoder final : public Decoder {
-  ::OpusDecoder* decoder_ = nullptr;
+  std::variant<std::monostate, DecoderPtr, MSDecoderPtr> decoder_;
   int channels_ = 0;
   int sample_rate_ = 0;
   AudioFormat output_format_;
+
+  using DecodeFn = fn_ptr<int(void*, const uint8_t*, opus_int32, float*, int, int)>;
+  using CtlFn = fn_ptr<int(void*, int, ...)>;
+  DecodeFn decode_fn_ = nullptr;
+  CtlFn ctl_fn_ = nullptr;
+  void* raw_ptr_ = nullptr;
 
 public:
   OpusDecoder() {
     output_format_.sample_format = OM_SAMPLE_F32;
     output_format_.bits_per_sample = 32;
-  }
-
-  ~OpusDecoder() override {
-    if (decoder_) {
-      opus_decoder_destroy(decoder_);
-    }
   }
 
   static auto isHeadMagic(std::span<const uint8_t> payload) -> bool {
@@ -35,12 +49,39 @@ public:
     if (payload.size() < 19) return OM_SUCCESS;
     channels_ = payload.data()[9];
     sample_rate_ = 48000;
+    int mapping_family = payload.data()[18];
+
+    decoder_ = std::monostate {};
+    decode_fn_ = nullptr;
+    ctl_fn_ = nullptr;
+    raw_ptr_ = nullptr;
+
     int error = 0;
-    if (decoder_) {
-      opus_decoder_destroy(decoder_);
+    if (mapping_family == 0) {
+      auto ptr = opus_decoder_create(sample_rate_, channels_, &error);
+      if (error == OPUS_OK) {
+        auto& d = decoder_.emplace<DecoderPtr>(ptr);
+        decode_fn_ = reinterpret_cast<DecodeFn>(opus_decode_float);
+        ctl_fn_ = reinterpret_cast<CtlFn>(opus_decoder_ctl);
+        raw_ptr_ = d.get();
+      }
+    } else {
+      if (payload.size() < 21 + channels_) {
+        return OM_CODEC_INVALID_PARAMS;
+      }
+      int streams = payload.data()[19];
+      int coupled_streams = payload.data()[20];
+      const uint8_t* mapping = &payload.data()[21];
+      auto ptr = opus_multistream_decoder_create(sample_rate_, channels_, streams, coupled_streams, mapping, &error);
+      if (error == OPUS_OK) {
+        auto& d = decoder_.emplace<MSDecoderPtr>(ptr);
+        decode_fn_ = reinterpret_cast<DecodeFn>(opus_multistream_decode_float);
+        ctl_fn_ = reinterpret_cast<CtlFn>(opus_multistream_decoder_ctl);
+        raw_ptr_ = d.get();
+      }
     }
-    decoder_ = opus_decoder_create(sample_rate_, channels_, &error);
-    if (error != OPUS_OK) {
+
+    if (error != OPUS_OK || !decode_fn_) {
       return OM_CODEC_OPEN_FAILED;
     }
     return OM_SUCCESS;
@@ -60,12 +101,12 @@ public:
   }
 
   auto getInfo() -> std::optional<DecodingInfo> override {
-    if (!decoder_) return std::nullopt;
+    if (!raw_ptr_) return std::nullopt;
 
     output_format_.sample_rate = static_cast<uint32_t>(sample_rate_);
     output_format_.channels = static_cast<uint32_t>(channels_);
 
-    DecodingInfo info;
+    DecodingInfo info = {};
     info.media_type = OM_MEDIA_AUDIO;
     info.audio_format = output_format_;
     return info;
@@ -77,15 +118,15 @@ public:
       if (err != OM_SUCCESS) {
         return Err(err);
       }
-      return Ok(std::vector<Frame>{});
+      return Ok(std::vector<Frame> {});
     }
 
     if (packet.bytes.size() >= 8 && memcmp(packet.bytes.data(), "OpusTags", 8) == 0) {
-      return Ok(std::vector<Frame>{});
+      return Ok(std::vector<Frame> {});
     }
 
-    if (!decoder_) {
-      return Ok(std::vector<Frame>{});
+    if (!raw_ptr_) {
+      return Ok(std::vector<Frame> {});
     }
 
     constexpr int MAX_SAMPLES = 5760;
@@ -93,10 +134,10 @@ public:
     output_format_.channels = static_cast<uint32_t>(channels_);
 
     AudioSamples samples_fmt(output_format_, MAX_SAMPLES);
-    int samples = opus_decode_float(decoder_, packet.bytes.data(),
-                                    static_cast<opus_int32>(packet.bytes.size()),
-                                    reinterpret_cast<float*>(samples_fmt.planes.data[0]),
-                                    MAX_SAMPLES, 0);
+    int samples = decode_fn_(raw_ptr_, packet.bytes.data(),
+                             static_cast<opus_int32>(packet.bytes.size()),
+                             reinterpret_cast<float*>(samples_fmt.planes.data[0]),
+                             MAX_SAMPLES, 0);
 
     if (samples > 0) {
       samples_fmt.nb_samples = static_cast<uint32_t>(samples);
@@ -111,36 +152,48 @@ public:
       return Ok(std::move(frames));
     }
 
-    return Ok(std::vector<Frame>{});
+    return Ok(std::vector<Frame> {});
   }
 
   void flush() override {
-    if (decoder_) {
-      opus_decoder_ctl(decoder_, OPUS_RESET_STATE);
+    if (ctl_fn_ && raw_ptr_) {
+      ctl_fn_(raw_ptr_, OPUS_RESET_STATE);
     }
   }
 };
 
+struct OpusEncoderDeleter {
+  void operator()(::OpusEncoder* e) const { opus_encoder_destroy(e); }
+};
+
+struct OpusMSEncoderDeleter {
+  void operator()(::OpusMSEncoder* e) const { opus_multistream_encoder_destroy(e); }
+};
+
+using EncoderPtr = std::unique_ptr<::OpusEncoder, OpusEncoderDeleter>;
+using MSEncoderPtr = std::unique_ptr<::OpusMSEncoder, OpusMSEncoderDeleter>;
+
 class OpusEncoder final : public Encoder {
-  ::OpusEncoder* encoder_ = nullptr;
+  std::variant<std::monostate, EncoderPtr, MSEncoderPtr> encoder_;
   int sample_rate_ = 48000;
   int channels_ = 2;
+  int streams_ = 1;
   int frame_size_ = 960; // 20ms @ 48kHz
   int application_ = OPUS_APPLICATION_AUDIO;
   AudioFormat input_format_;
   std::vector<uint8_t> extradata_;
+
+  using EncodeFn = fn_ptr<int(void*, const float*, int, uint8_t*, opus_int32)>;
+  using CtlFn = fn_ptr<int(void*, int, ...)>;
+  EncodeFn encode_fn_ = nullptr;
+  CtlFn ctl_fn_ = nullptr;
+  void* raw_ptr_ = nullptr;
 
 public:
   OpusEncoder() {
     input_format_.sample_format = OM_SAMPLE_F32;
     input_format_.bits_per_sample = 32;
     input_format_.planar = false;
-  }
-
-  ~OpusEncoder() override {
-    if (encoder_) {
-      opus_encoder_destroy(encoder_);
-    }
   }
 
   auto configure(const EncoderOptions& options) -> OMError override {
@@ -163,79 +216,134 @@ public:
 
     frame_size_ = sample_rate_ / 50; // 20ms
 
-    int error = 0;
-    encoder_ = opus_encoder_create(sample_rate_, channels_, application_, &error);
-    if (error != OPUS_OK || !encoder_) {
-      return OM_CODEC_OPEN_FAILED;
-    }
+    encoder_ = std::monostate {};
+    encode_fn_ = nullptr;
+    ctl_fn_ = nullptr;
+    raw_ptr_ = nullptr;
 
     const auto& extra = options.extra;
 
+    int error = 0;
+    int mapping_family = 0;
+    int streams = 1;
+    int coupled_streams = channels_ - 1;
+    uint8_t mapping[255] = {0, 1};
+
+    if (extra.contains(OPUS_ENC_MAPPING_FAMILY)) {
+      mapping_family = extra.getInt32(OPUS_ENC_MAPPING_FAMILY);
+    } else if (channels_ > 2) {
+      mapping_family = 1;
+    }
+
+    if (mapping_family == 1) {
+      if (channels_ <= 8) {
+        static constexpr uint8_t OPUS_MAPPING_FAMILY1[8][3] = {
+            {1, 0, 1},
+            {1, 1, 2},
+            {2, 1, 3},
+            {2, 2, 4},
+            {3, 2, 5},
+            {4, 2, 6},
+            {4, 3, 7},
+            {5, 3, 8},
+        };
+        static constexpr uint8_t OPUS_MAPPINGS[8][8] = {
+            {0},
+            {0, 1},
+            {0, 2, 1},
+            {0, 1, 2, 3},
+            {0, 4, 1, 2, 3},
+            {0, 4, 1, 2, 3, 5},
+            {0, 4, 1, 2, 3, 5, 6},
+            {0, 6, 1, 2, 3, 4, 5, 7},
+        };
+        streams = OPUS_MAPPING_FAMILY1[channels_ - 1][0];
+        coupled_streams = OPUS_MAPPING_FAMILY1[channels_ - 1][1];
+        memcpy(mapping, OPUS_MAPPINGS[channels_ - 1], channels_);
+      } else {
+        mapping_family = 255;
+      }
+    }
+
+    if (mapping_family == 255) {
+      streams = channels_;
+      coupled_streams = 0;
+      for (int i = 0; i < channels_; ++i) {
+        mapping[i] = i;
+      }
+    }
+
+    streams_ = streams;
+
+    if (mapping_family == 0) {
+      auto ptr = opus_encoder_create(sample_rate_, channels_, application_, &error);
+      if (error == OPUS_OK) {
+        auto& e = encoder_.emplace<EncoderPtr>(ptr);
+        encode_fn_ = reinterpret_cast<EncodeFn>(opus_encode_float);
+        ctl_fn_ = reinterpret_cast<CtlFn>(opus_encoder_ctl);
+        raw_ptr_ = e.get();
+      }
+    } else {
+      auto ptr = opus_multistream_encoder_create(sample_rate_, channels_, streams, coupled_streams, mapping, application_, &error);
+      if (error == OPUS_OK) {
+        auto& e = encoder_.emplace<MSEncoderPtr>(ptr);
+        encode_fn_ = reinterpret_cast<EncodeFn>(opus_multistream_encode_float);
+        ctl_fn_ = reinterpret_cast<CtlFn>(opus_multistream_encoder_ctl);
+        raw_ptr_ = e.get();
+      }
+    }
+
+    if (error != OPUS_OK || !encode_fn_) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    auto set_ctl = [&](int op, int32_t val) {
+      ctl_fn_(raw_ptr_, op, val);
+    };
+
     if (extra.contains(OPUS_ENC_APPLICATION)) {
-      int32_t app = extra.getInt32(OPUS_ENC_APPLICATION);
-      opus_encoder_ctl(encoder_, OPUS_SET_APPLICATION(app));
+      set_ctl(OPUS_SET_APPLICATION_REQUEST, extra.getInt32(OPUS_ENC_APPLICATION));
     }
-
     if (extra.contains(OPUS_ENC_BITRATE)) {
-      int32_t bitrate = extra.getInt32(OPUS_ENC_BITRATE);
-      opus_encoder_ctl(encoder_, OPUS_SET_BITRATE(bitrate));
+      set_ctl(OPUS_SET_BITRATE_REQUEST, extra.getInt32(OPUS_ENC_BITRATE));
     }
-
     if (extra.contains(OPUS_ENC_VBR)) {
-      int32_t vbr = extra.getInt32(OPUS_ENC_VBR);
-      opus_encoder_ctl(encoder_, OPUS_SET_VBR(vbr != 0));
+      set_ctl(OPUS_SET_VBR_REQUEST, extra.getInt32(OPUS_ENC_VBR) != 0);
     }
-
     if (extra.contains(OPUS_ENC_COMPLEXITY)) {
-      int32_t complexity = extra.getInt32(OPUS_ENC_COMPLEXITY);
-      opus_encoder_ctl(encoder_, OPUS_SET_COMPLEXITY(complexity));
+      set_ctl(OPUS_SET_COMPLEXITY_REQUEST, extra.getInt32(OPUS_ENC_COMPLEXITY));
     }
-
     if (extra.contains(OPUS_ENC_FRAME_SIZE)) {
-      int32_t frame_size = extra.getInt32(OPUS_ENC_FRAME_SIZE);
-      frame_size_ = frame_size;
+      frame_size_ = extra.getInt32(OPUS_ENC_FRAME_SIZE);
     }
-
     if (extra.contains(OPUS_ENC_FORCE_CHANNELS)) {
-      int32_t force_ch = extra.getInt32(OPUS_ENC_FORCE_CHANNELS);
-      opus_encoder_ctl(encoder_, OPUS_SET_FORCE_CHANNELS(force_ch));
+      set_ctl(OPUS_SET_FORCE_CHANNELS_REQUEST, extra.getInt32(OPUS_ENC_FORCE_CHANNELS));
     }
-
     if (extra.contains(OPUS_ENC_SIGNAL_TYPE)) {
-      int32_t signal = extra.getInt32(OPUS_ENC_SIGNAL_TYPE);
-      opus_encoder_ctl(encoder_, OPUS_SET_SIGNAL(signal));
+      set_ctl(OPUS_SET_SIGNAL_REQUEST, extra.getInt32(OPUS_ENC_SIGNAL_TYPE));
     }
-
     if (extra.contains(OPUS_ENC_BANDWIDTH)) {
-      int32_t bandwidth = extra.getInt32(OPUS_ENC_BANDWIDTH);
-      opus_encoder_ctl(encoder_, OPUS_SET_BANDWIDTH(bandwidth));
+      set_ctl(OPUS_SET_BANDWIDTH_REQUEST, extra.getInt32(OPUS_ENC_BANDWIDTH));
     }
-
     if (extra.contains(OPUS_ENC_PACKET_LOSS_PERC)) {
-      int32_t loss = extra.getInt32(OPUS_ENC_PACKET_LOSS_PERC);
-      opus_encoder_ctl(encoder_, OPUS_SET_PACKET_LOSS_PERC(loss));
+      set_ctl(OPUS_SET_PACKET_LOSS_PERC_REQUEST, extra.getInt32(OPUS_ENC_PACKET_LOSS_PERC));
     }
-
     if (extra.contains(OPUS_ENC_FEC)) {
-      int32_t fec = extra.getInt32(OPUS_ENC_FEC);
-      opus_encoder_ctl(encoder_, OPUS_SET_INBAND_FEC(fec));
+      set_ctl(OPUS_SET_INBAND_FEC_REQUEST, extra.getInt32(OPUS_ENC_FEC));
     }
-
     if (extra.contains(OPUS_ENC_DTX)) {
-      int32_t dtx = extra.getInt32(OPUS_ENC_DTX);
-      opus_encoder_ctl(encoder_, OPUS_SET_DTX(dtx != 0));
+      set_ctl(OPUS_SET_DTX_REQUEST, extra.getInt32(OPUS_ENC_DTX) != 0);
     }
-
     if (extra.contains(OPUS_ENC_LSB_DEPTH)) {
-      int32_t lsb = extra.getInt32(OPUS_ENC_LSB_DEPTH);
-      opus_encoder_ctl(encoder_, OPUS_SET_LSB_DEPTH(lsb));
+      set_ctl(OPUS_SET_LSB_DEPTH_REQUEST, extra.getInt32(OPUS_ENC_LSB_DEPTH));
     }
 
     int lookahead = 0;
-    opus_encoder_ctl(encoder_, OPUS_GET_LOOKAHEAD(&lookahead));
+    ctl_fn_(raw_ptr_, OPUS_GET_LOOKAHEAD(&lookahead));
 
-    extradata_.resize(19);
-    std::memcpy(extradata_.data(), "OpusHead", 8);
+    size_t head_size = 19 + (mapping_family > 0 ? 2 + channels_ : 0);
+    extradata_.resize(head_size);
+    memcpy(extradata_.data(), "OpusHead", 8);
     extradata_[8] = 1;
     extradata_[9] = static_cast<uint8_t>(channels_);
     extradata_[10] = 0;
@@ -246,7 +354,12 @@ public:
     extradata_[15] = (48000 >> 24) & 0xFF;
     extradata_[16] = 0;
     extradata_[17] = 0;
-    extradata_[18] = 0;
+    extradata_[18] = static_cast<uint8_t>(mapping_family);
+    if (mapping_family > 0) {
+      extradata_[19] = static_cast<uint8_t>(streams);
+      extradata_[20] = static_cast<uint8_t>(coupled_streams);
+      memcpy(&extradata_[21], mapping, channels_);
+    }
 
     return OM_SUCCESS;
   }
@@ -258,7 +371,7 @@ public:
   }
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
-    if (!encoder_) {
+    if (!raw_ptr_) {
       return Err(OM_CODEC_ENCODE_FAILED);
     }
 
@@ -272,40 +385,28 @@ public:
     }
 
     std::vector<Packet> packets;
-
     const float* input = reinterpret_cast<const float*>(audio_data->planes.data[0]);
-    int total_samples = static_cast<int>(audio_data->nb_samples);
-    int samples_per_channel = total_samples;
-
-    std::vector<uint8_t> packet_buffer(4000);
+    int samples_per_channel = static_cast<int>(audio_data->nb_samples);
+    std::vector<uint8_t> packet_buffer(4000 * streams_);
 
     int offset = 0;
     while (offset < samples_per_channel) {
       int remaining = samples_per_channel - offset;
       int to_encode = std::min(remaining, frame_size_);
-
-      int encoded_bytes;
-      if (channels_ == 1) {
-        encoded_bytes = opus_encode_float(encoder_, input + offset, to_encode,
-                                          packet_buffer.data(),
-                                          static_cast<opus_int32>(packet_buffer.size()));
-      } else {
-        encoded_bytes = opus_encode_float(encoder_, input + offset * channels_, to_encode,
-                                          packet_buffer.data(),
-                                          static_cast<opus_int32>(packet_buffer.size()));
-      }
+      int encoded_bytes = encode_fn_(raw_ptr_, input + offset * channels_, to_encode,
+                                     packet_buffer.data(),
+                                     static_cast<opus_int32>(packet_buffer.size()));
 
       if (encoded_bytes > 0) {
         Packet packet;
         packet.allocate(static_cast<size_t>(encoded_bytes));
-        std::memcpy(packet.bytes.data(), packet_buffer.data(), static_cast<size_t>(encoded_bytes));
+        memcpy(packet.bytes.data(), packet_buffer.data(), static_cast<size_t>(encoded_bytes));
         packet.pts = frame.pts;
         packet.dts = frame.dts;
         packets.push_back(std::move(packet));
       } else {
         return Err(OM_CODEC_ENCODE_FAILED);
       }
-
       offset += to_encode;
     }
 
@@ -313,16 +414,21 @@ public:
   }
 
   auto updateBitrate(const RateControlParams& rc) -> OMError override {
-    if (!encoder_) {
+    if (!raw_ptr_) {
       return OM_CODEC_INVALID_PARAMS;
     }
 
+    int32_t bitrate = 0;
     if (auto* vbr = std::get_if<VbrParams>(&rc.params)) {
-      opus_encoder_ctl(encoder_, OPUS_SET_BITRATE(static_cast<opus_int32>(vbr->bitrate.target_bitrate)));
+      bitrate = static_cast<opus_int32>(vbr->bitrate.target_bitrate);
     } else if (auto* cbr = std::get_if<CbrParams>(&rc.params)) {
-      opus_encoder_ctl(encoder_, OPUS_SET_BITRATE(static_cast<opus_int32>(cbr->bitrate.target_bitrate)));
+      bitrate = static_cast<opus_int32>(cbr->bitrate.target_bitrate);
     } else if (auto* abr = std::get_if<AbrParams>(&rc.params)) {
-      opus_encoder_ctl(encoder_, OPUS_SET_BITRATE(static_cast<opus_int32>(abr->target_bitrate)));
+      bitrate = static_cast<opus_int32>(abr->target_bitrate);
+    }
+
+    if (bitrate > 0) {
+      ctl_fn_(raw_ptr_, OPUS_SET_BITRATE(bitrate));
     }
 
     return OM_SUCCESS;
@@ -330,14 +436,36 @@ public:
 };
 
 const CodecDescriptor CODEC_OPUS = {
-  .codec_id = OM_CODEC_OPUS,
-  .type = OM_MEDIA_AUDIO,
-  .name = "opus",
-  .long_name = "Opus",
-  .vendor = "Xiph.Org",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<OpusDecoder>(); },
-  .encoder_factory = [] { return std::make_unique<OpusEncoder>(); },
+    .codec_id = OM_CODEC_OPUS,
+    .type = OM_MEDIA_AUDIO,
+    .name = "opus",
+    .long_name = "Opus",
+    .vendor = "Xiph.Org",
+    .flags = NONE,
+    .caps = CodecCaps {
+        .audio = AudioCodecCaps {
+            .fmt_f32 = true,
+            .sample_rates = {8000, 12000, 16000, 24000, 48000},
+        },
+    },
+    .options = {
+        OPUS_ENC_APPLICATION,
+        OPUS_ENC_BITRATE,
+        OPUS_ENC_VBR,
+        OPUS_ENC_COMPLEXITY,
+        OPUS_ENC_FRAME_SIZE,
+        OPUS_ENC_FORCE_CHANNELS,
+        OPUS_ENC_SIGNAL_TYPE,
+        OPUS_ENC_BANDWIDTH,
+        OPUS_ENC_PACKET_LOSS_PERC,
+        OPUS_ENC_FEC,
+        OPUS_ENC_DTX,
+        OPUS_ENC_LSB_DEPTH,
+        OPUS_ENC_LOOKAHEAD,
+        OPUS_ENC_MAPPING_FAMILY,
+    },
+    .decoder_factory = [] { return std::make_unique<OpusDecoder>(); },
+    .encoder_factory = [] { return std::make_unique<OpusEncoder>(); },
 };
 
 } // namespace openmedia

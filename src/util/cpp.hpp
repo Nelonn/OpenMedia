@@ -10,4 +10,7 @@ struct overloads : Ts... {
 template<class... Ts>
 overloads(Ts...) -> overloads<Ts...>;
 
+template<typename T>
+using fn_ptr = T*;
+
 }

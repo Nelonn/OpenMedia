@@ -1,7 +1,4 @@
 #include <codecs.hpp>
-
-#if defined(__APPLE__)
-
 #include <AudioToolbox/AudioToolbox.h>
 #include <algorithm>
 #include <cstring>
@@ -419,5 +416,3 @@ const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3 = {
 };
 
 } // namespace openmedia
-
-#endif
