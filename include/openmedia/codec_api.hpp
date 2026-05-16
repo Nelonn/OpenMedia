@@ -157,6 +157,11 @@ struct OPENMEDIA_ABI RateControlParams {
 
 struct OPENMEDIA_ABI EncoderOptions {
   MediaFormat format;
+  union {
+    char dummy = 0;
+    AudioFormat audio_format;
+    VideoFormat video_format;
+  };
   std::optional<HWDevice> hw_device;
   Dictionary extra;
   RateControlParams rate_control;

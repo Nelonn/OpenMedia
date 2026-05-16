@@ -383,6 +383,229 @@ private:
   bool initialized_ = false;
 };
 
+class FFmpegEncoder final : public Encoder {
+public:
+  explicit FFmpegEncoder(AVCodecID codec_id)
+      : av_codec_id_(codec_id) {}
+
+  ~FFmpegEncoder() override {
+    release();
+  }
+
+  auto configure(const EncoderOptions& options) -> OMError override {
+    auto& codec_loader = LibAVCodec::getInstance();
+    auto& util_loader = LibAVUtil::getInstance();
+
+    if (!util_loader.isLoaded()) {
+      if (!util_loader.load()) {
+        return OM_CODEC_NOT_SUPPORTED;
+      }
+    }
+    if (!codec_loader.isLoaded()) {
+      if (!codec_loader.load()) {
+        return OM_CODEC_NOT_SUPPORTED;
+      }
+    }
+
+    const AVCodec* codec = codec_loader.avcodec_find_encoder(av_codec_id_);
+    if (!codec) {
+      return OM_CODEC_NOT_SUPPORTED;
+    }
+
+    codec_ctx_.reset(codec_loader.avcodec_alloc_context3(codec));
+    if (!codec_ctx_) {
+      return OM_COMMON_OUT_OF_MEMORY;
+    }
+
+    if (options.format.type == OM_MEDIA_VIDEO) {
+      codec_ctx_->width = static_cast<int>(options.video_format.width);
+      codec_ctx_->height = static_cast<int>(options.video_format.height);
+      codec_ctx_->time_base.num = 1;
+      codec_ctx_->time_base.den = 1000;
+      if (options.format.video.framerate.den > 0) {
+        codec_ctx_->framerate.num = options.format.video.framerate.num;
+        codec_ctx_->framerate.den = options.format.video.framerate.den;
+      }
+      codec_ctx_->pix_fmt = omPixelFormatToAvPixelFormat(options.video_format.format);
+    } else if (options.format.type == OM_MEDIA_AUDIO) {
+      codec_ctx_->sample_rate = static_cast<int>(options.audio_format.sample_rate);
+      codec_ctx_->sample_fmt = omSampleFormatToAvSampleFormat(options.audio_format.sample_format);
+      codec_ctx_->ch_layout.nb_channels = static_cast<int>(options.audio_format.channels);
+      codec_ctx_->time_base.num = 1;
+      codec_ctx_->time_base.den = codec_ctx_->sample_rate;
+    }
+
+    auto apply_rc = [&](const RateControlParams& rc) {
+      std::visit([&]<typename T0>(T0&& p) {
+        using T = std::decay_t<T0>;
+        if constexpr (std::is_same_v<T, CbrParams>) {
+          codec_ctx_->bit_rate = p.bitrate.target_bitrate;
+          codec_ctx_->rc_min_rate = p.bitrate.target_bitrate;
+          codec_ctx_->rc_max_rate = p.bitrate.target_bitrate;
+          if (p.bitrate.vbv) {
+            codec_ctx_->rc_buffer_size = static_cast<int>(p.bitrate.vbv->buffer_size);
+          }
+        } else if constexpr (std::is_same_v<T, VbrParams>) {
+          codec_ctx_->bit_rate = p.bitrate.target_bitrate;
+          if (p.bitrate.max_bitrate) {
+            codec_ctx_->rc_max_rate = *p.bitrate.max_bitrate;
+          }
+          if (p.bitrate.vbv) {
+            codec_ctx_->rc_buffer_size = static_cast<int>(p.bitrate.vbv->buffer_size);
+          }
+        } else if constexpr (std::is_same_v<T, CrfParams>) {
+          util_loader.av_dict_set(&options_dict_, "crf", std::to_string(p.quality).c_str(), 0);
+        } else if constexpr (std::is_same_v<T, CqpParams>) {
+          codec_ctx_->global_quality = p.qp_i;
+        } else if constexpr (std::is_same_v<T, AbrParams>) {
+          codec_ctx_->bit_rate = p.target_bitrate;
+        }
+      }, rc.params);
+    };
+
+    apply_rc(options.rate_control);
+
+    int ret = codec_loader.avcodec_open2(codec_ctx_.get(), codec, &options_dict_);
+    if (ret < 0) {
+      codec_ctx_.reset();
+      return avErrorToOmError(ret);
+    }
+
+    packet_.reset(codec_loader.av_packet_alloc());
+    if (!packet_) {
+      return OM_COMMON_OUT_OF_MEMORY;
+    }
+
+    initialized_ = true;
+    return OM_SUCCESS;
+  }
+
+  auto getInfo() -> EncodingInfo override {
+    EncodingInfo info;
+    if (initialized_ && codec_ctx_ && codec_ctx_->extradata_size > 0) {
+      info.extradata.assign(codec_ctx_->extradata, codec_ctx_->extradata + codec_ctx_->extradata_size);
+    }
+    return info;
+  }
+
+  auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
+    if (!initialized_ || !codec_ctx_ || !packet_) {
+      return Err(OM_COMMON_NOT_INITIALIZED);
+    }
+
+    auto& codec_loader = LibAVCodec::getInstance();
+    auto& util_loader = LibAVUtil::getInstance();
+
+    std::vector<Packet> packets;
+
+    AVFrame* av_frame = nullptr;
+    AVPtr<AVFrame> raii_frame;
+
+    if (!frame.data.valueless_by_exception()) {
+      raii_frame.reset(util_loader.av_frame_alloc());
+      av_frame = raii_frame.get();
+
+      if (std::holds_alternative<Picture>(frame.data)) {
+        const auto& pic = std::get<Picture>(frame.data);
+        av_frame->format = omPixelFormatToAvPixelFormat(pic.format);
+        av_frame->width = static_cast<int>(pic.width);
+        av_frame->height = static_cast<int>(pic.height);
+        av_frame->pts = static_cast<int64_t>(frame.pts);
+
+        int num_planes = getNumPlanes(pic.format);
+        for (int i = 0; i < num_planes && i < 4; ++i) {
+          av_frame->data[i] = pic.planes.data[i];
+          av_frame->linesize[i] = static_cast<int>(pic.planes.linesize[i]);
+        }
+      } else if (std::holds_alternative<AudioSamples>(frame.data)) {
+        const auto& samples = std::get<AudioSamples>(frame.data);
+        av_frame->format = omSampleFormatToAvSampleFormat(samples.format.sample_format);
+        av_frame->nb_samples = static_cast<int>(samples.nb_samples);
+        av_frame->ch_layout.nb_channels = static_cast<int>(samples.format.channels);
+        av_frame->sample_rate = static_cast<int>(samples.format.sample_rate);
+        av_frame->pts = static_cast<int64_t>(frame.pts);
+
+        if (samples.format.planar) {
+          for (int i = 0; i < samples.format.channels && i < 8; ++i) {
+            av_frame->data[i] = samples.planes.data[i];
+          }
+        } else {
+          av_frame->data[0] = samples.planes.data[0];
+        }
+      }
+    }
+
+    int ret = codec_loader.avcodec_send_frame(codec_ctx_.get(), av_frame);
+    if (ret < 0) {
+      return Err(avErrorToOmError(ret));
+    }
+
+    while (true) {
+      ret = codec_loader.avcodec_receive_packet(codec_ctx_.get(), packet_.get());
+      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        break;
+      }
+      if (ret < 0) {
+        return Err(avErrorToOmError(ret));
+      }
+
+      Packet pkt;
+      pkt.allocate(static_cast<size_t>(packet_->size));
+      std::memcpy(pkt.bytes.data(), packet_->data, packet_->size);
+      pkt.pts = packet_->pts;
+      pkt.dts = packet_->dts;
+      pkt.duration = packet_->duration;
+      pkt.is_keyframe = (packet_->flags & AV_PKT_FLAG_KEY) != 0;
+      packets.push_back(std::move(pkt));
+
+      codec_loader.av_packet_unref(packet_.get());
+    }
+
+    return Ok(std::move(packets));
+  }
+
+  auto updateBitrate(const RateControlParams& rc) -> OMError override {
+    if (!initialized_ || !codec_ctx_) {
+      return OM_COMMON_NOT_INITIALIZED;
+    }
+
+    std::visit([&](auto&& p) {
+      using T = std::decay_t<decltype(p)>;
+      if constexpr (std::is_same_v<T, CbrParams>) {
+        codec_ctx_->bit_rate = p.bitrate.target_bitrate;
+        codec_ctx_->rc_min_rate = p.bitrate.target_bitrate;
+        codec_ctx_->rc_max_rate = p.bitrate.target_bitrate;
+      } else if constexpr (std::is_same_v<T, VbrParams>) {
+        codec_ctx_->bit_rate = p.bitrate.target_bitrate;
+        if (p.bitrate.max_bitrate) {
+          codec_ctx_->rc_max_rate = *p.bitrate.max_bitrate;
+        }
+      } else if constexpr (std::is_same_v<T, AbrParams>) {
+        codec_ctx_->bit_rate = p.target_bitrate;
+      }
+    }, rc.params);
+
+    return OM_SUCCESS;
+  }
+
+private:
+  void release() {
+    auto& util_loader = LibAVUtil::getInstance();
+    codec_ctx_.reset();
+    packet_.reset();
+    if (options_dict_) {
+      util_loader.av_dict_free(&options_dict_);
+    }
+    initialized_ = false;
+  }
+
+  AVCodecID av_codec_id_;
+  AVPtr<AVCodecContext> codec_ctx_;
+  AVPtr<AVPacket> packet_;
+  AVDictionary* options_dict_ = nullptr;
+  bool initialized_ = false;
+};
+
 static auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {
   switch (id) {
     case AV_CODEC_ID_H264: return OM_CODEC_H264;
@@ -468,7 +691,12 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
       };
     }
 
-    // TODO: Encoder factory if we implement FFmpegEncoder
+    if (loader.avcodec_find_encoder(codec->id)) {
+      AVCodecID av_id = codec->id;
+      desc->encoder_factory = [av_id] {
+        return std::make_unique<FFmpegEncoder>(av_id);
+      };
+    }
     
     registry->registerCodec(desc.get());
     FFMPEG_DESCRIPTORS.descriptors.push_back(std::move(desc));

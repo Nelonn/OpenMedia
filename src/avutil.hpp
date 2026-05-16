@@ -67,6 +67,9 @@ auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries;
 
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat;
 
+auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat;
+auto omSampleFormatToAvSampleFormat(OMSampleFormat om_fmt) -> AVSampleFormat;
+
 template <typename T>
 struct AVDeleter {
   void operator()(T* ptr) const;

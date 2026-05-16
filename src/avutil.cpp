@@ -223,6 +223,45 @@ auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   }
 }
 
+auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat {
+  switch (om_fmt) {
+    case OM_FORMAT_R8G8B8A8: return AV_PIX_FMT_RGBA;
+    case OM_FORMAT_B8G8R8A8: return AV_PIX_FMT_BGRA;
+    case OM_FORMAT_YUV420P: return AV_PIX_FMT_YUV420P;
+    case OM_FORMAT_YUV422P: return AV_PIX_FMT_YUV422P;
+    case OM_FORMAT_YUV444P: return AV_PIX_FMT_YUV444P;
+    case OM_FORMAT_YUVJ420P: return AV_PIX_FMT_YUVJ420P;
+    case OM_FORMAT_YUVJ422P: return AV_PIX_FMT_YUVJ422P;
+    case OM_FORMAT_YUVJ444P: return AV_PIX_FMT_YUVJ444P;
+    case OM_FORMAT_NV12: return AV_PIX_FMT_NV12;
+    case AV_PIX_FMT_NV21: return AV_PIX_FMT_NV21;
+    case OM_FORMAT_GRAY8: return AV_PIX_FMT_GRAY8;
+    case OM_FORMAT_GRAY16: return AV_PIX_FMT_GRAY16LE;
+    case OM_FORMAT_P010: return AV_PIX_FMT_P010LE;
+    case OM_FORMAT_YUV420P10: return AV_PIX_FMT_YUV420P10LE;
+    case OM_FORMAT_YUV420P12: return AV_PIX_FMT_YUV420P12LE;
+    case OM_FORMAT_YUV420P16: return AV_PIX_FMT_YUV420P16LE;
+    case OM_FORMAT_YUV422P10: return AV_PIX_FMT_YUV422P10LE;
+    case OM_FORMAT_YUV422P12: return AV_PIX_FMT_YUV422P12LE;
+    case OM_FORMAT_YUV422P16: return AV_PIX_FMT_YUV422P16LE;
+    case OM_FORMAT_YUV444P10: return AV_PIX_FMT_YUV444P10LE;
+    case OM_FORMAT_YUV444P12: return AV_PIX_FMT_YUV444P12LE;
+    case OM_FORMAT_YUV444P16: return AV_PIX_FMT_YUV444P16LE;
+    default: return AV_PIX_FMT_NONE;
+  }
+}
+
+auto omSampleFormatToAvSampleFormat(OMSampleFormat om_fmt) -> AVSampleFormat {
+  switch (om_fmt) {
+    case OM_SAMPLE_U8: return AV_SAMPLE_FMT_U8;
+    case OM_SAMPLE_S16: return AV_SAMPLE_FMT_S16;
+    case OM_SAMPLE_S32: return AV_SAMPLE_FMT_S32;
+    case OM_SAMPLE_F32: return AV_SAMPLE_FMT_FLT;
+    case OM_SAMPLE_F64: return AV_SAMPLE_FMT_DBL;
+    default: return AV_SAMPLE_FMT_NONE;
+  }
+}
+
 template <>
 void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const {
   if (ptr) LibAVUtil::getInstance().av_frame_free(&ptr);
