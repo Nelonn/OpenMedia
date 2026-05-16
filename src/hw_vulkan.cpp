@@ -18,6 +18,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
 
   GET_INST_FN(vkGetDeviceProcAddr);
   GET_INST_FN(vkGetPhysicalDeviceMemoryProperties);
+  GET_INST_FN(vkGetPhysicalDeviceVideoCapabilitiesKHR);
 
   GET_DEV_FN(vkGetDeviceQueue);
   GET_DEV_FN(vkCreateCommandPool);
@@ -31,10 +32,16 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
 
   GET_DEV_FN(vkCreateBuffer);
   GET_DEV_FN(vkDestroyBuffer);
+  GET_DEV_FN(vkCreateImage);
+  GET_DEV_FN(vkDestroyImage);
+  GET_DEV_FN(vkCreateImageView);
+  GET_DEV_FN(vkDestroyImageView);
   GET_DEV_FN(vkGetBufferMemoryRequirements);
+  GET_DEV_FN(vkGetImageMemoryRequirements);
   GET_DEV_FN(vkAllocateMemory);
   GET_DEV_FN(vkFreeMemory);
   GET_DEV_FN(vkBindBufferMemory);
+  GET_DEV_FN(vkBindImageMemory);
   GET_DEV_FN(vkMapMemory);
   GET_DEV_FN(vkUnmapMemory);
 
@@ -48,8 +55,10 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   GET_DEV_FN(vkGetVideoSessionMemoryRequirementsKHR);
   GET_DEV_FN(vkBindVideoSessionMemoryKHR);
   GET_DEV_FN(vkCreateVideoSessionParametersKHR);
+  GET_DEV_FN(vkUpdateVideoSessionParametersKHR);
   GET_DEV_FN(vkDestroyVideoSessionParametersKHR);
   GET_DEV_FN(vkCmdBeginVideoCodingKHR);
+  GET_DEV_FN(vkCmdControlVideoCodingKHR);
   GET_DEV_FN(vkCmdEndVideoCodingKHR);
   GET_DEV_FN(vkCmdDecodeVideoKHR);
   GET_DEV_FN(vkCmdEncodeVideoKHR);
