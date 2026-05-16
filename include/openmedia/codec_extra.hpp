@@ -31,5 +31,7 @@ constexpr Key OPUS_ENC_DTX = "opus.dtx";
 constexpr Key OPUS_ENC_LSB_DEPTH = "opus.lsb_depth";
 // int32 - Encoder lookahead delay in samples
 constexpr Key OPUS_ENC_LOOKAHEAD = "opus.lookahead";
+// int32 - Mapping family (0, 1, or 255)
+constexpr Key OPUS_ENC_MAPPING_FAMILY = "opus.mapping_family";
 
 } // namespace openmedia

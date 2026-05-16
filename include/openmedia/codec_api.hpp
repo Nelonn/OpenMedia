@@ -202,7 +202,8 @@ struct OPENMEDIA_ABI CodecCaps {
   std::vector<OMProfile> profiles = {};
   std::vector<int32_t> levels = {};
   bool threading = false;
-  std::variant<AudioCodecCaps, VideoCodecCaps> media = {};
+  std::optional<AudioCodecCaps> audio = {};
+  std::optional<VideoCodecCaps> video = {};
 };
 
 struct OPENMEDIA_ABI CodecDescriptor {
