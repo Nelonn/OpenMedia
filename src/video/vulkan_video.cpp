@@ -346,8 +346,13 @@ private:
     h264_add_info.stdPPSCount = 1;
     h264_add_info.pStdPPSs = &pps;
 
+    VkVideoDecodeH264SessionParametersCreateInfoKHR h264_params_info = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_SESSION_PARAMETERS_CREATE_INFO_KHR};
+    h264_params_info.maxStdSPSCount = 1;
+    h264_params_info.maxStdPPSCount = 1;
+    h264_params_info.pParametersAddInfo = &h264_add_info;
+
     VkVideoSessionParametersCreateInfoKHR params_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
-    params_info.pNext = &h264_add_info;
+    params_info.pNext = &h264_params_info;
     params_info.videoSession = video_session_;
     VK(vkCreateVideoSessionParametersKHR)(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
   }
@@ -378,8 +383,14 @@ private:
     h265_add_info.stdPPSCount = 1;
     h265_add_info.pStdPPSs = &pps;
 
+    VkVideoDecodeH265SessionParametersCreateInfoKHR h265_params_info = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR};
+    h265_params_info.maxStdVPSCount = 0;
+    h265_params_info.maxStdSPSCount = 1;
+    h265_params_info.maxStdPPSCount = 1;
+    h265_params_info.pParametersAddInfo = &h265_add_info;
+
     VkVideoSessionParametersCreateInfoKHR params_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
-    params_info.pNext = &h265_add_info;
+    params_info.pNext = &h265_params_info;
     params_info.videoSession = video_session_;
     VK(vkCreateVideoSessionParametersKHR)(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
   }
