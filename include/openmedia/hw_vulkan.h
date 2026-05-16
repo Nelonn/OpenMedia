@@ -46,10 +46,15 @@ OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context);
 OPENMEDIA_ABI
 void HWVulkanPicture_delete(OMVulkanPicture* picture);
 
+OPENMEDIA_ABI
+void HWVulkanContext_resolvePicture(OMVulkanContext* context, OMVulkanPicture* src, void* dst_y, uint32_t stride_y, void* dst_uv, uint32_t stride_uv, uint32_t width, uint32_t height);
+
 struct OMVulkanPicture {
   VkImage image;
   VkImageView view;
   VkDeviceMemory memory;
+  uint32_t layer;
+  VkImageLayout layout;
 };
 
 #if defined(__cplusplus)

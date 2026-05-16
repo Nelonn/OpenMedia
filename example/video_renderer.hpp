@@ -16,15 +16,18 @@ static inline auto isHighBitDepth(uint8_t bits) -> bool {
 // Helper: determine SDL pixel format based on bit depth
 // SDL3 doesn't have native 10/12/16-bit YUV formats, so we use IYUV for 8-bit
 // and fall back to RGBA8888 for higher bit depths with manual conversion
-static inline auto getSdlPixelFormat(uint8_t bits) -> SDL_PixelFormat {
-    if (bits <= 8) return SDL_PIXELFORMAT_IYUV;
-    return SDL_PIXELFORMAT_RGBA8888; // We'll convert to RGBA manually
+static inline auto getSdlPixelFormat(uint32_t fmt, uint8_t bits) -> SDL_PixelFormat {
+    if (bits > 8) return SDL_PIXELFORMAT_RGBA8888;
+    const auto format = static_cast<OMPixelFormat>(fmt);
+    if (format == OM_FORMAT_NV12) return SDL_PIXELFORMAT_NV12;
+    return SDL_PIXELFORMAT_IYUV;
 }
 
-static inline auto isNativeSdlYuv420(uint32_t fmt) -> bool {
+static inline auto isNativeSdlYuv(uint32_t fmt) -> bool {
     const auto format = static_cast<OMPixelFormat>(fmt);
     return format == OM_FORMAT_YUV420P ||
-           format == OM_FORMAT_YUVJ420P;
+           format == OM_FORMAT_YUVJ420P ||
+           format == OM_FORMAT_NV12;
 }
 
 // VideoRenderer
@@ -102,7 +105,7 @@ private:
       if (vf.y_plane.empty()) return; 
     }
 
-    const SDL_PixelFormat sdl_fmt = getSdlPixelFormat(vf.bits_per_component);
+    const SDL_PixelFormat sdl_fmt = getSdlPixelFormat(vf.pixel_format, vf.bits_per_component);
     const bool need_recreate = !texture_ || tex_w_ != vf.width || 
                                tex_h_ != vf.height || tex_fmt_ != sdl_fmt;
 
@@ -121,12 +124,19 @@ private:
 
     if (!texture_) return;
 
-    if (vf.bits_per_component <= 8 && isNativeSdlYuv420(vf.pixel_format)) {
-      SDL_UpdateYUVTexture(
-          texture_, nullptr,
-          vf.y_plane.data(), vf.y_stride,
-          vf.u_plane.data(), vf.u_stride,
-          vf.v_plane.data(), vf.v_stride);
+    if (vf.bits_per_component <= 8 && isNativeSdlYuv(vf.pixel_format)) {
+      if (static_cast<OMPixelFormat>(vf.pixel_format) == OM_FORMAT_NV12) {
+        SDL_UpdateNVTexture(
+            texture_, nullptr,
+            vf.y_plane.data(), vf.y_stride,
+            vf.u_plane.data(), vf.u_stride);
+      } else {
+        SDL_UpdateYUVTexture(
+            texture_, nullptr,
+            vf.y_plane.data(), vf.y_stride,
+            vf.u_plane.data(), vf.u_stride,
+            vf.v_plane.data(), vf.v_stride);
+      }
     } else {
       uploadHighBitDepthFrame(vf);
     }

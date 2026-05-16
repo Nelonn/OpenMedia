@@ -319,6 +319,7 @@ public:
         }
 
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+        uint32_t graphics_queue_family = 0xFFFFFFFF;
         uint32_t decode_queue_family = 0xFFFFFFFF;
         
         for (uint32_t d_idx = 0; d_idx < devices.size(); ++d_idx) {
@@ -334,36 +335,57 @@ public:
             vkGetPhysicalDeviceQueueFamilyProperties2(devices[d_idx], &qf_count, qf_props.data());
 
             for (uint32_t i = 0; i < qf_count; i++) {
-                if (video_props[i].videoCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) {
-                    SDL_Log("[Vulkan]   Found H264 Decode support in queue family %u", i);
+                if ((qf_props[i].queueFamilyProperties.queueFlags & VK_QUEUE_GRAPHICS_BIT) && graphics_queue_family == 0xFFFFFFFF) {
+                    graphics_queue_family = i;
+                }
+                if ((video_props[i].videoCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) && decode_queue_family == 0xFFFFFFFF) {
                     decode_queue_family = i;
-                    physical_device = devices[d_idx];
-                    break;
                 }
             }
-            if (physical_device != VK_NULL_HANDLE) break;
+            if (graphics_queue_family != 0xFFFFFFFF && decode_queue_family != 0xFFFFFFFF) {
+                physical_device = devices[d_idx];
+                break;
+            }
+            graphics_queue_family = 0xFFFFFFFF;
+            decode_queue_family = 0xFFFFFFFF;
         }
 
         if (physical_device == VK_NULL_HANDLE) {
-            SDL_Log("[Vulkan] No device with H264 Decode support found");
+            SDL_Log("[Vulkan] No device with Graphics and H264 Decode support found");
             return false;
         }
         
         float priority = 1.0f;
-        VkDeviceQueueCreateInfo queue_info = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-        queue_info.queueFamilyIndex = decode_queue_family;
-        queue_info.queueCount = 1;
-        queue_info.pQueuePriorities = &priority;
+        std::vector<VkDeviceQueueCreateInfo> queue_infos;
+        
+        VkDeviceQueueCreateInfo graphics_q_info = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        graphics_q_info.queueFamilyIndex = graphics_queue_family;
+        graphics_q_info.queueCount = 1;
+        graphics_q_info.pQueuePriorities = &priority;
+        queue_infos.push_back(graphics_q_info);
+
+        if (decode_queue_family != graphics_queue_family) {
+            VkDeviceQueueCreateInfo decode_q_info = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            decode_q_info.queueFamilyIndex = decode_queue_family;
+            decode_q_info.queueCount = 1;
+            decode_q_info.pQueuePriorities = &priority;
+            queue_infos.push_back(decode_q_info);
+        }
         
         std::vector<const char*> extensions = {
             VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
-            VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME
+            VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
+            VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
         };
         
+        VkPhysicalDeviceSynchronization2Features sync2_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+        sync2_features.synchronization2 = VK_TRUE;
+
         VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        device_info.queueCreateInfoCount = 1;
-        device_info.pQueueCreateInfos = &queue_info;
+        device_info.pNext = &sync2_features;
+        device_info.queueCreateInfoCount = (uint32_t)queue_infos.size();
+        device_info.pQueueCreateInfos = queue_infos.data();
         device_info.enabledExtensionCount = (uint32_t)extensions.size();
         device_info.ppEnabledExtensionNames = extensions.data();
         
@@ -377,7 +399,9 @@ public:
         om_init.instance = instance;
         om_init.physical_device = physical_device;
         om_init.device = device;
+        om_init.queue_family_index = graphics_queue_family;
         om_init.video_decode_queue_family_index = decode_queue_family;
+        om_init.video_encode_queue_family_index = 0xFFFFFFFF; // Not used for now
         om_init.proc = vkGetInstanceProcAddr;
         
         OMVulkanContext* ctx = HWVulkanContext_create(om_init);
@@ -912,14 +936,27 @@ private:
                              video_time_base_.num / video_time_base_.den;
                 vf.bits_per_component = detail::getBitsPerComponent(pic.format);
 
-                if (std::holds_alternative<HardwarePicture>(pic.buffer)) {
-                  const auto& hw = std::get<HardwarePicture>(pic.buffer);
-                  if (hw.getType() == HWDeviceType::VULKAN) {
-                    const auto& vhw = static_cast<const VulkanHardwarePicture&>(hw);
-                    vf.hw_picture = std::make_shared<VulkanHardwarePicture>(vhw.picture);
+                if (std::holds_alternative<std::shared_ptr<HardwarePicture>>(pic.buffer)) {
+                  const auto& hw = std::get<std::shared_ptr<HardwarePicture>>(pic.buffer);
+                  if (hw && hw->getType() == HWDeviceType::VULKAN) {
+                    const auto& vhw = static_cast<const VulkanHardwarePicture&>(*hw);
+
+                    // For this example's software renderer, we MUST resolve/download to host memory.
+                    // In a real player, we'd keep it on GPU and use a Vulkan renderer.
+                    vf.y_stride = (pic.width + 15) & ~15;
+                    vf.u_stride = (pic.width + 15) & ~15;
+                    vf.v_stride = 0; // Not used for NV12
+
+                    vf.y_plane.resize(vf.y_stride * pic.height);
+                    vf.u_plane.resize(vf.u_stride * (pic.height / 2));
+
+                    HWVulkanContext_resolvePicture(static_cast<OMVulkanContext*>(vulkan_device_->context),
+                                                  vhw.picture,
+                                                  vf.y_plane.data(), vf.y_stride,
+                                                  vf.u_plane.data(), vf.u_stride,
+                                                  pic.width, pic.height);
                   }
-                } else {
-                  vf.y_stride = pic.planes.getLinesize(0);
+                } else {                  vf.y_stride = pic.planes.getLinesize(0);
                   vf.u_stride = pic.planes.getLinesize(1);
                   vf.v_stride = pic.planes.getLinesize(2);
 

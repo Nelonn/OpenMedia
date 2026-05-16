@@ -64,7 +64,9 @@ struct OMVulkanContext {
   PFN_vkCmdBeginVideoCodingKHR vkCmdBeginVideoCodingKHR = nullptr;
   PFN_vkCmdControlVideoCodingKHR vkCmdControlVideoCodingKHR = nullptr;
   PFN_vkCmdEndVideoCodingKHR vkCmdEndVideoCodingKHR = nullptr;
+  PFN_vkCmdPipelineBarrier2KHR vkCmdPipelineBarrier2KHR = nullptr;
   PFN_vkCmdDecodeVideoKHR vkCmdDecodeVideoKHR = nullptr;
+  PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer = nullptr;
   PFN_vkCmdEncodeVideoKHR vkCmdEncodeVideoKHR = nullptr;
 
   explicit OMVulkanContext(OMVulkanInit init);

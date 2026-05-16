@@ -348,7 +348,7 @@ public:
           pic.format = output_format_.format;
           pic.width = output_format_.width;
           pic.height = output_format_.height;
-          pic.buffer = VAAPIHardwarePicture(display_, surface);
+          pic.buffer = std::make_shared<VAAPIHardwarePicture>(display_, surface);
           frame.data = std::move(pic);
           return Ok(std::vector<Frame> {std::move(frame)});
         }
@@ -401,7 +401,7 @@ public:
           pic.format = output_format_.format;
           pic.width = output_format_.width;
           pic.height = output_format_.height;
-          pic.buffer = VAAPIHardwarePicture(display_, surface);
+          pic.buffer = std::make_shared<VAAPIHardwarePicture>(display_, surface);
           frame.data = std::move(pic);
           return Ok(std::vector<Frame> {std::move(frame)});
         }
@@ -446,7 +446,7 @@ public:
           pic.format = output_format_.format;
           pic.width = output_format_.width;
           pic.height = output_format_.height;
-          pic.buffer = VAAPIHardwarePicture(display_, surface);
+          pic.buffer = std::make_shared<VAAPIHardwarePicture>(display_, surface);
           frame.data = std::move(pic);
           return Ok(std::vector<Frame> {std::move(frame)});
         }
@@ -473,7 +473,7 @@ public:
       pic.format = output_format_.format;
       pic.width = output_format_.width;
       pic.height = output_format_.height;
-      pic.buffer = VAAPIHardwarePicture(display_, surface);
+      pic.buffer = std::make_shared<VAAPIHardwarePicture>(display_, surface);
       frame.data = std::move(pic);
       return Ok(std::vector<Frame> {std::move(frame)});
     }
