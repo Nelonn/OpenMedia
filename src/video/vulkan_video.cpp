@@ -119,14 +119,16 @@ public:
     session_info.maxActiveReferencePictures = 16;
     session_info.queueFamilyIndex = hw_context_->video_decode_queue_family_index;
 
-    if (vkCreateVideoSessionKHR(hw_context_->vk_device, &session_info, hw_context_->allocator, &video_session_) != VK_SUCCESS) {
+#define VK(name) hw_context_->name
+
+    if (VK(vkCreateVideoSessionKHR)(hw_context_->vk_device, &session_info, hw_context_->allocator, &video_session_) != VK_SUCCESS) {
       return OM_CODEC_HWACCEL_FAILED;
     }
 
     uint32_t mem_req_count = 0;
-    vkGetVideoSessionMemoryRequirementsKHR(hw_context_->vk_device, video_session_, &mem_req_count, nullptr);
+    VK(vkGetVideoSessionMemoryRequirementsKHR)(hw_context_->vk_device, video_session_, &mem_req_count, nullptr);
     std::vector<VkVideoSessionMemoryRequirementsKHR> mem_reqs(mem_req_count, {VK_STRUCTURE_TYPE_VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR});
-    vkGetVideoSessionMemoryRequirementsKHR(hw_context_->vk_device, video_session_, &mem_req_count, mem_reqs.data());
+    VK(vkGetVideoSessionMemoryRequirementsKHR)(hw_context_->vk_device, video_session_, &mem_req_count, mem_reqs.data());
 
     std::vector<VkBindVideoSessionMemoryInfoKHR> bind_infos;
     for (const auto& req : mem_reqs) {
@@ -134,7 +136,7 @@ public:
       alloc_info.allocationSize = req.memoryRequirements.size;
       alloc_info.memoryTypeIndex = findMemoryType(req.memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
       VkDeviceMemory memory;
-      vkAllocateMemory(hw_context_->vk_device, &alloc_info, hw_context_->allocator, &memory);
+      VK(vkAllocateMemory)(hw_context_->vk_device, &alloc_info, hw_context_->allocator, &memory);
       session_memory_.push_back(memory);
 
       VkBindVideoSessionMemoryInfoKHR bind_info = {VK_STRUCTURE_TYPE_BIND_VIDEO_SESSION_MEMORY_INFO_KHR};
@@ -143,36 +145,36 @@ public:
       bind_info.memorySize = req.memoryRequirements.size;
       bind_infos.push_back(bind_info);
     }
-    vkBindVideoSessionMemoryKHR(hw_context_->vk_device, video_session_, (uint32_t)bind_infos.size(), bind_infos.data());
+    VK(vkBindVideoSessionMemoryKHR)(hw_context_->vk_device, video_session_, (uint32_t)bind_infos.size(), bind_infos.data());
 
     VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pool_info.queueFamilyIndex = hw_context_->video_decode_queue_family_index;
     pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    vkCreateCommandPool(hw_context_->vk_device, &pool_info, hw_context_->allocator, &command_pool_);
+    VK(vkCreateCommandPool)(hw_context_->vk_device, &pool_info, hw_context_->allocator, &command_pool_);
 
     VkCommandBufferAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     alloc_info.commandPool = command_pool_;
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = 1;
     command_buffers_.resize(1);
-    vkAllocateCommandBuffers(hw_context_->vk_device, &alloc_info, command_buffers_.data());
+    VK(vkAllocateCommandBuffers)(hw_context_->vk_device, &alloc_info, command_buffers_.data());
 
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    vkCreateFence(hw_context_->vk_device, &fence_info, hw_context_->allocator, &decode_fence_);
+    VK(vkCreateFence)(hw_context_->vk_device, &fence_info, hw_context_->allocator, &decode_fence_);
 
     VkBufferCreateInfo bit_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bit_info.size = BITSTREAM_SIZE;
     bit_info.usage = VK_BUFFER_USAGE_VIDEO_DECODE_SRC_BIT_KHR;
-    vkCreateBuffer(hw_context_->vk_device, &bit_info, hw_context_->allocator, &bitstream_buffer_);
+    VK(vkCreateBuffer)(hw_context_->vk_device, &bit_info, hw_context_->allocator, &bitstream_buffer_);
 
     VkMemoryRequirements bit_mem_reqs;
-    vkGetBufferMemoryRequirements(hw_context_->vk_device, bitstream_buffer_, &bit_mem_reqs);
+    VK(vkGetBufferMemoryRequirements)(hw_context_->vk_device, bitstream_buffer_, &bit_mem_reqs);
     VkMemoryAllocateInfo bit_alloc = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     bit_alloc.allocationSize = bit_mem_reqs.size;
     bit_alloc.memoryTypeIndex = findMemoryType(bit_mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(hw_context_->vk_device, &bit_alloc, hw_context_->allocator, &bitstream_memory_);
-    vkBindBufferMemory(hw_context_->vk_device, bitstream_buffer_, bitstream_memory_, 0);
-    vkMapMemory(hw_context_->vk_device, bitstream_memory_, 0, BITSTREAM_SIZE, 0, &bitstream_ptr_);
+    VK(vkAllocateMemory)(hw_context_->vk_device, &bit_alloc, hw_context_->allocator, &bitstream_memory_);
+    VK(vkBindBufferMemory)(hw_context_->vk_device, bitstream_buffer_, bitstream_memory_, 0);
+    VK(vkMapMemory)(hw_context_->vk_device, bitstream_memory_, 0, BITSTREAM_SIZE, 0, &bitstream_ptr_);
 
     if (codec_id_ == OM_CODEC_H265) h265_stream_ = h265_new();
 
@@ -310,7 +312,7 @@ public:
 private:
   uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(hw_context_->vk_physical_device, &memProperties);
+    VK(vkGetPhysicalDeviceMemoryProperties)(hw_context_->vk_physical_device, &memProperties);
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
       if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) return i;
     }
@@ -319,7 +321,7 @@ private:
 
   void updateSessionParametersH264() {
     if (!has_h264_sps_ || !has_h264_pps_) return;
-    if (session_params_) vkDestroyVideoSessionParametersKHR(hw_context_->vk_device, session_params_, hw_context_->allocator);
+    if (session_params_) VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
 
     StdVideoH264SequenceParameterSet sps = {};
     sps.pic_width_in_mbs_minus1 = (uint16_t)h264_sps_.pic_width_in_mbs_minus1;
@@ -356,12 +358,12 @@ private:
     VkVideoSessionParametersCreateInfoKHR params_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
     params_info.pNext = &h264_add;
     params_info.videoSession = video_session_;
-    vkCreateVideoSessionParametersKHR(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
+    VK(vkCreateVideoSessionParametersKHR)(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
   }
 
   void updateSessionParametersH265() {
     if (!has_h265_sps_ || !has_h265_pps_) return;
-    if (session_params_) vkDestroyVideoSessionParametersKHR(hw_context_->vk_device, session_params_, hw_context_->allocator);
+    if (session_params_) VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
 
     StdVideoH265SequenceParameterSet sps = {};
     sps.pic_width_in_luma_samples = (uint16_t)h265_stream_->sps->pic_width_in_luma_samples;
@@ -385,7 +387,7 @@ private:
     VkVideoSessionParametersCreateInfoKHR params_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
     params_info.pNext = &h265_add;
     params_info.videoSession = video_session_;
-    vkCreateVideoSessionParametersKHR(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
+    VK(vkCreateVideoSessionParametersKHR)(hw_context_->vk_device, &params_info, hw_context_->allocator, &session_params_);
   }
 
   void recordDecodeH264(OMVulkanPicture* surface, const h264::SliceHeader& slice, const Packet& packet) {
@@ -393,14 +395,14 @@ private:
     std::memcpy(bitstream_ptr_, packet.bytes.data(), packet.bytes.size());
 
     VkCommandBuffer cb = command_buffers_[0];
-    vkResetCommandBuffer(cb, 0);
+    VK(vkResetCommandBuffer)(cb, 0);
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(cb, &begin_info);
+    VK(vkBeginCommandBuffer)(cb, &begin_info);
 
     VkVideoBeginCodingInfoKHR begin_coding = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
     begin_coding.videoSession = video_session_;
     begin_coding.videoSessionParameters = session_params_;
-    vkCmdBeginVideoCodingKHR(cb, &begin_coding);
+    VK(vkCmdBeginVideoCodingKHR)(cb, &begin_coding);
 
     VkVideoDecodeH264PictureInfoKHR h264_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PICTURE_INFO_KHR};
     StdVideoDecodeH264PictureInfo std_pic = {};
@@ -417,19 +419,19 @@ private:
     decode_info.dstPictureResource.codedOffset = {0, 0};
     decode_info.dstPictureResource.codedExtent = {width_, height_};
 
-    vkCmdDecodeVideoKHR(cb, &decode_info);
+    VK(vkCmdDecodeVideoKHR)(cb, &decode_info);
 
     VkVideoEndCodingInfoKHR end_coding = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
-    vkCmdEndVideoCodingKHR(cb, &end_coding);
+    VK(vkCmdEndVideoCodingKHR)(cb, &end_coding);
 
-    vkEndCommandBuffer(cb);
+    VK(vkEndCommandBuffer)(cb);
 
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    vkQueueSubmit(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
-    vkWaitForFences(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(hw_context_->vk_device, 1, &decode_fence_);
+    VK(vkQueueSubmit)(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
+    VK(vkWaitForFences)(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
+    VK(vkResetFences)(hw_context_->vk_device, 1, &decode_fence_);
   }
 
   void recordDecodeH265(OMVulkanPicture* surface, const Packet& packet) {
@@ -437,14 +439,14 @@ private:
     std::memcpy(bitstream_ptr_, packet.bytes.data(), packet.bytes.size());
 
     VkCommandBuffer cb = command_buffers_[0];
-    vkResetCommandBuffer(cb, 0);
+    VK(vkResetCommandBuffer)(cb, 0);
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(cb, &begin_info);
+    VK(vkBeginCommandBuffer)(cb, &begin_info);
 
     VkVideoBeginCodingInfoKHR begin_coding = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
     begin_coding.videoSession = video_session_;
     begin_coding.videoSessionParameters = session_params_;
-    vkCmdBeginVideoCodingKHR(cb, &begin_coding);
+    VK(vkCmdBeginVideoCodingKHR)(cb, &begin_coding);
 
     VkVideoDecodeH265PictureInfoKHR h265_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR};
     StdVideoDecodeH265PictureInfo std_pic = {};
@@ -460,19 +462,19 @@ private:
     decode_info.dstPictureResource.codedOffset = {0, 0};
     decode_info.dstPictureResource.codedExtent = {width_, height_};
 
-    vkCmdDecodeVideoKHR(cb, &decode_info);
+    VK(vkCmdDecodeVideoKHR)(cb, &decode_info);
 
     VkVideoEndCodingInfoKHR end_coding = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
-    vkCmdEndVideoCodingKHR(cb, &end_coding);
+    VK(vkCmdEndVideoCodingKHR)(cb, &end_coding);
 
-    vkEndCommandBuffer(cb);
+    VK(vkEndCommandBuffer)(cb);
 
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    vkQueueSubmit(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
-    vkWaitForFences(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(hw_context_->vk_device, 1, &decode_fence_);
+    VK(vkQueueSubmit)(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
+    VK(vkWaitForFences)(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
+    VK(vkResetFences)(hw_context_->vk_device, 1, &decode_fence_);
   }
 
   void recordDecodeAV1(OMVulkanPicture* surface, const uint8_t* data, size_t size) {
@@ -480,14 +482,14 @@ private:
     std::memcpy(bitstream_ptr_, data, size);
 
     VkCommandBuffer cb = command_buffers_[0];
-    vkResetCommandBuffer(cb, 0);
+    VK(vkResetCommandBuffer)(cb, 0);
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(cb, &begin_info);
+    VK(vkBeginCommandBuffer)(cb, &begin_info);
 
     VkVideoBeginCodingInfoKHR begin_coding = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
     begin_coding.videoSession = video_session_;
     begin_coding.videoSessionParameters = session_params_;
-    vkCmdBeginVideoCodingKHR(cb, &begin_coding);
+    VK(vkCmdBeginVideoCodingKHR)(cb, &begin_coding);
 
     VkVideoDecodeAV1PictureInfoKHR av1_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PICTURE_INFO_KHR};
     StdVideoDecodeAV1PictureInfo std_pic = {};
@@ -502,19 +504,19 @@ private:
     decode_info.dstPictureResource.codedOffset = {0, 0};
     decode_info.dstPictureResource.codedExtent = {width_, height_};
 
-    vkCmdDecodeVideoKHR(cb, &decode_info);
+    VK(vkCmdDecodeVideoKHR)(cb, &decode_info);
 
     VkVideoEndCodingInfoKHR end_coding = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
-    vkCmdEndVideoCodingKHR(cb, &end_coding);
+    VK(vkCmdEndVideoCodingKHR)(cb, &end_coding);
 
-    vkEndCommandBuffer(cb);
+    VK(vkEndCommandBuffer)(cb);
 
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    vkQueueSubmit(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
-    vkWaitForFences(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(hw_context_->vk_device, 1, &decode_fence_);
+    VK(vkQueueSubmit)(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
+    VK(vkWaitForFences)(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
+    VK(vkResetFences)(hw_context_->vk_device, 1, &decode_fence_);
   }
 
   void recordDecodeVP9(OMVulkanPicture* surface, const uint8_t* data, size_t size) {
@@ -522,14 +524,14 @@ private:
     std::memcpy(bitstream_ptr_, data, size);
 
     VkCommandBuffer cb = command_buffers_[0];
-    vkResetCommandBuffer(cb, 0);
+    VK(vkResetCommandBuffer)(cb, 0);
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(cb, &begin_info);
+    VK(vkBeginCommandBuffer)(cb, &begin_info);
 
     VkVideoBeginCodingInfoKHR begin_coding = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
     begin_coding.videoSession = video_session_;
     begin_coding.videoSessionParameters = session_params_;
-    vkCmdBeginVideoCodingKHR(cb, &begin_coding);
+    VK(vkCmdBeginVideoCodingKHR)(cb, &begin_coding);
 
     VkVideoDecodeVP9PictureInfoKHR vp9_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_VP9_PICTURE_INFO_KHR};
     StdVideoDecodeVP9PictureInfo std_pic = {};
@@ -544,49 +546,49 @@ private:
     decode_info.dstPictureResource.codedOffset = {0, 0};
     decode_info.dstPictureResource.codedExtent = {width_, height_};
 
-    vkCmdDecodeVideoKHR(cb, &decode_info);
+    VK(vkCmdDecodeVideoKHR)(cb, &decode_info);
 
     VkVideoEndCodingInfoKHR end_coding = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
-    vkCmdEndVideoCodingKHR(cb, &end_coding);
+    VK(vkCmdEndVideoCodingKHR)(cb, &end_coding);
 
-    vkEndCommandBuffer(cb);
+    VK(vkEndCommandBuffer)(cb);
 
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    vkQueueSubmit(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
-    vkWaitForFences(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(hw_context_->vk_device, 1, &decode_fence_);
+    VK(vkQueueSubmit)(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
+    VK(vkWaitForFences)(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
+    VK(vkResetFences)(hw_context_->vk_device, 1, &decode_fence_);
   }
 
   void release() {
     if (command_pool_) {
-      vkDestroyCommandPool(hw_context_->vk_device, command_pool_, hw_context_->allocator);
+      VK(vkDestroyCommandPool)(hw_context_->vk_device, command_pool_, hw_context_->allocator);
       command_pool_ = VK_NULL_HANDLE;
     }
     if (decode_fence_) {
-      vkDestroyFence(hw_context_->vk_device, decode_fence_, hw_context_->allocator);
+      VK(vkDestroyFence)(hw_context_->vk_device, decode_fence_, hw_context_->allocator);
       decode_fence_ = VK_NULL_HANDLE;
     }
     if (bitstream_buffer_) {
-      vkDestroyBuffer(hw_context_->vk_device, bitstream_buffer_, hw_context_->allocator);
+      VK(vkDestroyBuffer)(hw_context_->vk_device, bitstream_buffer_, hw_context_->allocator);
       bitstream_buffer_ = VK_NULL_HANDLE;
     }
     if (bitstream_memory_) {
-      vkUnmapMemory(hw_context_->vk_device, bitstream_memory_);
-      vkFreeMemory(hw_context_->vk_device, bitstream_memory_, hw_context_->allocator);
+      VK(vkUnmapMemory)(hw_context_->vk_device, bitstream_memory_);
+      VK(vkFreeMemory)(hw_context_->vk_device, bitstream_memory_, hw_context_->allocator);
       bitstream_memory_ = VK_NULL_HANDLE;
     }
     if (video_session_) {
-      vkDestroyVideoSessionKHR(hw_context_->vk_device, video_session_, hw_context_->allocator);
+      VK(vkDestroyVideoSessionKHR)(hw_context_->vk_device, video_session_, hw_context_->allocator);
       video_session_ = VK_NULL_HANDLE;
     }
     if (session_params_) {
-      vkDestroyVideoSessionParametersKHR(hw_context_->vk_device, session_params_, hw_context_->allocator);
+      VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
       session_params_ = VK_NULL_HANDLE;
     }
     for (auto mem : session_memory_) {
-      vkFreeMemory(hw_context_->vk_device, mem, hw_context_->allocator);
+      VK(vkFreeMemory)(hw_context_->vk_device, mem, hw_context_->allocator);
     }
     session_memory_.clear();
     if (h265_stream_) {
@@ -648,37 +650,37 @@ public:
     session_info.pictureFormat = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
     session_info.queueFamilyIndex = hw_context_->video_encode_queue_family_index;
 
-    vkCreateVideoSessionKHR(hw_context_->vk_device, &session_info, hw_context_->allocator, &video_session_);
+    VK(vkCreateVideoSessionKHR)(hw_context_->vk_device, &session_info, hw_context_->allocator, &video_session_);
 
     // Memory, Pools, Buffers...
     VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pool_info.queueFamilyIndex = hw_context_->video_encode_queue_family_index;
     pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    vkCreateCommandPool(hw_context_->vk_device, &pool_info, hw_context_->allocator, &command_pool_);
+    VK(vkCreateCommandPool)(hw_context_->vk_device, &pool_info, hw_context_->allocator, &command_pool_);
 
     VkCommandBufferAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     alloc_info.commandPool = command_pool_;
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = 1;
     command_buffers_.resize(1);
-    vkAllocateCommandBuffers(hw_context_->vk_device, &alloc_info, command_buffers_.data());
+    VK(vkAllocateCommandBuffers)(hw_context_->vk_device, &alloc_info, command_buffers_.data());
 
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    vkCreateFence(hw_context_->vk_device, &fence_info, hw_context_->allocator, &encode_fence_);
+    VK(vkCreateFence)(hw_context_->vk_device, &fence_info, hw_context_->allocator, &encode_fence_);
 
     VkBufferCreateInfo bit_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bit_info.size = BITSTREAM_SIZE;
     bit_info.usage = VK_BUFFER_USAGE_VIDEO_ENCODE_DST_BIT_KHR;
-    vkCreateBuffer(hw_context_->vk_device, &bit_info, hw_context_->allocator, &bitstream_buffer_);
+    VK(vkCreateBuffer)(hw_context_->vk_device, &bit_info, hw_context_->allocator, &bitstream_buffer_);
 
     VkMemoryRequirements bit_mem_reqs;
-    vkGetBufferMemoryRequirements(hw_context_->vk_device, bitstream_buffer_, &bit_mem_reqs);
+    VK(vkGetBufferMemoryRequirements)(hw_context_->vk_device, bitstream_buffer_, &bit_mem_reqs);
     VkMemoryAllocateInfo bit_alloc = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     bit_alloc.allocationSize = bit_mem_reqs.size;
     bit_alloc.memoryTypeIndex = findMemoryType(bit_mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(hw_context_->vk_device, &bit_alloc, hw_context_->allocator, &bitstream_memory_);
-    vkBindBufferMemory(hw_context_->vk_device, bitstream_buffer_, bitstream_memory_, 0);
-    vkMapMemory(hw_context_->vk_device, bitstream_memory_, 0, BITSTREAM_SIZE, 0, &bitstream_ptr_);
+    VK(vkAllocateMemory)(hw_context_->vk_device, &bit_alloc, hw_context_->allocator, &bitstream_memory_);
+    VK(vkBindBufferMemory)(hw_context_->vk_device, bitstream_buffer_, bitstream_memory_, 0);
+    VK(vkMapMemory)(hw_context_->vk_device, bitstream_memory_, 0, BITSTREAM_SIZE, 0, &bitstream_ptr_);
 
     initialized_ = true;
     return OM_SUCCESS;
@@ -692,14 +694,14 @@ public:
     const auto& pic = std::get<Picture>(frame.data);
 
     VkCommandBuffer cb = command_buffers_[0];
-    vkResetCommandBuffer(cb, 0);
+    VK(vkResetCommandBuffer)(cb, 0);
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(cb, &begin_info);
+    VK(vkBeginCommandBuffer)(cb, &begin_info);
 
     VkVideoBeginCodingInfoKHR begin_coding = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
     begin_coding.videoSession = video_session_;
     begin_coding.videoSessionParameters = session_params_;
-    vkCmdBeginVideoCodingKHR(cb, &begin_coding);
+    VK(vkCmdBeginVideoCodingKHR)(cb, &begin_coding);
 
     VkVideoEncodeInfoKHR encode_info = {VK_STRUCTURE_TYPE_VIDEO_ENCODE_INFO_KHR};
     encode_info.dstBuffer = bitstream_buffer_;
@@ -710,19 +712,19 @@ public:
     encode_info.srcPictureResource.codedOffset = {0, 0};
     encode_info.srcPictureResource.codedExtent = {width_, height_};
     
-    vkCmdEncodeVideoKHR(cb, &encode_info);
+    VK(vkCmdEncodeVideoKHR)(cb, &encode_info);
 
     VkVideoEndCodingInfoKHR end_coding = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
-    vkCmdEndVideoCodingKHR(cb, &end_coding);
+    VK(vkCmdEndVideoCodingKHR)(cb, &end_coding);
 
-    vkEndCommandBuffer(cb);
+    VK(vkEndCommandBuffer)(cb);
 
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    vkQueueSubmit(hw_context_->video_encode_queue, 1, &submit, encode_fence_);
-    vkQueueWaitIdle(hw_context_->video_encode_queue);
-    vkResetFences(hw_context_->vk_device, 1, &encode_fence_);
+    VK(vkQueueSubmit)(hw_context_->video_encode_queue, 1, &submit, encode_fence_);
+    VK(vkQueueWaitIdle)(hw_context_->video_encode_queue);
+    VK(vkResetFences)(hw_context_->vk_device, 1, &encode_fence_);
 
     uint32_t encoded_size = 0; // In reality, we'd query the coded buffer segment or status
     Packet pkt;
@@ -739,7 +741,7 @@ public:
 private:
   uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(hw_context_->vk_physical_device, &memProperties);
+    VK(vkGetPhysicalDeviceMemoryProperties)(hw_context_->vk_physical_device, &memProperties);
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
       if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) return i;
     }
@@ -747,16 +749,16 @@ private:
   }
 
   void release() {
-    if (command_pool_) vkDestroyCommandPool(hw_context_->vk_device, command_pool_, hw_context_->allocator);
-    if (encode_fence_) vkDestroyFence(hw_context_->vk_device, encode_fence_, hw_context_->allocator);
-    if (bitstream_buffer_) vkDestroyBuffer(hw_context_->vk_device, bitstream_buffer_, hw_context_->allocator);
+    if (command_pool_) VK(vkDestroyCommandPool)(hw_context_->vk_device, command_pool_, hw_context_->allocator);
+    if (encode_fence_) VK(vkDestroyFence)(hw_context_->vk_device, encode_fence_, hw_context_->allocator);
+    if (bitstream_buffer_) VK(vkDestroyBuffer)(hw_context_->vk_device, bitstream_buffer_, hw_context_->allocator);
     if (bitstream_memory_) {
-      vkUnmapMemory(hw_context_->vk_device, bitstream_memory_);
-      vkFreeMemory(hw_context_->vk_device, bitstream_memory_, hw_context_->allocator);
+      VK(vkUnmapMemory)(hw_context_->vk_device, bitstream_memory_);
+      VK(vkFreeMemory)(hw_context_->vk_device, bitstream_memory_, hw_context_->allocator);
     }
-    if (video_session_) vkDestroyVideoSessionKHR(hw_context_->vk_device, video_session_, hw_context_->allocator);
-    if (session_params_) vkDestroyVideoSessionParametersKHR(hw_context_->vk_device, session_params_, hw_context_->allocator);
-    for (auto mem : session_memory_) vkFreeMemory(hw_context_->vk_device, mem, hw_context_->allocator);
+    if (video_session_) VK(vkDestroyVideoSessionKHR)(hw_context_->vk_device, video_session_, hw_context_->allocator);
+    if (session_params_) VK(vkDestroyVideoSessionParametersKHR)(hw_context_->vk_device, session_params_, hw_context_->allocator);
+    for (auto mem : session_memory_) VK(vkFreeMemory)(hw_context_->vk_device, mem, hw_context_->allocator);
     session_memory_.clear();
     initialized_ = false;
   }

@@ -14,5 +14,49 @@ struct OMVulkanContext {
   VkQueue video_decode_queue = VK_NULL_HANDLE;
   VkQueue video_encode_queue = VK_NULL_HANDLE;
 
+  // Global/Instance functions
+  PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
+  PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
+  PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties = nullptr;
+
+  // Device functions
+  PFN_vkGetDeviceQueue vkGetDeviceQueue = nullptr;
+  PFN_vkCreateCommandPool vkCreateCommandPool = nullptr;
+  PFN_vkDestroyCommandPool vkDestroyCommandPool = nullptr;
+  PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers = nullptr;
+  PFN_vkResetCommandBuffer vkResetCommandBuffer = nullptr;
+  PFN_vkBeginCommandBuffer vkBeginCommandBuffer = nullptr;
+  PFN_vkEndCommandBuffer vkEndCommandBuffer = nullptr;
+  PFN_vkQueueSubmit vkQueueSubmit = nullptr;
+  PFN_vkQueueWaitIdle vkQueueWaitIdle = nullptr;
+
+  // Memory/Buffer functions
+  PFN_vkCreateBuffer vkCreateBuffer = nullptr;
+  PFN_vkDestroyBuffer vkDestroyBuffer = nullptr;
+  PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements = nullptr;
+  PFN_vkAllocateMemory vkAllocateMemory = nullptr;
+  PFN_vkFreeMemory vkFreeMemory = nullptr;
+  PFN_vkBindBufferMemory vkBindBufferMemory = nullptr;
+  PFN_vkMapMemory vkMapMemory = nullptr;
+  PFN_vkUnmapMemory vkUnmapMemory = nullptr;
+
+  // Synchronization functions
+  PFN_vkCreateFence vkCreateFence = nullptr;
+  PFN_vkDestroyFence vkDestroyFence = nullptr;
+  PFN_vkWaitForFences vkWaitForFences = nullptr;
+  PFN_vkResetFences vkResetFences = nullptr;
+
+  // Video functions
+  PFN_vkCreateVideoSessionKHR vkCreateVideoSessionKHR = nullptr;
+  PFN_vkDestroyVideoSessionKHR vkDestroyVideoSessionKHR = nullptr;
+  PFN_vkGetVideoSessionMemoryRequirementsKHR vkGetVideoSessionMemoryRequirementsKHR = nullptr;
+  PFN_vkBindVideoSessionMemoryKHR vkBindVideoSessionMemoryKHR = nullptr;
+  PFN_vkCreateVideoSessionParametersKHR vkCreateVideoSessionParametersKHR = nullptr;
+  PFN_vkDestroyVideoSessionParametersKHR vkDestroyVideoSessionParametersKHR = nullptr;
+  PFN_vkCmdBeginVideoCodingKHR vkCmdBeginVideoCodingKHR = nullptr;
+  PFN_vkCmdEndVideoCodingKHR vkCmdEndVideoCodingKHR = nullptr;
+  PFN_vkCmdDecodeVideoKHR vkCmdDecodeVideoKHR = nullptr;
+  PFN_vkCmdEncodeVideoKHR vkCmdEncodeVideoKHR = nullptr;
+
   explicit OMVulkanContext(OMVulkanInit init);
 };
