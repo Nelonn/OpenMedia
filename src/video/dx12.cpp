@@ -111,7 +111,28 @@ public:
     if (FAILED(createDecoder())) return OM_CODEC_HWACCEL_FAILED;
     if (FAILED(createResources())) return OM_CODEC_HWACCEL_FAILED;
 
-    output_format_ = {OM_FORMAT_NV12, width_, height_};
+    uint8_t bit_depth = 8;
+    if (h264_.has_sps) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_.sps_valid[i]) continue;
+        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+        break;
+      }
+    }
+    output_format_ = {static_cast<OMPixelFormat>(bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12), width_, height_};
+    if (h264_.has_sps) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_.sps_valid[i]) continue;
+        const auto& s = h264_.sps[i];
+        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+          output_format_.color_primaries = (OMColorPrimaries) s.vui.colour_primaries;
+          output_format_.transfer_char = (OMTransferCharacteristic) s.vui.transfer_characteristics;
+          output_format_.color_space = (OMColorSpace) s.vui.matrix_coefficients;
+        }
+        break;
+      }
+    }
+
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -235,7 +256,15 @@ private:
 
     D3D12_FEATURE_DATA_VIDEO_DECODE_SUPPORT support = {};
     support.Configuration = config;
-    support.DecodeFormat = DXGI_FORMAT_NV12;
+    uint8_t bit_depth = 8;
+    if (h264_.has_sps) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_.sps_valid[i]) continue;
+        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+        break;
+      }
+    }
+    support.DecodeFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
     support.Width = padded_width_;
     support.Height = padded_height_;
     support.FrameRate = {0, 1};
@@ -247,7 +276,7 @@ private:
     heap_desc.Configuration = config;
     heap_desc.DecodeWidth = padded_width_;
     heap_desc.DecodeHeight = padded_height_;
-    heap_desc.Format = DXGI_FORMAT_NV12;
+    heap_desc.Format = support.DecodeFormat;
     heap_desc.FrameRate = {0, 1};
     heap_desc.MaxDecodePictureBufferCount = dpb_slot_count_;
     if (support.ConfigurationFlags & D3D12_VIDEO_DECODE_CONFIGURATION_FLAG_HEIGHT_ALIGNMENT_MULTIPLE_32_REQUIRED) {
@@ -278,10 +307,20 @@ private:
     hr = bitstream_buffer_->Map(0, nullptr, reinterpret_cast<void**>(&bitstream_ptr_));
     if (FAILED(hr)) return hr;
 
+    uint8_t bit_depth = 8;
+    if (h264_.has_sps) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_.sps_valid[i]) continue;
+        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+        break;
+      }
+    }
+    const DXGI_FORMAT fmt = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+
     D3D12_RESOURCE_DESC tex = {};
     tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     tex.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    tex.Format = DXGI_FORMAT_NV12;
+    tex.Format = fmt;
     tex.Width = padded_width_;
     tex.Height = padded_height_;
     tex.DepthOrArraySize = static_cast<UINT16>(dpb_slot_count_);
@@ -469,15 +508,17 @@ private:
 
     uint8_t* data = nullptr;
     if (FAILED(readback->Map(0, nullptr, reinterpret_cast<void**>(&data)))) return std::nullopt;
-    Picture pic(OM_FORMAT_NV12, width_, height_);
+    const OMPixelFormat om_fmt = (src->GetDesc().Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
+    Picture pic(om_fmt, width_, height_);
     const auto y_stride = pic.planes.getLinesize(0);
     const auto uv_stride = pic.planes.getLinesize(1);
     auto* y = pic.planes.getData(0);
     auto* uv = pic.planes.getData(1);
     const uint8_t* src_y = data + footprints[0].Offset;
     const uint8_t* src_uv = data + footprints[1].Offset;
-    for (uint32_t row = 0; row < height_; ++row) std::memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * footprints[0].Footprint.RowPitch, width_);
-    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) std::memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * footprints[1].Footprint.RowPitch, width_);
+    const size_t bpp = getBytesPerPixel(om_fmt, 0);
+    for (uint32_t row = 0; row < height_; ++row) std::memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * footprints[0].Footprint.RowPitch, width_ * bpp);
+    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) std::memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * footprints[1].Footprint.RowPitch, width_ * bpp);
     readback->Unmap(0, nullptr);
     return pic;
   }
@@ -599,7 +640,7 @@ class DX12Encoder final : public Encoder {
   static auto map_transfer_characteristics(OMTransferCharacteristic t) -> uint32_t {
     switch (t) {
       case OM_TRANSFER_BT709: return MFVideoTransFunc_709;
-      case OM_TRANSFER_PQ: return 12; // MFVideoTransFunc_2084
+      case OM_TRANSFER_PQ: return 12;  // MFVideoTransFunc_2084
       case OM_TRANSFER_HLG: return 11; // MFVideoTransFunc_2020
       default: return MFVideoTransFunc_Unknown;
     }

@@ -380,7 +380,15 @@ public:
     decoder_desc.Guid = D3D11_DECODER_PROFILE_H264_VLD_NOFGT;
     decoder_desc.SampleWidth = padded_width_;
     decoder_desc.SampleHeight = padded_height_;
-    decoder_desc.OutputFormat = DXGI_FORMAT_NV12;
+    uint8_t bit_depth = 8;
+    if (h264_.has_sps) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_.sps_valid[i]) continue;
+        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+        break;
+      }
+    }
+    decoder_desc.OutputFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
 
     UINT config_count = 0;
     if (FAILED(video_device_->GetVideoDecoderConfigCount(&decoder_desc, &config_count)) || config_count == 0) return OM_CODEC_HWACCEL_FAILED;
@@ -409,7 +417,7 @@ public:
     texture_desc.Height = padded_height_;
     texture_desc.MipLevels = 1;
     texture_desc.ArraySize = dpb_slot_count_;
-    texture_desc.Format = DXGI_FORMAT_NV12;
+    texture_desc.Format = decoder_desc.OutputFormat;
     texture_desc.SampleDesc.Count = 1;
     texture_desc.Usage = D3D11_USAGE_DEFAULT;
     texture_desc.BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
@@ -424,7 +432,20 @@ public:
       if (FAILED(video_device_->CreateVideoDecoderOutputView(dpb_texture_.Get(), &view_desc, &slots_[i].view))) return OM_CODEC_HWACCEL_FAILED;
     }
 
-    output_format_ = {OM_FORMAT_NV12, width_, height_};
+    output_format_ = {static_cast<OMPixelFormat>(texture_desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12), width_, height_};
+    if (h264_.has_sps) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_.sps_valid[i]) continue;
+        const auto& s = h264_.sps[i];
+        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+          output_format_.color_primaries = (OMColorPrimaries) s.vui.colour_primaries;
+          output_format_.transfer_char = (OMTransferCharacteristic) s.vui.transfer_characteristics;
+          output_format_.color_space = (OMColorSpace) s.vui.matrix_coefficients;
+        }
+        break;
+      }
+    }
+
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -566,15 +587,17 @@ private:
     D3D11_MAPPED_SUBRESOURCE map = {};
     if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return std::nullopt;
 
-    Picture pic(OM_FORMAT_NV12, width_, height_);
+    const OMPixelFormat om_fmt = (desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
+    Picture pic(om_fmt, width_, height_);
     const auto y_stride = pic.planes.getLinesize(0);
     const auto uv_stride = pic.planes.getLinesize(1);
     auto* y = pic.planes.getData(0);
     auto* uv = pic.planes.getData(1);
     const auto* src_y = static_cast<const uint8_t*>(map.pData);
     const auto* src_uv = src_y + static_cast<size_t>(map.RowPitch) * padded_height_;
-    for (uint32_t row = 0; row < height_; ++row) std::memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * map.RowPitch, width_);
-    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) std::memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * map.RowPitch, width_);
+    const size_t bpp = getBytesPerPixel(om_fmt, 0);
+    for (uint32_t row = 0; row < height_; ++row) std::memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
+    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) std::memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
     context_->Unmap(staging.Get(), 0);
     return pic;
   }
