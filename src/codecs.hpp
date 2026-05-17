@@ -44,6 +44,7 @@ extern const CodecDescriptor CODEC_VIDEOTOOLBOX_PRORES;
 
 // Video - DirectX11
 extern const CodecDescriptor CODEC_DX11_H264;
+extern const CodecDescriptor CODEC_DX11_ENC_H264;
 
 // Video - VA-API
 extern const CodecDescriptor CODEC_VAAPI_H264;
@@ -56,6 +57,8 @@ extern const CodecDescriptor CODEC_DX12_H264;
 extern const CodecDescriptor CODEC_DX12_H265;
 extern const CodecDescriptor CODEC_DX12_VP9;
 extern const CodecDescriptor CODEC_DX12_AV1;
+extern const CodecDescriptor CODEC_DX12_ENC_H264;
+extern const CodecDescriptor CODEC_DX12_ENC_H265;
 
 // Video - AMD AMF
 extern const CodecDescriptor CODEC_AMF_H264;
