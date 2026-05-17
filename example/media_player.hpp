@@ -235,6 +235,7 @@ public:
         requested_video_decoder_ = std::move(name);
     }
 
+#ifndef __APPLE__
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
         VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
         VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -451,7 +452,9 @@ public:
         hw_device_ = HWDevice{HWDeviceType::VULKAN, ctx};
         return true;
     }
+#endif
 
+#ifdef _WIN32
     auto enableDX11() -> bool {
         releaseHardwareDevice();
         OMDX11Init init = {};
@@ -479,6 +482,7 @@ public:
         SDL_Log("[DX12] Video acceleration enabled.");
         return true;
     }
+#endif
 
     // -----------------------------------------------------------------------
     // Lifecycle
@@ -719,21 +723,26 @@ private:
     void releaseHardwareDevice() {
         if (hw_device_) {
             switch (hw_device_->type) {
+#ifndef __APPLE__
                 case HWDeviceType::VULKAN:
                     HWVulkanContext_delete(static_cast<OMVulkanContext*>(hw_device_->context));
                     break;
+#endif
+#ifdef _WIN32
                 case HWDeviceType::DX11:
                     HWD3D11Context_delete(static_cast<OMDX11Context*>(hw_device_->context));
                     break;
                 case HWDeviceType::DX12:
                     HWD3D12Context_delete(static_cast<OMDX12Context*>(hw_device_->context));
                     break;
+#endif
                 default:
                     break;
             }
             hw_device_.reset();
         }
 
+#ifndef __APPLE__
         if (vulkan_device_ != VK_NULL_HANDLE && vulkan_get_instance_proc_addr_) {
             auto vkDeviceWaitIdle = reinterpret_cast<PFN_vkDeviceWaitIdle>(
                 vulkan_get_instance_proc_addr_(vulkan_instance_, "vkDeviceWaitIdle"));
@@ -764,6 +773,7 @@ private:
             SDL_Vulkan_UnloadLibrary();
             vulkan_library_loaded_ = false;
         }
+#endif
     }
 
     // -----------------------------------------------------------------------
