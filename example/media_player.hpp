@@ -22,9 +22,13 @@
 #include <openmedia/format_api.hpp>
 #include <openmedia/format_detector.hpp>
 #include <openmedia/format_registry.hpp>
+#ifdef _WIN32
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
+#endif
+#ifndef __APPLE__
 #include <openmedia/hw_vulkan.h>
+#endif
 #include <openmedia/io.hpp>
 #include <openmedia/video.hpp>
 #include <queue>
@@ -1082,6 +1086,7 @@ private:
                 if (std::holds_alternative<std::shared_ptr<HardwarePicture>>(pic.buffer)) {
                   const auto& hw = std::get<std::shared_ptr<HardwarePicture>>(pic.buffer);
                   if (hw && hw->getType() == HWDeviceType::VULKAN) {
+#ifndef __APPLE__
                     const auto& vhw = static_cast<const VulkanHardwarePicture&>(*hw);
 
                     // For this example's software renderer, we MUST resolve/download to host memory.
@@ -1101,8 +1106,10 @@ private:
                                                vf.y_plane.data(), vf.y_stride,
                                                vf.u_plane.data(), vf.u_stride,
                                                pic.width, pic.height);
+#endif
                   }
-                } else {                  vf.y_stride = pic.planes.getLinesize(0);
+                } else {
+                  vf.y_stride = pic.planes.getLinesize(0);
                   vf.u_stride = pic.planes.getLinesize(1);
                   vf.v_stride = pic.planes.getLinesize(2);
 

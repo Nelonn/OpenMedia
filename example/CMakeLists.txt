@@ -10,5 +10,9 @@ add_executable(OpenMediaExample WIN32
         video_renderer.hpp
 )
 target_link_libraries(OpenMediaExample PRIVATE SDL3::SDL3 OpenMedia::OpenMedia)
-target_link_libraries(OpenMediaExample PRIVATE Vulkan::Headers)
-target_compile_definitions(OpenMediaExample PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if (WIN32 OR LINUX)
+    target_link_libraries(OpenMediaExample PRIVATE Vulkan::Headers)
+endif ()
+if (WIN32)
+    target_compile_definitions(OpenMediaExample PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif ()
