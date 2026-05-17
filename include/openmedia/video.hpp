@@ -101,6 +101,20 @@ OM_ENUM(OMColorPrimaries, uint8_t) {
     OM_PRIMARIES_EBU3213 = 22,
 };
 
+struct OPENMEDIA_ABI OMMasteringDisplayMetadata {
+  uint16_t display_primaries[3][2]; // 0.00002 units
+  uint16_t white_point[2];          // 0.00002 units
+  uint32_t max_display_mastering_luminance; // 0.0001 units
+  uint32_t min_display_mastering_luminance; // 0.0001 units
+  bool has_value = false;
+};
+
+struct OPENMEDIA_ABI OMContentLightLevel {
+  uint16_t max_content_light_level;
+  uint16_t max_pic_average_light_level;
+  bool has_value = false;
+};
+
 namespace openmedia {
 
 static auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> uint32_t {
@@ -318,6 +332,9 @@ struct OPENMEDIA_ABI VideoFormat {
   OMPixelFormat format;
   uint32_t width;
   uint32_t height;
+  OMColorSpace color_space;
+  OMTransferCharacteristic transfer_char;
+  OMColorPrimaries color_primaries;
 };
 
 struct OPENMEDIA_ABI Picture {
@@ -330,14 +347,18 @@ struct OPENMEDIA_ABI Picture {
   uint32_t height;
   OMColorSpace color_space;
   OMTransferCharacteristic transfer_char;
+  OMColorPrimaries color_primaries;
+  
+  OMMasteringDisplayMetadata mastering_display;
+  OMContentLightLevel content_light_level;
 
   PlaneSpan<4> planes;
 
   Picture() noexcept
-      : format(OM_FORMAT_NV12), width(0), height(0), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709) {}
+      : format(OM_FORMAT_NV12), width(0), height(0), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709), color_primaries(OM_PRIMARIES_BT709) {}
 
   Picture(OMPixelFormat fmt, uint32_t w, uint32_t h)
-      : format(fmt), width(w), height(h), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709) {
+      : format(fmt), width(w), height(h), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709), color_primaries(OM_PRIMARIES_BT709) {
     allocate();
   }
 

@@ -66,12 +66,12 @@ target_sources(OpenMedia PRIVATE
 )
 
 target_include_directories(OpenMedia PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
 
-target_include_directories(OpenMedia PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_include_directories(OpenMedia PRIVATE ${PROJECT_SOURCE_DIR}/third_party/headeronly)
+target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/headeronly)
 
 get_target_property(OPENMEDIA_LIB_TYPE OpenMedia TYPE)
 if (OPENMEDIA_LIB_TYPE STREQUAL "SHARED_LIBRARY")
@@ -97,8 +97,16 @@ if (OPENMEDIA_VULKAN_VIDEO)
         third_party/h265bitstream/h265_stream.c
         third_party/h265bitstream/h265_nal.c
     )
-    target_include_directories(OpenMedia PRIVATE ${PROJECT_SOURCE_DIR}/third_party/h265bitstream)
+    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h265bitstream)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VULKAN)
+endif ()
+
+if (OPENMEDIA_NVIDIA)
+    target_sources(OpenMedia PRIVATE include/openmedia/hw_cuda.h)
+    target_sources(OpenMedia PRIVATE src/hw_cuda.cpp)
+    target_sources(OpenMedia PRIVATE src/video/nvdec.cpp src/video/nvenc.cpp)
+    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffnvcodec)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_NVIDIA)
 endif ()
 
 if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
@@ -188,7 +196,7 @@ if (OPENMEDIA_VAAPI)
         third_party/h265bitstream/h265_stream.c
         third_party/h265bitstream/h265_nal.c
     )
-    target_include_directories(OpenMedia PRIVATE ${PROJECT_SOURCE_DIR}/third_party/h265bitstream)
+    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h265bitstream)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VAAPI)
 endif ()
 

@@ -7,7 +7,11 @@
 #include <span>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
 #include <dxva.h>
+#endif
+
 #include <h264.h>
 
 namespace openmedia::dx_h264 {
@@ -206,6 +210,7 @@ struct DpbEntry {
   bool is_reference = false;
 };
 
+#ifdef _WIN32
 static void fillQMatrix(const h264::SPS& sps, const h264::PPS& pps, DXVA_Qmatrix_H264& qmatrix) {
   if (!sps.seq_scaling_matrix_present_flag && !pps.pic_scaling_matrix_present_flag) {
     std::memset(&qmatrix, 16, sizeof(qmatrix));
@@ -293,5 +298,6 @@ static void fillPicParams(const h264::SPS& sps,
   pic.num_ref_idx_l0_active_minus1 = (UCHAR)pps.num_ref_idx_l0_active_minus1;
   pic.num_ref_idx_l1_active_minus1 = (UCHAR)pps.num_ref_idx_l1_active_minus1;
 }
+#endif
 
 } // namespace openmedia::dx_h264

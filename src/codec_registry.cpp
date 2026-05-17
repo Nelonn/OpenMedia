@@ -172,11 +172,17 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   // Video - DirectX11
 #if defined(OPENMEDIA_DX11_VIDEO)
   registry->registerCodec(&CODEC_DX11_H264);
+  registry->registerCodec(&CODEC_DX11_ENC_H264);
 #endif
 
   // Video - DirectX12
 #if defined(OPENMEDIA_DX12_VIDEO)
   registry->registerCodec(&CODEC_DX12_H264);
+  registry->registerCodec(&CODEC_DX12_H265);
+  registry->registerCodec(&CODEC_DX12_VP9);
+  registry->registerCodec(&CODEC_DX12_AV1);
+  registry->registerCodec(&CODEC_DX12_ENC_H264);
+  registry->registerCodec(&CODEC_DX12_ENC_H265);
 #endif
 
   // Video - AMD AMF
@@ -199,6 +205,16 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_VULKAN_H265);
   //registry->registerCodec(&CODEC_VULKAN_AV1);
   //registry->registerCodec(&CODEC_VULKAN_VP9);
+#endif
+
+#if defined(OPENMEDIA_NVIDIA)
+  registry->registerCodec(&CODEC_NVDEC_H264);
+  registry->registerCodec(&CODEC_NVDEC_H265);
+  registry->registerCodec(&CODEC_NVDEC_VP9);
+  registry->registerCodec(&CODEC_NVDEC_AV1);
+  registry->registerCodec(&CODEC_NVENC_H264);
+  registry->registerCodec(&CODEC_NVENC_H265);
+  registry->registerCodec(&CODEC_NVENC_AV1);
 #endif
 
 #if defined(__ANDROID__)
