@@ -5,32 +5,32 @@
 #include <openmedia/video.hpp>
 #include <queue>
 #include <vector>
+#include "dx_h264.hpp"
 #include "nv_common.hpp"
 #include "nv_loader.hpp"
-#include "dx_h264.hpp"
 
 namespace openmedia {
 
 class OPENMEDIA_ABI NVDecPicture : public CudaHardwarePicture {
-    CUvideodecoder decoder_;
-    CUdeviceptr dev_ptr_;
-    OMCudaPicture om_pic_;
+  CUvideodecoder decoder_;
+  CUdeviceptr dev_ptr_;
+  OMCudaPicture om_pic_;
 public:
-    NVDecPicture(CUvideodecoder decoder, CUdeviceptr dev_ptr, uint32_t pitch) 
-        : decoder_(decoder), dev_ptr_(dev_ptr) {
-        data = dev_ptr;
-        this->pitch = pitch;
-        om_pic_.data = dev_ptr;
-        om_pic_.pitch = pitch;
+  NVDecPicture(CUvideodecoder decoder, CUdeviceptr dev_ptr, uint32_t pitch)
+      : decoder_(decoder), dev_ptr_(dev_ptr) {
+    data = dev_ptr;
+    this->pitch = pitch;
+    om_pic_.data = dev_ptr;
+    om_pic_.pitch = pitch;
+  }
+  ~NVDecPicture() {
+    auto* cuvid = NVLoader::getInstance().cuvid();
+    if (cuvid && decoder_ && dev_ptr_) {
+      cuvid->cuvidUnmapVideoFrame(decoder_, dev_ptr_);
     }
-    ~NVDecPicture() {
-        auto* cuvid = NVLoader::getInstance().cuvid();
-        if (cuvid && decoder_ && dev_ptr_) {
-            cuvid->cuvidUnmapVideoFrame(decoder_, dev_ptr_);
-        }
-    }
+  }
 
-    auto getOMPicture() -> OMCudaPicture* override { return &om_pic_; }
+  auto getOMPicture() -> OMCudaPicture* override { return &om_pic_; }
 };
 
 class NVDec final : public Decoder {
@@ -85,6 +85,39 @@ class NVDec final : public Decoder {
     output_format_.height = create_info.ulTargetHeight;
     output_format_.format = (format->bit_depth_luma_minus8 > 0) ? OM_FORMAT_P010 : OM_FORMAT_NV12;
 
+    // Report color properties
+    auto map_primaries = [](uint8_t p) -> OMColorPrimaries {
+      switch (p) {
+        case 1: return OM_PRIMARIES_BT709;
+        case 9: return OM_PRIMARIES_BT2020;
+        default: return OM_PRIMARIES_UNKNOWN;
+      }
+    };
+    auto map_transfer = [](uint8_t t) -> OMTransferCharacteristic {
+      switch (t) {
+        case 1: return OM_TRANSFER_BT709;
+        case 16: return OM_TRANSFER_PQ;
+        default: return OM_TRANSFER_UNKNOWN;
+      }
+    };
+    auto map_matrix = [](uint8_t m) -> OMColorSpace {
+      switch (m) {
+        case 1: return OM_COLOR_SPACE_BT709;
+        case 9: return OM_COLOR_SPACE_BT2020;
+        default: return OM_COLOR_SPACE_BT709;
+      }
+    };
+
+    output_format_.color_primaries = map_primaries(format->video_signal_description.color_primaries);
+    output_format_.transfer_char = map_transfer(format->video_signal_description.transfer_characteristics);
+    output_format_.color_space = map_matrix(format->video_signal_description.matrix_coefficients);
+
+    if (format->seqhdr_data_length >= sizeof(CUVIDEOFORMATEX)) {
+      CUVIDEOFORMATEX* ex = (CUVIDEOFORMATEX*) format;
+      // CUVID can provide HDR metadata in some versions, but it's often in SEI.
+      // For now, we report the color space which is the most critical part.
+    }
+
     if (cuvid->cuvidCreateDecoder(&decoder_, &create_info) != CUDA_SUCCESS) {
       openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidCreateDecoder failed");
       return 0;
@@ -98,7 +131,7 @@ class NVDec final : public Decoder {
     auto* cuvid = NVLoader::getInstance().cuvid();
     CUresult res = cuvid->cuvidDecodePicture(decoder_, params);
     if (res != CUDA_SUCCESS) {
-      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidDecodePicture failed with error {}", (int)res);
+      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidDecodePicture failed with error {}", (int) res);
       return 0;
     }
     return 1;
@@ -136,7 +169,7 @@ class NVDec final : public Decoder {
         decoded_frames_.push_back(std::move(frame));
       }
     } else {
-      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidMapVideoFrame failed with error {}", (int)res);
+      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidMapVideoFrame failed with error {}", (int) res);
     }
 
     return 1;
@@ -177,7 +210,7 @@ public:
 
     CUVIDEOFORMATEX ext_format = {};
     if (!options.extradata.empty()) {
-      ext_format.format.seqhdr_data_length = std::min<uint32_t>((uint32_t)options.extradata.size(), 1024);
+      ext_format.format.seqhdr_data_length = std::min<uint32_t>((uint32_t) options.extradata.size(), 1024);
       std::memcpy(ext_format.raw_seqhdr_data, options.extradata.data(), ext_format.format.seqhdr_data_length);
       parser_params.pExtVideoInfo = &ext_format;
     }
@@ -203,27 +236,27 @@ public:
 
     auto* cuvid = NVLoader::getInstance().cuvid();
     CUVIDSOURCEDATAPACKET cupkt = {};
-    
+
     std::vector<uint8_t> annexb;
     std::span<const uint8_t> bytes = packet.bytes;
 
     static bool first_packet = true;
     if (first_packet) {
-        if (bytes.size() >= 4) {
-            openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: pkt size {} first bytes: {:02x} {:02x} {:02x} {:02x}", bytes.size(), bytes[0], bytes[1], bytes[2], bytes[3]);
-            openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: nal_length_size: {}", h264_.nal_length_size);
-        }
-        first_packet = false;
+      if (bytes.size() >= 4) {
+        openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: pkt size {} first bytes: {:02x} {:02x} {:02x} {:02x}", bytes.size(), bytes[0], bytes[1], bytes[2], bytes[3]);
+        openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: nal_length_size: {}", h264_.nal_length_size);
+      }
+      first_packet = false;
     }
 
     if (codec_id_ == OM_CODEC_H264 && h264_.nal_length_size > 0 && !dx_h264::isAnnexB(bytes)) {
       annexb = h264_.convertAvcc(bytes);
       if (!annexb.empty()) bytes = annexb;
     } else if (codec_id_ == OM_CODEC_H264 && !dx_h264::isAnnexB(bytes)) {
-        // Fallback: If nal_length_size is 0 but it's clearly not AnnexB, let's try assuming length is 4.
-        h264_.nal_length_size = 4;
-        annexb = h264_.convertAvcc(bytes);
-        if (!annexb.empty()) bytes = annexb;
+      // Fallback: If nal_length_size is 0 but it's clearly not AnnexB, let's try assuming length is 4.
+      h264_.nal_length_size = 4;
+      annexb = h264_.convertAvcc(bytes);
+      if (!annexb.empty()) bytes = annexb;
     }
 
     cupkt.payload = bytes.data();
@@ -234,7 +267,7 @@ public:
 
     CUresult res = cuvid->cuvidParseVideoData(parser_, &cupkt);
     if (res != CUDA_SUCCESS) {
-      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidParseVideoData failed with error {}", (int)res);
+      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidParseVideoData failed with error {}", (int) res);
       return Err(OM_CODEC_DECODE_FAILED);
     }
 

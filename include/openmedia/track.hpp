@@ -36,6 +36,10 @@ OM_ENUM(OMDisposition, uint16_t) {
 
 namespace openmedia {
 
+/**
+ * MediaFormat represents the properties of the ENCODED content.
+ * For decoded data properties, see VideoFormat or AudioFormat.
+ */
 struct OPENMEDIA_ABI MediaFormat {
   OMMediaType type = OM_MEDIA_NONE;
   OMCodecId codec_id = OM_CODEC_NONE;
@@ -55,6 +59,7 @@ struct OPENMEDIA_ABI MediaFormat {
       Rational framerate;
       OMColorSpace color_space;
       OMTransferCharacteristic transfer_char;
+      OMColorPrimaries color_primaries;
     } video;
     struct {
       uint32_t width;

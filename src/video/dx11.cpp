@@ -60,11 +60,14 @@ class DX11Encoder final : public Encoder {
 
     if (FAILED(MFCreateMediaType(&input_type))) return false;
     input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    input_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    input_type->SetGUID(MF_MT_SUBTYPE, options.video_format.format == OM_FORMAT_P010 ? MFVideoFormat_P010 : MFVideoFormat_NV12);
     MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, input_format_.width, input_format_.height);
     MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE, options.format.video.framerate.num, options.format.video.framerate.den);
     MFSetAttributeRatio(input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    input_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, map_color_primaries(options.format.video.color_primaries));
+    input_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, map_transfer_characteristics(options.format.video.transfer_char));
+    input_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space));
 
     if (FAILED(MFCreateMediaType(&output_type))) return false;
     output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -75,6 +78,9 @@ class DX11Encoder final : public Encoder {
     MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, options.format.video.framerate.num, options.format.video.framerate.den);
     MFSetAttributeRatio(output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    output_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, map_color_primaries(options.format.video.color_primaries));
+    output_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, map_transfer_characteristics(options.format.video.transfer_char));
+    output_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space));
 
     uint32_t bitrate = 5000000;
     if (options.rate_control.getMode() == RateControlMode::CBR) {
@@ -89,6 +95,34 @@ class DX11Encoder final : public Encoder {
 
     return true;
   }
+
+  static auto map_color_primaries(OMColorPrimaries p) -> uint32_t {
+    switch (p) {
+      case OM_PRIMARIES_BT709: return MFVideoPrimaries_BT709;
+      case OM_PRIMARIES_BT2020: return MFVideoPrimaries_BT2020;
+      case OM_PRIMARIES_BT601: return MFVideoPrimaries_SMPTE170M;
+      default: return MFVideoPrimaries_Unknown;
+    }
+  }
+
+  static auto map_transfer_characteristics(OMTransferCharacteristic t) -> uint32_t {
+    switch (t) {
+      case OM_TRANSFER_BT709: return MFVideoTransFunc_709;
+      case OM_TRANSFER_PQ: return 12;  // MFVideoTransFunc_2084
+      case OM_TRANSFER_HLG: return 11; // MFVideoTransFunc_2020
+      default: return MFVideoTransFunc_Unknown;
+    }
+  }
+
+  static auto map_color_space(OMColorSpace c) -> uint32_t {
+    switch (c) {
+      case OM_COLOR_SPACE_BT709: return MFVideoTransferMatrix_BT709;
+      case OM_COLOR_SPACE_BT2020: return MFVideoTransferMatrix_BT2020_10;
+      case OM_COLOR_SPACE_BT601: return MFVideoTransferMatrix_BT601;
+      default: return MFVideoTransferMatrix_Unknown;
+    }
+  }
+
 
 public:
   DX11Encoder() {

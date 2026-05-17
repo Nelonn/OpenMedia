@@ -169,7 +169,8 @@ struct OPENMEDIA_ABI EncoderOptions {
 
 struct OPENMEDIA_ABI EncodingInfo {
   std::vector<uint8_t> extradata;
-
+  OMMasteringDisplayMetadata mastering_display;
+  OMContentLightLevel content_light_level;
 };
 
 class OPENMEDIA_ABI Encoder {
