@@ -19,6 +19,7 @@ struct OMVulkanContext {
   PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
   PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties = nullptr;
   PFN_vkGetPhysicalDeviceVideoCapabilitiesKHR vkGetPhysicalDeviceVideoCapabilitiesKHR = nullptr;
+  PFN_vkGetPhysicalDeviceVideoFormatPropertiesKHR vkGetPhysicalDeviceVideoFormatPropertiesKHR = nullptr;
 
   // Device functions
   PFN_vkGetDeviceQueue vkGetDeviceQueue = nullptr;
@@ -46,6 +47,7 @@ struct OMVulkanContext {
   PFN_vkBindImageMemory vkBindImageMemory = nullptr;
   PFN_vkMapMemory vkMapMemory = nullptr;
   PFN_vkUnmapMemory vkUnmapMemory = nullptr;
+  PFN_vkInvalidateMappedMemoryRanges vkInvalidateMappedMemoryRanges = nullptr;
 
   // Synchronization functions
   PFN_vkCreateFence vkCreateFence = nullptr;

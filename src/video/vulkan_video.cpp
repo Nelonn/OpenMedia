@@ -26,6 +26,8 @@ class VulkanDecoder final : public Decoder {
   OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
+  uint32_t padded_width_ = 0;
+  uint32_t padded_height_ = 0;
 
   VkVideoProfileInfoKHR video_profile_ = {VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
   VkVideoDecodeH264ProfileInfoKHR h264_profile_ = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR};
@@ -46,7 +48,7 @@ class VulkanDecoder final : public Decoder {
   VkImage output_image_ = VK_NULL_HANDLE;
   VkDeviceMemory output_memory_ = VK_NULL_HANDLE;
   VkImageView output_view_ = VK_NULL_HANDLE;
-  VkImageLayout output_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+  OMVulkanPicture output_pic_proxy_ = {};
 
   uint32_t next_slot_ = 0;
   static constexpr uint32_t MAX_DPB_SLOTS = 16;
@@ -70,8 +72,6 @@ class VulkanDecoder final : public Decoder {
   bool has_h265_sps_ = false;
   bool has_h265_pps_ = false;
   bool first_decode_ = true;
-
-  OMVulkanPicture output_pic_proxy_ = {};
 
 public:
   VulkanDecoder() = default;
@@ -142,10 +142,13 @@ public:
 
     coincide_supported_ = decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_COINCIDE_BIT_KHR;
     min_bitstream_alignment_ = video_caps.minBitstreamBufferSizeAlignment;
+    
+    padded_width_ = (width_ + video_caps.pictureAccessGranularity.width - 1) & ~(video_caps.pictureAccessGranularity.width - 1);
+    padded_height_ = (height_ + video_caps.pictureAccessGranularity.height - 1) & ~(video_caps.pictureAccessGranularity.height - 1);
 
     VkVideoSessionCreateInfoKHR session_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR};
     session_info.pVideoProfile = &video_profile_;
-    session_info.maxCodedExtent = {width_, height_};
+    session_info.maxCodedExtent = {padded_width_, padded_height_};
     session_info.referencePictureFormat = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
     session_info.pictureFormat = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
     session_info.maxDpbSlots = MAX_DPB_SLOTS;
@@ -189,13 +192,15 @@ public:
     image_info.pNext = &profile_list;
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-    image_info.extent = {width_, height_, 1};
+    image_info.extent = {padded_width_, padded_height_, 1};
     image_info.mipLevels = 1;
     image_info.arrayLayers = MAX_DPB_SLOTS;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
-    if (coincide_supported_) image_info.usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (coincide_supported_) {
+        image_info.usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VK(vkCreateImage)(hw_context_->vk_device, &image_info, hw_context_->allocator, &dpb_image_);
@@ -522,27 +527,27 @@ private:
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     VK(vkBeginCommandBuffer)(cb, &begin_info);
 
-    VkImageMemoryBarrier2 barriers[2];
+    VkImageMemoryBarrier2 barriers[MAX_DPB_SLOTS + 2];
     uint32_t barrier_count = 0;
 
-    if (slot->picture.layout != VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR) {
-      barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-      barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-      barriers[barrier_count].srcAccessMask = 0;
-      barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-      barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR | VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
-      barriers[barrier_count].oldLayout = slot->picture.layout;
-      barriers[barrier_count].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-      barriers[barrier_count].image = dpb_image_;
-      barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot_idx, 1};
-      barrier_count++;
-      slot->picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-    }
+    // Transition destination slot to proper layout
+    // Spec: pSetupReferenceSlot MUST be in DPB_KHR layout
+    barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barriers[barrier_count].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+    barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+    barriers[barrier_count].oldLayout = slot->picture.layout;
+    barriers[barrier_count].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+    barriers[barrier_count].image = dpb_image_;
+    barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot_idx, 1};
+    barrier_count++;
+    slot->picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
 
     if (!coincide_supported_ && output_pic_proxy_.layout != VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR) {
       barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-      barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-      barriers[barrier_count].srcAccessMask = 0;
+      barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      barriers[barrier_count].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
       barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
       barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
       barriers[barrier_count].oldLayout = output_pic_proxy_.layout;
@@ -551,6 +556,50 @@ private:
       barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
       barrier_count++;
       output_pic_proxy_.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR;
+    }
+
+    VkVideoReferenceSlotInfoKHR active_slots[MAX_DPB_SLOTS + 1];
+    VkVideoPictureResourceInfoKHR active_pics[MAX_DPB_SLOTS + 1];
+    VkVideoDecodeH264DpbSlotInfoKHR active_dpbs[MAX_DPB_SLOTS + 1];
+    StdVideoDecodeH264ReferenceInfo active_stds[MAX_DPB_SLOTS + 1];
+    uint32_t num_active = 0;
+
+    for (uint32_t i = 0; i < MAX_DPB_SLOTS; ++i) {
+      if (dpb_slots_[i].is_reference && i != slot_idx) {
+        if (dpb_slots_[i].picture.layout != VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR) {
+            barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barriers[barrier_count].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+            barriers[barrier_count].oldLayout = dpb_slots_[i].picture.layout;
+            barriers[barrier_count].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            barriers[barrier_count].image = dpb_image_;
+            barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, i, 1};
+            barrier_count++;
+            dpb_slots_[i].picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        }
+
+        active_stds[num_active] = {};
+        active_stds[num_active].FrameNum = (uint16_t)dpb_slots_[i].frame_num;
+        active_stds[num_active].PicOrderCnt[0] = dpb_slots_[i].poc;
+        active_stds[num_active].PicOrderCnt[1] = dpb_slots_[i].poc;
+
+        active_dpbs[num_active] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_DPB_SLOT_INFO_KHR};
+        active_dpbs[num_active].pStdReferenceInfo = &active_stds[num_active];
+
+        active_pics[num_active] = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
+        active_pics[num_active].sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
+        active_pics[num_active].imageViewBinding = dpb_image_view_;
+        active_pics[num_active].codedExtent = {padded_width_, padded_height_};
+        active_pics[num_active].baseArrayLayer = i;
+
+        active_slots[num_active] = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
+        active_slots[num_active].slotIndex = (int32_t)i;
+        active_slots[num_active].pPictureResource = &active_pics[num_active];
+        active_slots[num_active].pNext = &active_dpbs[num_active];
+        num_active++;
+      }
     }
 
     if (barrier_count > 0) {
@@ -578,14 +627,14 @@ private:
 
     VkVideoPictureResourceInfoKHR dst_pic = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
     dst_pic.imageViewBinding = coincide_supported_ ? dpb_image_view_ : output_view_;
-    dst_pic.codedExtent = {width_, height_};
+    dst_pic.codedExtent = {padded_width_, padded_height_};
     dst_pic.baseArrayLayer = coincide_supported_ ? slot_idx : 0;
 
     VkVideoReferenceSlotInfoKHR setup_slot = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
     setup_slot.slotIndex = (int32_t)slot_idx;
     VkVideoPictureResourceInfoKHR setup_pic = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
     setup_pic.imageViewBinding = dpb_image_view_;
-    setup_pic.codedExtent = {width_, height_};
+    setup_pic.codedExtent = {padded_width_, padded_height_};
     setup_pic.baseArrayLayer = slot_idx;
     setup_slot.pPictureResource = &setup_pic;
     
@@ -596,48 +645,18 @@ private:
     VkVideoDecodeH264DpbSlotInfoKHR dpb_slot_info = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_DPB_SLOT_INFO_KHR};
     dpb_slot_info.pStdReferenceInfo = &std_ref_info;
     setup_slot.pNext = &dpb_slot_info;
-
-    VkVideoReferenceSlotInfoKHR active_slots[MAX_DPB_SLOTS + 1];
-    VkVideoPictureResourceInfoKHR active_pics[MAX_DPB_SLOTS + 1];
-    VkVideoDecodeH264DpbSlotInfoKHR active_dpbs[MAX_DPB_SLOTS + 1];
-    StdVideoDecodeH264ReferenceInfo active_stds[MAX_DPB_SLOTS + 1];
-    uint32_t num_active = 0;
-
-    for (uint32_t i = 0; i < MAX_DPB_SLOTS; ++i) {
-      if (dpb_slots_[i].is_reference && i != slot_idx) {
-        active_stds[num_active] = {};
-        active_stds[num_active].FrameNum = (uint16_t)dpb_slots_[i].frame_num;
-        active_stds[num_active].PicOrderCnt[0] = dpb_slots_[i].poc;
-        active_stds[num_active].PicOrderCnt[1] = dpb_slots_[i].poc;
-
-        active_dpbs[num_active] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_DPB_SLOT_INFO_KHR};
-        active_dpbs[num_active].pStdReferenceInfo = &active_stds[num_active];
-
-        active_pics[num_active] = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
-        active_pics[num_active].sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
-        active_pics[num_active].imageViewBinding = dpb_image_view_;
-        active_pics[num_active].codedExtent = {width_, height_};
-        active_pics[num_active].baseArrayLayer = i;
-
-        active_slots[num_active] = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
-        active_slots[num_active].slotIndex = (int32_t)i;
-        active_slots[num_active].pPictureResource = &active_pics[num_active];
-        active_slots[num_active].pNext = &active_dpbs[num_active];
-        num_active++;
-      }
-    }
     
     uint32_t coding_slot_count = num_active;
     active_slots[coding_slot_count] = setup_slot;
     active_slots[coding_slot_count].slotIndex = -1;
     coding_slot_count++;
 
-    VkVideoBeginCodingInfoKHR begin_coding = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
-    begin_coding.videoSession = video_session_;
-    begin_coding.videoSessionParameters = session_params_;
-    begin_coding.referenceSlotCount = coding_slot_count;
-    begin_coding.pReferenceSlots = active_slots;
-    VK(vkCmdBeginVideoCodingKHR)(cb, &begin_coding);
+    VkVideoBeginCodingInfoKHR coding_begin_info = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
+    coding_begin_info.videoSession = video_session_;
+    coding_begin_info.videoSessionParameters = session_params_;
+    coding_begin_info.referenceSlotCount = coding_slot_count;
+    coding_begin_info.pReferenceSlots = active_slots;
+    VK(vkCmdBeginVideoCodingKHR)(cb, &coding_begin_info);
 
     if (first_decode_) {
       VkVideoCodingControlInfoKHR control = {VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR};
@@ -683,27 +702,26 @@ private:
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     VK(vkBeginCommandBuffer)(cb, &begin_info);
 
-    VkImageMemoryBarrier2 barriers[2];
+    VkImageMemoryBarrier2 barriers[MAX_DPB_SLOTS + 2];
     uint32_t barrier_count = 0;
 
-    if (slot->picture.layout != VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR) {
-      barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-      barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-      barriers[barrier_count].srcAccessMask = 0;
-      barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
-      barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR | VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
-      barriers[barrier_count].oldLayout = slot->picture.layout;
-      barriers[barrier_count].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-      barriers[barrier_count].image = dpb_image_;
-      barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot_idx, 1};
-      barrier_count++;
-      slot->picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
-    }
+    // Transition destination slot to DPB layout
+    barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barriers[barrier_count].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+    barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+    barriers[barrier_count].oldLayout = slot->picture.layout;
+    barriers[barrier_count].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+    barriers[barrier_count].image = dpb_image_;
+    barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot_idx, 1};
+    barrier_count++;
+    slot->picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
 
     if (!coincide_supported_ && output_pic_proxy_.layout != VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR) {
       barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-      barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-      barriers[barrier_count].srcAccessMask = 0;
+      barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      barriers[barrier_count].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
       barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
       barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
       barriers[barrier_count].oldLayout = output_pic_proxy_.layout;
@@ -712,6 +730,47 @@ private:
       barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
       barrier_count++;
       output_pic_proxy_.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR;
+    }
+
+    VkVideoReferenceSlotInfoKHR active_slots[MAX_DPB_SLOTS + 1];
+    VkVideoPictureResourceInfoKHR active_pics[MAX_DPB_SLOTS + 1];
+    VkVideoDecodeH265DpbSlotInfoKHR active_dpbs[MAX_DPB_SLOTS + 1];
+    StdVideoDecodeH265ReferenceInfo active_stds[MAX_DPB_SLOTS + 1];
+    uint32_t num_active = 0;
+
+    for (uint32_t i = 0; i < MAX_DPB_SLOTS; ++i) {
+      if (dpb_slots_[i].is_reference && i != slot_idx) {
+        if (dpb_slots_[i].picture.layout != VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR) {
+            barriers[barrier_count] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            barriers[barrier_count].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barriers[barrier_count].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            barriers[barrier_count].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+            barriers[barrier_count].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR;
+            barriers[barrier_count].oldLayout = dpb_slots_[i].picture.layout;
+            barriers[barrier_count].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+            barriers[barrier_count].image = dpb_image_;
+            barriers[barrier_count].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, i, 1};
+            barrier_count++;
+            dpb_slots_[i].picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+        }
+
+        active_stds[num_active] = {};
+        active_stds[num_active].PicOrderCntVal = dpb_slots_[i].poc;
+
+        active_dpbs[num_active] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR};
+        active_dpbs[num_active].pStdReferenceInfo = &active_stds[num_active];
+
+        active_pics[num_active] = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
+        active_pics[num_active].imageViewBinding = dpb_image_view_;
+        active_pics[num_active].codedExtent = {padded_width_, padded_height_};
+        active_pics[num_active].baseArrayLayer = i;
+
+        active_slots[num_active] = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
+        active_slots[num_active].slotIndex = (int32_t)i;
+        active_slots[num_active].pPictureResource = &active_pics[num_active];
+        active_slots[num_active].pNext = &active_dpbs[num_active];
+        num_active++;
+      }
     }
 
     if (barrier_count > 0) {
@@ -734,14 +793,14 @@ private:
 
     VkVideoPictureResourceInfoKHR dst_pic = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
     dst_pic.imageViewBinding = coincide_supported_ ? dpb_image_view_ : output_view_;
-    dst_pic.codedExtent = {width_, height_};
+    dst_pic.codedExtent = {padded_width_, padded_height_};
     dst_pic.baseArrayLayer = coincide_supported_ ? slot_idx : 0;
 
     VkVideoReferenceSlotInfoKHR setup_slot = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
     setup_slot.slotIndex = (int32_t)slot_idx;
     VkVideoPictureResourceInfoKHR setup_pic = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
     setup_pic.imageViewBinding = dpb_image_view_;
-    setup_pic.codedExtent = {width_, height_};
+    setup_pic.codedExtent = {padded_width_, padded_height_};
     setup_pic.baseArrayLayer = slot_idx;
     setup_slot.pPictureResource = &setup_pic;
     
@@ -750,34 +809,6 @@ private:
     VkVideoDecodeH265DpbSlotInfoKHR dpb_slot_info = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR};
     dpb_slot_info.pStdReferenceInfo = &std_ref_info;
     setup_slot.pNext = &dpb_slot_info;
-
-    VkVideoReferenceSlotInfoKHR active_slots[MAX_DPB_SLOTS + 1];
-    VkVideoPictureResourceInfoKHR active_pics[MAX_DPB_SLOTS + 1];
-    VkVideoDecodeH265DpbSlotInfoKHR active_dpbs[MAX_DPB_SLOTS + 1];
-    StdVideoDecodeH265ReferenceInfo active_stds[MAX_DPB_SLOTS + 1];
-    uint32_t num_active = 0;
-
-    for (uint32_t i = 0; i < MAX_DPB_SLOTS; ++i) {
-      if (dpb_slots_[i].is_reference && i != slot_idx) {
-        active_stds[num_active] = {};
-        active_stds[num_active].PicOrderCntVal = dpb_slots_[i].poc;
-
-        active_dpbs[num_active] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR};
-        active_dpbs[num_active].pStdReferenceInfo = &active_stds[num_active];
-
-        active_pics[num_active] = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
-        active_pics[num_active].imageViewBinding = dpb_image_view_;
-        active_pics[num_active].codedExtent = {width_, height_};
-        active_pics[num_active].baseArrayLayer = i;
-
-        active_slots[num_active] = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
-        active_slots[num_active].slotIndex = (int32_t)i;
-        active_slots[num_active].pPictureResource = &active_pics[num_active];
-        active_slots[num_active].pNext = &active_dpbs[num_active];
-        
-        num_active++;
-      }
-    }
     
     uint32_t coding_slot_count = num_active;
     active_slots[coding_slot_count] = setup_slot;

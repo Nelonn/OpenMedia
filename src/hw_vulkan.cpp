@@ -19,6 +19,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   GET_INST_FN(vkGetDeviceProcAddr);
   GET_INST_FN(vkGetPhysicalDeviceMemoryProperties);
   GET_INST_FN(vkGetPhysicalDeviceVideoCapabilitiesKHR);
+  GET_INST_FN(vkGetPhysicalDeviceVideoFormatPropertiesKHR);
 
   GET_DEV_FN(vkGetDeviceQueue);
   GET_DEV_FN(vkCreateCommandPool);
@@ -44,6 +45,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   GET_DEV_FN(vkBindImageMemory);
   GET_DEV_FN(vkMapMemory);
   GET_DEV_FN(vkUnmapMemory);
+  GET_DEV_FN(vkInvalidateMappedMemoryRanges);
 
   GET_DEV_FN(vkCreateFence);
   GET_DEV_FN(vkDestroyFence);
@@ -106,7 +108,6 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
 
   uint32_t src_family = context->video_decode_queue_family_index;
   uint32_t dst_family = context->queue_family_index;
-  bool different_queues = (src_family != dst_family);
 
   size_t size = (size_t)width * height * 3 / 2;
   VkBuffer staging_buffer;
@@ -124,9 +125,11 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   
   VkPhysicalDeviceMemoryProperties mem_props;
   context->vkGetPhysicalDeviceMemoryProperties(context->vk_physical_device, &mem_props);
+  bool is_coherent = false;
   for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-    if ((reqs.memoryTypeBits & (1 << i)) && (mem_props.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
+    if ((reqs.memoryTypeBits & (1 << i)) && (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
       alloc_info.memoryTypeIndex = i;
+      is_coherent = (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
       break;
     }
   }
@@ -135,6 +138,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
 
   VkCommandPool decode_pool, graphics_pool;
   VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+  pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   pool_info.queueFamilyIndex = src_family;
   context->vkCreateCommandPool(context->vk_device, &pool_info, context->allocator, &decode_pool);
   pool_info.queueFamilyIndex = dst_family;
@@ -148,6 +152,10 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkAllocateCommandBuffers(context->vk_device, &cb_info, &decode_cb);
   cb_info.commandPool = graphics_pool;
   context->vkAllocateCommandBuffers(context->vk_device, &cb_info, &graphics_cb);
+
+  VkFence fence;
+  VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  context->vkCreateFence(context->vk_device, &fence_info, context->allocator, &fence);
 
   VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   
@@ -174,9 +182,11 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit.commandBufferCount = 1;
   submit.pCommandBuffers = &decode_cb;
-  context->vkQueueSubmit(context->video_decode_queue, 1, &submit, VK_NULL_HANDLE);
+  context->vkQueueSubmit(context->video_decode_queue, 1, &submit, fence);
+  context->vkWaitForFences(context->vk_device, 1, &fence, VK_TRUE, UINT64_MAX);
+  context->vkResetFences(context->vk_device, 1, &fence);
 
-  // 2. Acquire and copy on graphics/transfer queue
+  // 2. Acquire and copy on graphics queue
   context->vkBeginCommandBuffer(graphics_cb, &begin_info);
   VkImageMemoryBarrier2 acquire_barrier = release_barrier;
   acquire_barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
@@ -187,11 +197,9 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkCmdPipelineBarrier2KHR(graphics_cb, &dep);
 
   VkBufferImageCopy regions[2] = {};
-  // Y plane
   regions[0].bufferOffset = 0;
   regions[0].imageSubresource = {VK_IMAGE_ASPECT_PLANE_0_BIT, 0, src->layer, 1};
   regions[0].imageExtent = {width, height, 1};
-  // UV plane
   regions[1].bufferOffset = (size_t)width * height;
   regions[1].imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, src->layer, 1};
   regions[1].imageExtent = {width / 2, height / 2, 1};
@@ -212,8 +220,9 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkEndCommandBuffer(graphics_cb);
 
   submit.pCommandBuffers = &graphics_cb;
-  context->vkQueueSubmit(context->queue, 1, &submit, VK_NULL_HANDLE);
-  context->vkQueueWaitIdle(context->queue);
+  context->vkQueueSubmit(context->queue, 1, &submit, fence);
+  context->vkWaitForFences(context->vk_device, 1, &fence, VK_TRUE, UINT64_MAX);
+  context->vkResetFences(context->vk_device, 1, &fence);
 
   // 4. Acquire back on decode queue
   context->vkBeginCommandBuffer(decode_cb, &begin_info);
@@ -226,8 +235,16 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkCmdPipelineBarrier2KHR(decode_cb, &dep);
   context->vkEndCommandBuffer(decode_cb);
   submit.pCommandBuffers = &decode_cb;
-  context->vkQueueSubmit(context->video_decode_queue, 1, &submit, VK_NULL_HANDLE);
-  context->vkQueueWaitIdle(context->video_decode_queue);
+  context->vkQueueSubmit(context->video_decode_queue, 1, &submit, fence);
+  context->vkWaitForFences(context->vk_device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+  if (!is_coherent) {
+    VkMappedMemoryRange range = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    range.memory = staging_memory;
+    range.offset = 0;
+    range.size = VK_WHOLE_SIZE;
+    context->vkInvalidateMappedMemoryRanges(context->vk_device, 1, &range);
+  }
 
   void* data;
   context->vkMapMemory(context->vk_device, staging_memory, 0, size, 0, &data);
@@ -235,16 +252,17 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   uint8_t* src_ptr = (uint8_t*)data;
   uint8_t* d_y = (uint8_t*)dst_y;
   for (uint32_t i = 0; i < height; ++i) {
-    std::memcpy(d_y + i * stride_y, src_ptr + i * width, width);
+    std::memcpy(d_y + (size_t)i * stride_y, src_ptr + (size_t)i * width, width);
   }
   
   uint8_t* src_uv = src_ptr + (size_t)width * height;
   uint8_t* d_uv = (uint8_t*)dst_uv;
   for (uint32_t i = 0; i < height / 2; ++i) {
-    std::memcpy(d_uv + i * stride_uv, src_uv + i * width, width);
+    std::memcpy(d_uv + (size_t)i * stride_uv, src_uv + (size_t)i * width, width);
   }
 
   context->vkUnmapMemory(context->vk_device, staging_memory);
+  context->vkDestroyFence(context->vk_device, fence, context->allocator);
   context->vkDestroyCommandPool(context->vk_device, decode_pool, context->allocator);
   context->vkDestroyCommandPool(context->vk_device, graphics_pool, context->allocator);
   context->vkFreeMemory(context->vk_device, staging_memory, context->allocator);
