@@ -23,7 +23,7 @@ public:
     om_pic_.data = dev_ptr;
     om_pic_.pitch = pitch;
   }
-  ~NVDecPicture() {
+  ~NVDecPicture() override {
     auto* cuvid = NVLoader::getInstance().cuvid();
     if (cuvid && decoder_ && dev_ptr_) {
       cuvid->cuvidUnmapVideoFrame(decoder_, dev_ptr_);

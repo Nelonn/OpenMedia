@@ -169,7 +169,7 @@ public:
       if (hw_pic->getType() == HWDeviceType::CUDA) {
         auto cuda_pic = std::static_pointer_cast<CudaHardwarePicture>(hw_pic);
         return encodeCuda(cuda_pic, frame.pts, picture);
-#ifdef _WIN32
+#if defined(_WIN32)
       } else if (hw_pic->getType() == HWDeviceType::DX11) {
         auto dx11_pic = std::static_pointer_cast<DX11HardwarePicture>(hw_pic);
         return encodeDX11(dx11_pic, frame.pts, picture);
@@ -270,6 +270,7 @@ private:
     return Ok(std::move(packets));
   }
 
+#if defined(_WIN32)
   auto encodeDX11(std::shared_ptr<DX11HardwarePicture> pic, int64_t pts, const Picture& picture) -> Result<std::vector<Packet>, OMError> {
     auto* cu = NVLoader::getInstance().cuda();
     CUgraphicsResource cu_resource;
@@ -314,6 +315,7 @@ private:
     cu->cuGraphicsUnregisterResource(cu_resource);
     return res;
   }
+#endif
 
   auto encodeCuda(std::shared_ptr<CudaHardwarePicture> pic, int64_t pts, const Picture& picture) -> Result<std::vector<Packet>, OMError> {
     NV_ENC_REGISTER_RESOURCE reg = {};
