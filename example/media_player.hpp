@@ -647,11 +647,13 @@ private:
     FormatRegistry format_registry_;
     std::optional<HWDevice> hw_device_;
     std::string requested_video_decoder_;
+#ifndef __APPLE__
     bool vulkan_library_loaded_ = false;
     PFN_vkGetInstanceProcAddr vulkan_get_instance_proc_addr_ = nullptr;
     VkInstance vulkan_instance_ = VK_NULL_HANDLE;
     VkDevice vulkan_device_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT vulkan_debug_messenger_ = VK_NULL_HANDLE;
+#endif
 
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<Decoder> audio_decoder_;
