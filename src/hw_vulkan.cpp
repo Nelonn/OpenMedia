@@ -103,11 +103,12 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   free(picture);
   }
 
-  void HWVulkanContext_resolvePicture(OMVulkanContext* context, OMVulkanPicture* src, void* dst_y, uint32_t stride_y, void* dst_uv, uint32_t stride_uv, uint32_t width, uint32_t height) {
+  void HWVulkanContext_copyToHost(OMVulkanContext* context, OMVulkanPicture* src, void* dst_y, uint32_t stride_y, void* dst_uv, uint32_t stride_uv, uint32_t width, uint32_t height) {
   if (!context || !src || !src->image) return;
 
   uint32_t src_family = context->video_decode_queue_family_index;
   uint32_t dst_family = context->queue_family_index;
+  const bool same_family = src_family == dst_family;
 
   size_t size = (size_t)width * height * 3 / 2;
   VkBuffer staging_buffer;
@@ -168,8 +169,8 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   release_barrier.dstAccessMask = 0;
   release_barrier.oldLayout = src->layout;
   release_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  release_barrier.srcQueueFamilyIndex = src_family;
-  release_barrier.dstQueueFamilyIndex = dst_family;
+  release_barrier.srcQueueFamilyIndex = same_family ? VK_QUEUE_FAMILY_IGNORED : src_family;
+  release_barrier.dstQueueFamilyIndex = same_family ? VK_QUEUE_FAMILY_IGNORED : dst_family;
   release_barrier.image = src->image;
   release_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, src->layer, 1};
 
@@ -213,8 +214,8 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   release_barrier.dstAccessMask = 0;
   release_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   release_barrier.newLayout = src->layout;
-  release_barrier.srcQueueFamilyIndex = dst_family;
-  release_barrier.dstQueueFamilyIndex = src_family;
+  release_barrier.srcQueueFamilyIndex = same_family ? VK_QUEUE_FAMILY_IGNORED : dst_family;
+  release_barrier.dstQueueFamilyIndex = same_family ? VK_QUEUE_FAMILY_IGNORED : src_family;
   dep.pImageMemoryBarriers = &release_barrier;
   context->vkCmdPipelineBarrier2KHR(graphics_cb, &dep);
   context->vkEndCommandBuffer(graphics_cb);
@@ -268,4 +269,3 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkFreeMemory(context->vk_device, staging_memory, context->allocator);
   context->vkDestroyBuffer(context->vk_device, staging_buffer, context->allocator);
 }
-

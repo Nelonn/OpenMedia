@@ -10,3 +10,4 @@ add_executable(OpenMediaExample WIN32
         video_renderer.hpp
 )
 target_link_libraries(OpenMediaExample PRIVATE SDL3::SDL3 OpenMedia::OpenMedia)
+target_link_libraries(OpenMediaExample PRIVATE Vulkan::Headers)

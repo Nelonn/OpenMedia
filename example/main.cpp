@@ -16,7 +16,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
   }
 
   SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
+  //SDL_Renderer* renderer = SDL_CreateRenderer(window, "direct3d11");
+  //SDL_Renderer* renderer = SDL_CreateRenderer(window, "direct3d12");
+  //SDL_Renderer* renderer = SDL_CreateRenderer(window, "vulkan");
   if (!renderer) {
+    SDL_Log("[Error] %s", SDL_GetError());
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 1;

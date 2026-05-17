@@ -372,18 +372,37 @@ public:
             queue_infos.push_back(decode_q_info);
         }
         
-        std::vector<const char*> extensions = {
-            VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
-            VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
-            VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
-            VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
+        auto vkEnumerateDeviceExtensionProperties = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(vkGetInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties"));
+        if (!vkEnumerateDeviceExtensionProperties) {
+            SDL_Log("[Vulkan] Failed to load vkEnumerateDeviceExtensionProperties");
+            return false;
+        }
+
+        uint32_t ext_count = 0;
+        vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &ext_count, nullptr);
+        std::vector<VkExtensionProperties> available_extensions(ext_count);
+        vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &ext_count, available_extensions.data());
+
+        auto hasExtension = [&](const char* name) {
+            return std::any_of(available_extensions.begin(), available_extensions.end(), [&](const auto& e) {
+                return std::strcmp(e.extensionName, name) == 0;
+            });
         };
+
+        std::vector<const char*> extensions;
+        if (hasExtension(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME)) extensions.push_back(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
+        if (hasExtension(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME)) extensions.push_back(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
+        if (hasExtension(VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME)) extensions.push_back(VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME);
+        if (hasExtension(VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME)) extensions.push_back(VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME);
+        if (hasExtension(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME)) extensions.push_back(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME);
+        if (hasExtension(VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME)) extensions.push_back(VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME);
+        if (hasExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) extensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
         
         VkPhysicalDeviceSynchronization2Features sync2_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
         sync2_features.synchronization2 = VK_TRUE;
 
         VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        device_info.pNext = &sync2_features;
+        device_info.pNext = (std::find_if(extensions.begin(), extensions.end(), [](const char* s) { return std::strcmp(s, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0; }) != extensions.end()) ? &sync2_features : nullptr;
         device_info.queueCreateInfoCount = (uint32_t)queue_infos.size();
         device_info.pQueueCreateInfos = queue_infos.data();
         device_info.enabledExtensionCount = (uint32_t)extensions.size();
@@ -669,12 +688,13 @@ private:
         }
     }
 
-    auto makeDecoder(const Track& track, std::unique_ptr<Decoder>& dec) -> bool {
-        dec = codec_registry_.createDecoder(track.format.codec_id);
-        if (!dec) {
-            SDL_Log("[Player] No decoder for codec %d", int(track.format.codec_id));
-            return false;
+    auto makeDecoder(const Track& track, std::unique_ptr<Decoder>& dec) -> const CodecDescriptor* {
+        auto descriptors = codec_registry_.getCodecsByCodecId(track.format.codec_id);
+        if (descriptors.empty()) {
+            SDL_Log("[Player] No decoders for codec %d", int(track.format.codec_id));
+            return nullptr;
         }
+
         DecoderOptions opts;
         opts.format    = track.format;
         opts.time_base = track.time_base;
@@ -682,12 +702,22 @@ private:
         if (track.format.type == OM_MEDIA_VIDEO && vulkan_device_) {
             opts.hw_device = *vulkan_device_;
         }
-        const OMError err = dec->configure(opts);
-        if (err != OM_SUCCESS) {
+
+        for (const auto* descriptor : descriptors) {
+            if (!descriptor->isDecoding()) continue;
+            
+            dec = descriptor->decoder_factory();
+            if (!dec) continue;
+
+            const OMError err = dec->configure(opts);
+            if (err == OM_SUCCESS) {
+                return descriptor;
+            }
+
             if (track.format.type == OM_MEDIA_VIDEO) {
-                SDL_Log("[Player] Decoder configure failed err=%d codec=%s codec_id=%d tb=%d/%d %ux%u extradata=%zu profile=%u level=%d",
+                SDL_Log("[Player] Decoder %s configure failed err=%d codec_id=%d tb=%d/%d %ux%u extradata=%zu profile=%u level=%d",
+                        descriptor->name.data(),
                         int(err),
-                        getCodecMeta(track.format.codec_id).name.data(),
                         int(track.format.codec_id),
                         track.time_base.num, track.time_base.den,
                         track.format.video.width, track.format.video.height,
@@ -695,9 +725,9 @@ private:
                         unsigned(track.format.profile),
                         track.format.level);
             } else if (track.format.type == OM_MEDIA_AUDIO) {
-                SDL_Log("[Player] Decoder configure failed err=%d codec=%s codec_id=%d tb=%d/%d rate=%u ch=%u depth=%u extradata=%zu profile=%u level=%d",
+                SDL_Log("[Player] Decoder %s configure failed err=%d codec_id=%d tb=%d/%d rate=%u ch=%u depth=%u extradata=%zu profile=%u level=%d",
+                        descriptor->name.data(),
                         int(err),
-                        getCodecMeta(track.format.codec_id).name.data(),
                         int(track.format.codec_id),
                         track.time_base.num, track.time_base.den,
                         track.format.audio.sample_rate,
@@ -706,47 +736,42 @@ private:
                         track.extradata.size(),
                         unsigned(track.format.profile),
                         track.format.level);
-            } else {
-                SDL_Log("[Player] Decoder configure failed err=%d codec_id=%d tb=%d/%d extradata=%zu profile=%u level=%d",
-                        int(err),
-                        int(track.format.codec_id),
-                        track.time_base.num, track.time_base.den,
-                        track.extradata.size(),
-                        unsigned(track.format.profile),
-                        track.format.level);
             }
             dec.reset();
-            return false;
         }
-        return true;
+
+        SDL_Log("[Player] All decoders for codec %d failed", int(track.format.codec_id));
+        return nullptr;
     }
 
     void setupVideoDecoder(const Track& track) {
-        if (!makeDecoder(track, video_decoder_)) return;
+        const auto* desc = makeDecoder(track, video_decoder_);
+        if (!desc) return;
         clock_.setMode(AVClock::Mode::WALL);
         clock_.reset(0.0);
         video_time_base_ = track.time_base;
-        total_duration_secs_ = static_cast<double>(track.duration) * 
-                               track.time_base.num / track.time_base.den;
+        total_duration_secs_ = static_cast<double>(track.duration) *
+                                track.time_base.num / track.time_base.den;
         has_video_       = true;
         SDL_Log("[Player] Video %dx%d codec=%s tb=%d/%d",
-                track.format.image.width, track.format.image.height,
-                getCodecMeta(track.format.codec_id).name.data(),
+                track.format.video.width, track.format.video.height,
+                desc->name.data(),
                 track.time_base.num, track.time_base.den);
     }
 
     void setupAudioDecoder(const Track& track) {
-        if (!makeDecoder(track, audio_decoder_)) return;
+        const auto* desc = makeDecoder(track, audio_decoder_);
+        if (!desc) return;
         clock_.setMode(AVClock::Mode::AUDIO);
         clock_.reset(0.0);
         audio_time_base_ = track.time_base;
         if (video_stream_index_ < 0) {
-            total_duration_secs_ = static_cast<double>(track.duration) * 
+            total_duration_secs_ = static_cast<double>(track.duration) *
                                    track.time_base.num / track.time_base.den;
         }
         has_audio_       = true;
         SDL_Log("[Player] Audio codec=%s tb=%d/%d",
-                getCodecMeta(track.format.codec_id).name.data(),
+                desc->name.data(),
                 track.time_base.num, track.time_base.den);
     }
 
@@ -754,11 +779,10 @@ private:
         if (!makeDecoder(track, video_decoder_)) return;
         image_width_    = track.format.image.width;
         image_height_   = track.format.image.height;
-        total_duration_secs_ = static_cast<double>(track.duration) * 
+        total_duration_secs_ = static_cast<double>(track.duration) *
                                track.time_base.num / track.time_base.den;
         decodeAndShowImage();
     }
-
     // -----------------------------------------------------------------------
     // Thread management
     // -----------------------------------------------------------------------
@@ -944,13 +968,13 @@ private:
                     // For this example's software renderer, we MUST resolve/download to host memory.
                     // In a real player, we'd keep it on GPU and use a Vulkan renderer.
                     vf.y_stride = (pic.width + 15) & ~15;
-                    vf.u_stride = (pic.width + 15) & ~15;
-                    vf.v_stride = 0; // Not used for NV12
+                    vf.u_stride = (pic.width + 15) & ~15; // Interleaved UV pitch for NV12.
+                    vf.v_stride = 0;
 
                     vf.y_plane.resize(vf.y_stride * pic.height);
-                    vf.u_plane.resize(vf.u_stride * (pic.height / 2));
+                    vf.u_plane.resize(vf.u_stride * ((pic.height + 1) / 2));
 
-                    HWVulkanContext_resolvePicture(static_cast<OMVulkanContext*>(vulkan_device_->context),
+                    HWVulkanContext_copyToHost(static_cast<OMVulkanContext*>(vulkan_device_->context),
                                                   vhw.picture,
                                                   vf.y_plane.data(), vf.y_stride,
                                                   vf.u_plane.data(), vf.u_stride,
