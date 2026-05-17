@@ -85,8 +85,8 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 | Vulkan Video     | Buggy but works | Windows/Linux |
 | DirectX 11 Video | Buggy but works | Windows       |
 | DirectX 12 Video | Buggy but works | Windows       |
-| CUDA/NVDEC       |       🔧        | Windows/Linux |
-| NVENC            |       🔧        | Windows/Linux |
+| CUDA/NVDEC       |   In Progress   | Windows/Linux |
+| NVENC            |   In Progress   | Windows/Linux |
 | Intel® Media SDK |       🔧        | Windows       |
 | MediaCodec       |    Untested     | Android       |
 

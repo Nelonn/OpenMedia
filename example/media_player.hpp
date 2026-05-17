@@ -1151,7 +1151,7 @@ private:
 #endif
                   } else if (hw && hw->getType() == HWDeviceType::CUDA) {
 #ifdef _WIN32
-                    auto c_pic = std::static_pointer_cast<CudaHardwarePicture>(hw);
+                    auto c_pic = std::static_pointer_cast<openmedia::CudaHardwarePicture>(std::get<std::shared_ptr<openmedia::HardwarePicture>>(pic.buffer));
                     vf.y_stride = (pic.width + 15) & ~15;
                     vf.u_stride = (pic.width + 15) & ~15;
                     vf.v_stride = 0;
