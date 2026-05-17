@@ -1,12 +1,15 @@
 #pragma once
 
+#if defined(_WIN32)
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
+#endif
 #include <openmedia/hw_vulkan.h>
 #include <openmedia/video.hpp>
 
 namespace openmedia {
 
+#if defined(_WIN32)
 class DX11HardwarePicture : public HardwarePicture {
 public:
   OMDX11Picture* pic;
@@ -23,6 +26,7 @@ public:
   explicit DX12HardwarePicture(OMDX12Picture* p)
       : HardwarePicture(HWDeviceType::DX12), pic(p) {}
 };
+#endif
 
 // VulkanHardwarePicture is already defined in include/openmedia/hw_vulkan.h
 
