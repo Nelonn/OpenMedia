@@ -25,6 +25,7 @@
 #ifdef _WIN32
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
+#include <openmedia/hw_cuda.h>
 #endif
 #ifndef __APPLE__
 #include <openmedia/hw_vulkan.h>
@@ -456,6 +457,25 @@ public:
 #endif
     }
 
+    auto enableCuda() -> bool {
+#ifdef _WIN32
+        releaseHardwareDevice();
+        OMCudaInit init = {};
+        init.device_index = 0;
+        init.cu_context = nullptr;
+        auto* ctx = HWCudaContext_create(init);
+        if (!ctx) {
+            SDL_Log("[CUDA] HWCudaContext_create failed");
+            return false;
+        }
+        hw_device_ = HWDevice{HWDeviceType::CUDA, ctx};
+        SDL_Log("[CUDA] Video acceleration enabled.");
+        return true;
+#else
+        return false;
+#endif
+    }
+
     auto enableDX11() -> bool {
 #ifdef _WIN32
         releaseHardwareDevice();
@@ -719,8 +739,11 @@ private:
                                        HWDeviceType type) -> bool {
         const std::string_view name = descriptor.name;
         switch (type) {
-            case HWDeviceType::VULKAN: return name.starts_with("vulkan_");
-            case HWDeviceType::DX11:   return name.starts_with("dx11_");
+            case HWDeviceType::VULKAN:
+                    return name.starts_with("vulkan_");
+            case HWDeviceType::CUDA:
+                    return name.starts_with("nvdec_");
+            case HWDeviceType::DX11:
             case HWDeviceType::DX12:   return name.starts_with("dx12_");
             default:                   return false;
         }
@@ -735,6 +758,9 @@ private:
                     break;
 #endif
 #ifdef _WIN32
+                case HWDeviceType::CUDA:
+                    HWCudaContext_delete(static_cast<OMCudaContext*>(hw_device_->context));
+                    break;
                 case HWDeviceType::DX11:
                     HWD3D11Context_delete(static_cast<OMDX11Context*>(hw_device_->context));
                     break;
@@ -1122,6 +1148,21 @@ private:
                                                vf.y_plane.data(), vf.y_stride,
                                                vf.u_plane.data(), vf.u_stride,
                                                pic.width, pic.height);
+#endif
+                  } else if (hw && hw->getType() == HWDeviceType::CUDA) {
+#ifdef _WIN32
+                    auto c_pic = std::static_pointer_cast<CudaHardwarePicture>(hw);
+                    vf.y_stride = (pic.width + 15) & ~15;
+                    vf.u_stride = (pic.width + 15) & ~15;
+                    vf.v_stride = 0;
+                    vf.y_plane.resize(vf.y_stride * pic.height);
+                    vf.u_plane.resize(vf.u_stride * ((pic.height + 1) / 2));
+
+                    HWCudaContext_copyToHost(static_cast<OMCudaContext*>(hw_device_->context),
+                                             c_pic->getOMPicture(),
+                                             vf.y_plane.data(), vf.y_stride,
+                                             vf.u_plane.data(), vf.u_stride,
+                                             pic.width, pic.height);
 #endif
                   }
                 } else {

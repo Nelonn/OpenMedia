@@ -201,6 +201,16 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   //registry->registerCodec(&CODEC_VULKAN_VP9);
 #endif
 
+#if defined(OPENMEDIA_NVIDIA)
+  registry->registerCodec(&CODEC_NVDEC_H264);
+  registry->registerCodec(&CODEC_NVDEC_H265);
+  registry->registerCodec(&CODEC_NVDEC_VP9);
+  registry->registerCodec(&CODEC_NVDEC_AV1);
+  registry->registerCodec(&CODEC_NVENC_H264);
+  registry->registerCodec(&CODEC_NVENC_H265);
+  registry->registerCodec(&CODEC_NVENC_AV1);
+#endif
+
 #if defined(__ANDROID__)
   registry->registerCodec(&CODEC_MEDIACODEC_H264);
   registry->registerCodec(&CODEC_MEDIACODEC_H265);

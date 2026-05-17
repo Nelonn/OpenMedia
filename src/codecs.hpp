@@ -76,6 +76,15 @@ extern const CodecDescriptor CODEC_MEDIACODEC_VP8;
 extern const CodecDescriptor CODEC_MEDIACODEC_VP9;
 extern const CodecDescriptor CODEC_MEDIACODEC_AV1;
 
+// Video - NVIDIA
+extern const CodecDescriptor CODEC_NVDEC_H264;
+extern const CodecDescriptor CODEC_NVDEC_H265;
+extern const CodecDescriptor CODEC_NVDEC_VP9;
+extern const CodecDescriptor CODEC_NVDEC_AV1;
+extern const CodecDescriptor CODEC_NVENC_H264;
+extern const CodecDescriptor CODEC_NVENC_H265;
+extern const CodecDescriptor CODEC_NVENC_AV1;
+
 // Audio - MediaCodec
 extern const CodecDescriptor CODEC_MEDIACODEC_AAC;
 

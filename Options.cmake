@@ -47,5 +47,6 @@ option(OPENMEDIA_DX11_VIDEO "DirectX11 Video" ${WIN32})
 option(OPENMEDIA_DX12_VIDEO "DirectX12 Video" ${WIN32})
 option(OPENMEDIA_VAAPI "VA-API Video" ${LINUX})
 option(OPENMEDIA_AMF "AMD AMF" ${WIN32}) # Also available on Linux, but everyone uses opensource driver
+option(OPENMEDIA_NVIDIA "NVIDIA Video (NVENC/NVDEC)" ON)
 
 option(OPENMEDIA_EXAMPLES "Enable examples" OFF)
