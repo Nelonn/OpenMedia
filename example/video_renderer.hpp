@@ -1,12 +1,14 @@
 #pragma once
 
 #include "av_clock.hpp"
-#include <openmedia/hw_vulkan.h>
 #include "frame_queue.hpp"
 
 #include <SDL3/SDL.h>
 #include <mutex>
-#include <vulkan/vulkan.h>
+
+#ifndef __APPLE__
+#include <openmedia/hw_vulkan.h>
+#endif
 
 // Helper: check if a format is high bit depth (10/12/16)
 static inline auto isHighBitDepth(uint8_t bits) -> bool {

@@ -244,8 +244,10 @@ public:
         SDL_Log("[Vulkan Validation] %s", pCallbackData->pMessage);
         return VK_FALSE;
     }
+#endif
 
     auto enableVulkan() -> bool {
+#ifndef __APPLE__
         releaseHardwareDevice();
         if (!SDL_Vulkan_LoadLibrary(nullptr)) {
             SDL_Log("[Vulkan] SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError());
@@ -451,11 +453,11 @@ public:
         
         hw_device_ = HWDevice{HWDeviceType::VULKAN, ctx};
         return true;
-    }
 #endif
+    }
 
-#ifdef _WIN32
     auto enableDX11() -> bool {
+#ifdef _WIN32
         releaseHardwareDevice();
         OMDX11Init init = {};
         init.adapter_index = -1;
@@ -467,9 +469,11 @@ public:
         hw_device_ = HWDevice{HWDeviceType::DX11, ctx};
         SDL_Log("[DX11] Video acceleration enabled.");
         return true;
+#endif
     }
 
     auto enableDX12() -> bool {
+#ifdef _WIN32
         releaseHardwareDevice();
         OMDX12Init init = {};
         init.adapter_index = -1;
@@ -481,8 +485,8 @@ public:
         hw_device_ = HWDevice{HWDeviceType::DX12, ctx};
         SDL_Log("[DX12] Video acceleration enabled.");
         return true;
-    }
 #endif
+    }
 
     // -----------------------------------------------------------------------
     // Lifecycle
