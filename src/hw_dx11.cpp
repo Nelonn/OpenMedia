@@ -77,7 +77,7 @@ auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
 
     hr = D3D11CreateDevice(
         adapter,
-        D3D_DRIVER_TYPE_UNKNOWN,
+        adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
         nullptr,
         create_device_flags,
         feature_levels,
@@ -179,6 +179,9 @@ OMDX11Picture* HWD3D11Context_createPicture(OMDX11Context* context) {
 
 void HWD3D11Picture_delete(OMDX11Picture* picture) {
   if (!picture) return;
+  if (picture->decoder_output) picture->decoder_output->Release();
+  if (picture->shader_resource) picture->shader_resource->Release();
+  if (picture->texture) picture->texture->Release();
   picture->~OMDX11Picture();
   free(picture);
 }

@@ -15,12 +15,16 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <openmedia/audio.hpp>
 #include <openmedia/codec_api.hpp>
 #include <openmedia/codec_registry.hpp>
 #include <openmedia/format_api.hpp>
 #include <openmedia/format_detector.hpp>
 #include <openmedia/format_registry.hpp>
+#include <openmedia/hw_dx11.h>
+#include <openmedia/hw_dx12.h>
+#include <openmedia/hw_vulkan.h>
 #include <openmedia/io.hpp>
 #include <openmedia/video.hpp>
 #include <queue>
@@ -213,11 +217,18 @@ public:
         registerBuiltInFormats(&format_registry_);
     }
 
-    ~MediaPlayer() { stop(); }
+    ~MediaPlayer() {
+        stop();
+        releaseHardwareDevice();
+    }
 
     void setRenderer(SDL_Renderer* r) {
         renderer_ = r;
         video_renderer_.setRenderer(r);
+    }
+
+    void setRequestedVideoDecoder(std::string name) {
+        requested_video_decoder_ = std::move(name);
     }
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
@@ -230,16 +241,19 @@ public:
     }
 
     auto enableVulkan() -> bool {
+        releaseHardwareDevice();
         if (!SDL_Vulkan_LoadLibrary(nullptr)) {
             SDL_Log("[Vulkan] SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError());
             return false;
         }
+        vulkan_library_loaded_ = true;
 
         auto vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
         if (!vkGetInstanceProcAddr) {
             SDL_Log("[Vulkan] SDL_Vulkan_GetVkGetInstanceProcAddr returned nullptr");
             return false;
         }
+        vulkan_get_instance_proc_addr_ = vkGetInstanceProcAddr;
 
         auto vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(vkGetInstanceProcAddr(nullptr, "vkCreateInstance"));
         if (!vkCreateInstance) {
@@ -283,6 +297,7 @@ public:
             SDL_Log("[Vulkan] vkCreateInstance failed");
             return false;
         }
+        vulkan_instance_ = instance;
 
         // Setup Debug Messenger if layer enabled
         if (!layers.empty()) {
@@ -293,8 +308,7 @@ public:
                 debug_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
                 debug_info.pfnUserCallback = debugCallback;
                 
-                VkDebugUtilsMessengerEXT messenger;
-                vkCreateDebugUtilsMessengerEXT(instance, &debug_info, nullptr, &messenger);
+                vkCreateDebugUtilsMessengerEXT(instance, &debug_info, nullptr, &vulkan_debug_messenger_);
             }
         }
         
@@ -413,6 +427,7 @@ public:
             SDL_Log("[Vulkan] vkCreateDevice failed. Extensions might be unsupported?");
             return false;
         }
+        vulkan_device_ = device;
         
         OMVulkanInit om_init = {};
         om_init.instance = instance;
@@ -429,7 +444,35 @@ public:
             return false;
         }
         
-        vulkan_device_ = HWDevice{HWDeviceType::VULKAN, ctx};
+        hw_device_ = HWDevice{HWDeviceType::VULKAN, ctx};
+        return true;
+    }
+
+    auto enableDX11() -> bool {
+        releaseHardwareDevice();
+        OMDX11Init init = {};
+        init.adapter_index = -1;
+        auto* ctx = HWD3D11Context_create(init);
+        if (!ctx) {
+            SDL_Log("[DX11] HWD3D11Context_create failed");
+            return false;
+        }
+        hw_device_ = HWDevice{HWDeviceType::DX11, ctx};
+        SDL_Log("[DX11] Video acceleration enabled.");
+        return true;
+    }
+
+    auto enableDX12() -> bool {
+        releaseHardwareDevice();
+        OMDX12Init init = {};
+        init.adapter_index = -1;
+        auto* ctx = HWD3D12Context_create(init);
+        if (!ctx) {
+            SDL_Log("[DX12] HWD3D12Context_create failed");
+            return false;
+        }
+        hw_device_ = HWDevice{HWDeviceType::DX12, ctx};
+        SDL_Log("[DX12] Video acceleration enabled.");
         return true;
     }
 
@@ -590,7 +633,13 @@ private:
     FormatDetector format_detector_;
     CodecRegistry  codec_registry_;
     FormatRegistry format_registry_;
-    std::optional<HWDevice> vulkan_device_;
+    std::optional<HWDevice> hw_device_;
+    std::string requested_video_decoder_;
+    bool vulkan_library_loaded_ = false;
+    PFN_vkGetInstanceProcAddr vulkan_get_instance_proc_addr_ = nullptr;
+    VkInstance vulkan_instance_ = VK_NULL_HANDLE;
+    VkDevice vulkan_device_ = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT vulkan_debug_messenger_ = VK_NULL_HANDLE;
 
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<Decoder> audio_decoder_;
@@ -652,6 +701,67 @@ private:
 
     static constexpr auto kSeekSettle = std::chrono::milliseconds(100);
 
+    static auto decoderMatchesHardware(const CodecDescriptor& descriptor,
+                                       HWDeviceType type) -> bool {
+        const std::string_view name = descriptor.name;
+        switch (type) {
+            case HWDeviceType::VULKAN: return name.starts_with("vulkan_");
+            case HWDeviceType::DX11:   return name.starts_with("dx11_");
+            case HWDeviceType::DX12:   return name.starts_with("dx12_");
+            default:                   return false;
+        }
+    }
+
+    void releaseHardwareDevice() {
+        if (hw_device_) {
+            switch (hw_device_->type) {
+                case HWDeviceType::VULKAN:
+                    HWVulkanContext_delete(static_cast<OMVulkanContext*>(hw_device_->context));
+                    break;
+                case HWDeviceType::DX11:
+                    HWD3D11Context_delete(static_cast<OMDX11Context*>(hw_device_->context));
+                    break;
+                case HWDeviceType::DX12:
+                    HWD3D12Context_delete(static_cast<OMDX12Context*>(hw_device_->context));
+                    break;
+                default:
+                    break;
+            }
+            hw_device_.reset();
+        }
+
+        if (vulkan_device_ != VK_NULL_HANDLE && vulkan_get_instance_proc_addr_) {
+            auto vkDeviceWaitIdle = reinterpret_cast<PFN_vkDeviceWaitIdle>(
+                vulkan_get_instance_proc_addr_(vulkan_instance_, "vkDeviceWaitIdle"));
+            auto vkDestroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(
+                vulkan_get_instance_proc_addr_(vulkan_instance_, "vkDestroyDevice"));
+            if (vkDeviceWaitIdle) vkDeviceWaitIdle(vulkan_device_);
+            if (vkDestroyDevice) vkDestroyDevice(vulkan_device_, nullptr);
+            vulkan_device_ = VK_NULL_HANDLE;
+        }
+
+        if (vulkan_debug_messenger_ != VK_NULL_HANDLE && vulkan_get_instance_proc_addr_) {
+            auto vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+                vulkan_get_instance_proc_addr_(vulkan_instance_, "vkDestroyDebugUtilsMessengerEXT"));
+            if (vkDestroyDebugUtilsMessengerEXT)
+                vkDestroyDebugUtilsMessengerEXT(vulkan_instance_, vulkan_debug_messenger_, nullptr);
+            vulkan_debug_messenger_ = VK_NULL_HANDLE;
+        }
+
+        if (vulkan_instance_ != VK_NULL_HANDLE && vulkan_get_instance_proc_addr_) {
+            auto vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+                vulkan_get_instance_proc_addr_(vulkan_instance_, "vkDestroyInstance"));
+            if (vkDestroyInstance) vkDestroyInstance(vulkan_instance_, nullptr);
+            vulkan_instance_ = VK_NULL_HANDLE;
+        }
+
+        vulkan_get_instance_proc_addr_ = nullptr;
+        if (vulkan_library_loaded_) {
+            SDL_Vulkan_UnloadLibrary();
+            vulkan_library_loaded_ = false;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Setup
     // -----------------------------------------------------------------------
@@ -699,12 +809,20 @@ private:
         opts.format    = track.format;
         opts.time_base = track.time_base;
         opts.extradata = track.extradata;
-        if (track.format.type == OM_MEDIA_VIDEO && vulkan_device_) {
-            opts.hw_device = *vulkan_device_;
+        if (track.format.type == OM_MEDIA_VIDEO && hw_device_) {
+            opts.hw_device = *hw_device_;
         }
 
         for (const auto* descriptor : descriptors) {
             if (!descriptor->isDecoding()) continue;
+            if (track.format.type == OM_MEDIA_VIDEO) {
+                if (!requested_video_decoder_.empty() && descriptor->name != requested_video_decoder_) {
+                    continue;
+                }
+                if (requested_video_decoder_.empty() && hw_device_ && !decoderMatchesHardware(*descriptor, hw_device_->type)) {
+                    continue;
+                }
+            }
             
             dec = descriptor->decoder_factory();
             if (!dec) continue;
@@ -740,7 +858,12 @@ private:
             dec.reset();
         }
 
-        SDL_Log("[Player] All decoders for codec %d failed", int(track.format.codec_id));
+        if (track.format.type == OM_MEDIA_VIDEO && !requested_video_decoder_.empty()) {
+            SDL_Log("[Player] Requested decoder %s for codec %d failed or was not found",
+                    requested_video_decoder_.c_str(), int(track.format.codec_id));
+        } else {
+            SDL_Log("[Player] All decoders for codec %d failed", int(track.format.codec_id));
+        }
         return nullptr;
     }
 
@@ -934,10 +1057,6 @@ private:
     // the queue and is woken the instant a slot opens OR abort() is called.
     // There is no spin, no 2 ms sleep, and the thread exits cleanly on stop.
     // -----------------------------------------------------------------------
-
-#include <openmedia/hw_vulkan.h>
-
-// ... inside MediaPlayer ...
     void videoDecodeLoop() {
         while (!stop_requested_) {
             auto maybe_pkt = video_packet_queue_.blockingPop();
@@ -974,11 +1093,14 @@ private:
                     vf.y_plane.resize(vf.y_stride * pic.height);
                     vf.u_plane.resize(vf.u_stride * ((pic.height + 1) / 2));
 
-                    HWVulkanContext_copyToHost(static_cast<OMVulkanContext*>(vulkan_device_->context),
-                                                  vhw.picture,
-                                                  vf.y_plane.data(), vf.y_stride,
-                                                  vf.u_plane.data(), vf.u_stride,
-                                                  pic.width, pic.height);
+                    if (!hw_device_ || hw_device_->type != HWDeviceType::VULKAN)
+                        continue;
+
+                    HWVulkanContext_copyToHost(static_cast<OMVulkanContext*>(hw_device_->context),
+                                               vhw.picture,
+                                               vf.y_plane.data(), vf.y_stride,
+                                               vf.u_plane.data(), vf.u_stride,
+                                               pic.width, pic.height);
                   }
                 } else {                  vf.y_stride = pic.planes.getLinesize(0);
                   vf.u_stride = pic.planes.getLinesize(1);

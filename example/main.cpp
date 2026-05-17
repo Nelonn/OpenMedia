@@ -4,7 +4,25 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
-int main(int /*argc*/, char* /*argv*/[]) {
+#include <string>
+#include <string_view>
+
+namespace {
+
+auto isVideoDecoderArg(std::string_view arg) -> bool {
+  return arg == "vulkan_h264" || arg == "dx11_h264" || arg == "dx12_h264";
+}
+
+auto enableRequestedBackend(MediaPlayer& player, std::string_view decoder) -> bool {
+  if (decoder.starts_with("dx11_")) return player.enableDX11();
+  if (decoder.starts_with("dx12_")) return player.enableDX12();
+  if (decoder.starts_with("vulkan_")) return player.enableVulkan();
+  return player.enableVulkan();
+}
+
+} // namespace
+
+int main(int argc, char* argv[]) {
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
 
   SDL_Window* window = SDL_CreateWindow(
@@ -30,13 +48,35 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
   MediaPlayer player;
   player.setRenderer(renderer);
-  if (player.enableVulkan()) {
-    SDL_Log("[Player] Vulkan Video acceleration enabled.");
+
+  std::string requested_decoder;
+  std::string initial_file;
+  int path_arg = 1;
+  if (argc > 1 && isVideoDecoderArg(argv[1])) {
+    requested_decoder = argv[1];
+    player.setRequestedVideoDecoder(requested_decoder);
+    path_arg = 2;
+  }
+  if (argc > path_arg) {
+    initial_file = argv[path_arg];
+  }
+
+  if (enableRequestedBackend(player, requested_decoder)) {
+    if (!requested_decoder.empty())
+      SDL_Log("[Player] %s acceleration enabled.", requested_decoder.c_str());
+    else
+      SDL_Log("[Player] Vulkan Video acceleration enabled.");
   } else {
-    SDL_Log("[Player] Vulkan Video acceleration NOT available.");
+    if (!requested_decoder.empty())
+      SDL_Log("[Player] %s acceleration NOT available.", requested_decoder.c_str());
+    else
+      SDL_Log("[Player] Vulkan Video acceleration NOT available.");
   }
 
   PlayerUI ui(player);
+  if (!initial_file.empty()) {
+    player.play(initial_file);
+  }
 
   bool running = true;
   while (running) {

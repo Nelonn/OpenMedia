@@ -9,6 +9,7 @@ struct OMDX12Context {
   ComPtr<ID3D12Device> device = nullptr;
   ComPtr<ID3D12CommandQueue> command_queue = nullptr;
   ComPtr<ID3D12VideoDevice> video_device = nullptr;
+  ComPtr<ID3D12CommandAllocator> decode_command_allocator = nullptr;
   ComPtr<ID3D12VideoDecodeCommandList> decode_command_list = nullptr;
   ComPtr<ID3D12Fence> fence = nullptr;
   HANDLE fence_event = nullptr;

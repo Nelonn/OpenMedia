@@ -18,6 +18,10 @@ OMDX12Context::~OMDX12Context() {
     decode_command_list->Release();
     decode_command_list = nullptr;
   }
+  if (decode_command_allocator) {
+    decode_command_allocator->Release();
+    decode_command_allocator = nullptr;
+  }
   if (video_device) {
     video_device->Release();
     video_device = nullptr;
@@ -48,6 +52,11 @@ auto OMDX12Context::initialize(const OMDX12Init& init) -> bool {
     if (init.command_queue) {
       command_queue = init.command_queue;
       command_queue->AddRef();
+    }
+    if (!command_queue) {
+      D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+      queue_desc.Type = D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE;
+      if (FAILED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue)))) return false;
     }
   } else {
     owns_device = true;
@@ -102,7 +111,18 @@ auto OMDX12Context::initialize(const OMDX12Init& init) -> bool {
 
   hr = device->CreateCommandAllocator(
       D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE,
+      IID_PPV_ARGS(&decode_command_allocator));
+  if (FAILED(hr)) {
+    return false;
+  }
+
+  hr = device->CreateCommandList(
+      0,
+      D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE,
+      decode_command_allocator.Get(),
+      nullptr,
       IID_PPV_ARGS(&decode_command_list));
+  if (SUCCEEDED(hr)) decode_command_list->Close();
   if (FAILED(hr)) {
     return false;
   }
@@ -220,6 +240,14 @@ OMDX12Picture* HWD3D12Context_createPicture(OMDX12Context* context) {
 
 void HWD3D12Picture_delete(OMDX12Picture* picture) {
   if (!picture) return;
+  if (picture->texture) picture->texture->Release();
+  if (picture->reference_frames.ppTexture2Ds) {
+    for (UINT i = 0; i < picture->reference_frames.NumTexture2Ds; ++i) {
+      if (picture->reference_frames.ppTexture2Ds[i]) picture->reference_frames.ppTexture2Ds[i]->Release();
+    }
+    free(picture->reference_frames.ppTexture2Ds);
+  }
+  if (picture->reference_frames.pSubresources) free((void*)picture->reference_frames.pSubresources);
   picture->~OMDX12Picture();
   free(picture);
 }
