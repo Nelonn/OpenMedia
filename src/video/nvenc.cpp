@@ -1,6 +1,8 @@
 #include <openmedia/hw_cuda.h>
+#ifdef _WIN32
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
+#endif
 #include <openmedia/hw_vulkan.h>
 #include <codecs.hpp>
 #include <mutex>
@@ -167,9 +169,11 @@ public:
       if (hw_pic->getType() == HWDeviceType::CUDA) {
         auto cuda_pic = std::static_pointer_cast<CudaHardwarePicture>(hw_pic);
         return encodeCuda(cuda_pic, frame.pts, picture);
+#ifdef _WIN32
       } else if (hw_pic->getType() == HWDeviceType::DX11) {
         auto dx11_pic = std::static_pointer_cast<DX11HardwarePicture>(hw_pic);
         return encodeDX11(dx11_pic, frame.pts, picture);
+#endif
       }
     }
 
