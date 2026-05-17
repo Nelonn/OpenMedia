@@ -48,4 +48,4 @@ option(OPENMEDIA_DX12_VIDEO "DirectX12 Video" ${WIN32})
 option(OPENMEDIA_VAAPI "VA-API Video" ${LINUX})
 option(OPENMEDIA_AMF "AMD AMF" ${WIN32}) # Also available on Linux, but everyone uses opensource driver
 
-option(OPENMEDIA_EXAMPLE_PLAYER "Enable example player" OFF)
+option(OPENMEDIA_EXAMPLES "Enable examples" OFF)

@@ -312,7 +312,7 @@ public:
   auto getType() const noexcept -> HWDeviceType { return type_; }
 };
 
-using PictureBuffer = std::variant<HostPicture, HardwarePicture>;
+using PictureBuffer = std::variant<HostPicture, std::shared_ptr<HardwarePicture>>;
 
 struct OPENMEDIA_ABI VideoFormat {
   OMPixelFormat format;

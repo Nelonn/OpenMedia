@@ -63,6 +63,12 @@ extern const CodecDescriptor CODEC_AMF_H265;
 extern const CodecDescriptor CODEC_AMF_AV1;
 extern const CodecDescriptor CODEC_AMF_VP9;
 
+// Video - Vulkan
+extern const CodecDescriptor CODEC_VULKAN_H264;
+extern const CodecDescriptor CODEC_VULKAN_H265;
+extern const CodecDescriptor CODEC_VULKAN_AV1;
+extern const CodecDescriptor CODEC_VULKAN_VP9;
+
 // Video - MediaCodec
 extern const CodecDescriptor CODEC_MEDIACODEC_H264;
 extern const CodecDescriptor CODEC_MEDIACODEC_H265;

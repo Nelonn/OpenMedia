@@ -5,15 +5,12 @@
 #include <components/VideoEncoderVCE.h>
 #include <core/Buffer.h>
 #include <core/Context.h>
-#include <core/D3D12AMF.h>
 #include <core/Factory.h>
 #include <core/Surface.h>
-#include <core/VulkanAMF.h>
 #include <d3d11.h>
-#include <d3d12.h>
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
-#include <vulkan/vulkan.h>
+#include <openmedia/hw_vulkan.h>
 #include <windows.h>
 #include <algorithm>
 #include <codecs.hpp>
@@ -22,9 +19,11 @@
 #include <memory>
 #include <openmedia/video.hpp>
 #include <vector>
-#include <hw_dx11_priv.hpp>
-#include <hw_dx12_priv.hpp>
-#include <hw_vulkan_priv.hpp>
+
+#include "dx_h264.hpp"
+
+#include <core/D3D12AMF.h>
+#include <core/VulkanAMF.h>
 
 namespace openmedia {
 
@@ -136,26 +135,6 @@ static auto get_om_format(amf::AMF_SURFACE_FORMAT fmt) -> OMPixelFormat {
   }
 }
 
-static auto create_surface_from_vulkan(amf::AMFContext1* ctx1, VkImage image, VkFormat format,
-                                       int32_t width, int32_t height) -> amf::AMFSurfacePtr {
-  if (!ctx1) return nullptr;
-
-  amf::AMFSurfacePtr surface;
-  amf::AMFVulkanSurface vk_surf = {};
-  vk_surf.cbSizeof = sizeof(amf::AMFVulkanSurface);
-  vk_surf.hImage = image;
-  vk_surf.iWidth = width;
-  vk_surf.iHeight = height;
-  vk_surf.eFormat = format;
-
-  AMF_RESULT res = ctx1->CreateSurfaceFromVulkanNative(&vk_surf, &surface, nullptr);
-  if (res != AMF_OK) {
-    return nullptr;
-  }
-
-  return surface;
-}
-
 static auto create_surface_from_dx11(amf::AMFContext* ctx, ID3D11Texture2D* texture) -> amf::AMFSurfacePtr {
   amf::AMFSurfacePtr surface;
   AMF_RESULT res = ctx->CreateSurfaceFromDX11Native(texture, &surface, nullptr);
@@ -165,35 +144,13 @@ static auto create_surface_from_dx11(amf::AMFContext* ctx, ID3D11Texture2D* text
   return surface;
 }
 
-static auto create_surface_from_dx12(amf::AMFContext2* ctx2, ID3D12Resource* resource) -> amf::AMFSurfacePtr {
-  if (!ctx2) return nullptr;
-
-  amf::AMFSurfacePtr surface;
-  AMF_RESULT res = ctx2->CreateSurfaceFromDX12Native(resource, &surface, nullptr);
-  if (res != AMF_OK) {
-    return nullptr;
-  }
-  return surface;
-}
-
-static auto get_amf_vulkan_extensions() -> std::vector<const char*> {
-  // AMF typically requires these Vulkan extensions:
-  // - VK_KHR_external_memory_capabilities
-  // - VK_KHR_external_semaphore_capabilities
-  // - VK_KHR_get_physical_device_properties2
-  return {
-      VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
-      VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
-      VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
-  };
-}
-
 struct AMFContextInitResult {
   AMF_RESULT status = AMF_FAIL;
   HWDeviceType device_type = HWDeviceType::NONE;
   amf::AMFContextPtr context;
   amf::AMFContext1Ptr context1;
   amf::AMFContext2Ptr context2;
+  OMDX11Context* owned_dx11_context = nullptr;
 };
 
 static auto initAMFContext(const std::optional<HWDevice>& hw_device)
@@ -208,6 +165,8 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
     return result;
   }
 
+  result.context = ctx;
+
   amf::AMFContext1Ptr ctx1;
   amf::AMFContext2Ptr ctx2;
   ctx->QueryInterface(amf::AMFContext1::IID(), reinterpret_cast<void**>(&ctx1));
@@ -219,10 +178,37 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
     }
   }
 
+  auto initDefaultDX11 = [&]() -> AMF_RESULT {
+    OMDX11Init init = {};
+    init.adapter_index = -1;
+    OMDX11Context* dx11_ctx = HWD3D11Context_create(init);
+    if (!dx11_ctx) {
+      log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "Failed to create default D3D11 context for AMF");
+      return AMF_DIRECTX_FAILED;
+    }
+
+    ID3D11Device* device = HWD3D11Context_getDevice(dx11_ctx);
+    if (!device) {
+      HWD3D11Context_delete(dx11_ctx);
+      return AMF_DIRECTX_FAILED;
+    }
+
+    AMF_RESULT init_res = result.context->InitDX11(device);
+    if (init_res != AMF_OK) {
+      HWD3D11Context_delete(dx11_ctx);
+      return init_res;
+    }
+
+    result.owned_dx11_context = dx11_ctx;
+    result.device_type = HWDeviceType::DX11;
+    log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with default D3D11 device");
+    return AMF_OK;
+  };
+
   if (hw_device) {
     switch (hw_device->type) {
       case HWDeviceType::DX11: {
-        ID3D11Device* d3d11_dev = static_cast<OMDX11Context*>(hw_device->context)->device.Get();
+        ID3D11Device* d3d11_dev = HWD3D11Context_getDevice(static_cast<OMDX11Context*>(hw_device->context));
         res = result.context->InitDX11(d3d11_dev);
         if (res == AMF_OK) {
           result.device_type = HWDeviceType::DX11;
@@ -231,45 +217,57 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
         break;
       }
       case HWDeviceType::DX12: {
-        if (!result.context2) {
-          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMFContext2 not available for DX12");
-          res = AMF_FAIL;
+        if (result.context2) {
+          ID3D12CommandQueue* queue = HWD3D12Context_getCommandQueue(static_cast<OMDX12Context*>(hw_device->context));
+          res = result.context2->InitDX12(queue);
+          if (res == AMF_OK) {
+            result.device_type = HWDeviceType::DX12;
+            log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D12 device");
+          }
         } else {
-          ID3D12Device* d3d12_dev = static_cast<OMDX12Context*>(hw_device->context)->device.Get();
-          res = result.context2->InitDX12(d3d12_dev);
-        }
-        if (res == AMF_OK) {
-          result.device_type = HWDeviceType::DX12;
-          log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D12 device");
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMF DX12 initialization failed: Context2 interface not available");
+          res = AMF_NOT_SUPPORTED;
         }
         break;
       }
       case HWDeviceType::VULKAN: {
-        if (!result.context1) {
-          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMFContext1 not available for Vulkan");
-          res = AMF_FAIL;
+        if (result.context1) {
+          auto* vk_ctx = static_cast<OMVulkanContext*>(hw_device->context);
+          amf::AMFVulkanDevice amf_vk_dev = {};
+          amf_vk_dev.cbSizeof = sizeof(amf_vk_dev);
+          amf_vk_dev.hInstance = HWVulkanContext_getInstance(vk_ctx);
+          amf_vk_dev.hPhysicalDevice = HWVulkanContext_getPhysicalDevice(vk_ctx);
+          amf_vk_dev.hDevice = HWVulkanContext_getDevice(vk_ctx);
+
+          res = result.context1->InitVulkan(&amf_vk_dev);
+          if (res == AMF_OK) {
+            result.device_type = HWDeviceType::VULKAN;
+            log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with Vulkan device");
+          }
         } else {
-          VkDevice vk_dev = static_cast<OMVulkanContext*>(hw_device->context)->vk_device;
-          res = result.context1->InitVulkan(vk_dev);
-        }
-        if (res == AMF_OK) {
-          result.device_type = HWDeviceType::VULKAN;
-          log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with Vulkan device");
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMF Vulkan initialization failed: Context1 interface not available");
+          res = AMF_NOT_SUPPORTED;
         }
         break;
       }
-      default:
+      case HWDeviceType::NONE: {
+        // No graphics device initialization, use host memory
         result.device_type = HWDeviceType::NONE;
+        res = AMF_OK;
+        log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with host memory (no graphics device)");
+        break;
+      }
+      default:
+        res = initDefaultDX11();
         break;
     }
 
     if (res != AMF_OK && hw_device->type != HWDeviceType::NONE) {
       log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING, "Failed to initialize hardware backend, falling back to host memory");
-      result.device_type = HWDeviceType::NONE;
-      res = AMF_OK; // Reset to OK since we're falling back gracefully
+      res = initDefaultDX11();
     }
   } else {
-    result.device_type = HWDeviceType::NONE;
+    res = initDefaultDX11();
   }
 
   result.status = res;
@@ -299,6 +297,7 @@ class AMFDecoder final : public Decoder {
   amf::AMFContext1Ptr amf_context1_; // Vulkan
   amf::AMFContext2Ptr amf_context2_; // DX12
   amf::AMFComponentPtr decoder_;
+  OMDX11Context* owned_dx11_context_ = nullptr;
   bool initialized_ = false;
   VideoFormat output_format_ = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -307,6 +306,7 @@ class AMFDecoder final : public Decoder {
   std::vector<uint8_t> extradata_;
   amf::AMF_SURFACE_FORMAT output_format_amf_ = amf::AMF_SURFACE_NV12;
   HWDeviceType device_type_ = HWDeviceType::NONE;
+  dx_h264::State h264_;
 
   std::vector<std::pair<int64_t, std::shared_ptr<amf::AMFSurface>>> pending_surfaces_;
 
@@ -314,19 +314,16 @@ public:
   AMFDecoder() {}
 
   ~AMFDecoder() override {
-    flush();
+    close();
   }
 
   auto configure(const DecoderOptions& options) -> OMError override {
+    close();
     codec_id_ = options.format.codec_id;
 
     if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 &&
         codec_id_ != OM_CODEC_VP9 && codec_id_ != OM_CODEC_AV1) {
       log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING, "AMF decoder only supports H264, H265, VP9, and AV1");
-      return OM_CODEC_NOT_SUPPORTED;
-    }
-
-    if (!options.hw_device.has_value()) {
       return OM_CODEC_NOT_SUPPORTED;
     }
 
@@ -339,6 +336,7 @@ public:
 
     if (!options.extradata.empty()) {
       extradata_.assign(options.extradata.begin(), options.extradata.end());
+      if (codec_id_ == OM_CODEC_H264) h264_.parseExtradata(options.extradata);
     }
 
     if (!load_amf_runtime()) {
@@ -354,6 +352,7 @@ public:
     amf_context_ = std::move(init_result.context);
     amf_context1_ = std::move(init_result.context1);
     amf_context2_ = std::move(init_result.context2);
+    owned_dx11_context_ = init_result.owned_dx11_context;
     device_type_ = init_result.device_type;
 
     const wchar_t* decoder_id = get_amf_decoder_id(codec_id_);
@@ -367,6 +366,7 @@ public:
       log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to create AMF decoder component");
       return OM_CODEC_HWACCEL_FAILED;
     }
+    decoder_ = std::move(comp);
 
     // Set extradata if available (for H264/H265 Annex B or AVCC)
     if (!extradata_.empty()) {
@@ -378,11 +378,12 @@ public:
       }
     }
 
-    decoder_->SetProperty(AMF_VIDEO_DECODER_REORDER_MODE, static_cast<amf_int64>(AMF_VIDEO_DECODER_MODE_LOW_LATENCY));
+    decoder_->SetProperty(AMF_VIDEO_DECODER_REORDER_MODE, static_cast<amf_int64>(AMF_VIDEO_DECODER_MODE_REGULAR));
 
     decoder_->SetProperty(AMF_TIMESTAMP_MODE, static_cast<amf_int64>(AMF_TS_PRESENTATION));
 
-    decoder_->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, false);
+    decoder_->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, true);
+    decoder_->SetProperty(AMF_VIDEO_DECODER_SURFACE_CPU, true);
 
     output_format_amf_ = amf::AMF_SURFACE_NV12;
     res = decoder_->Init(output_format_amf_, width_, height_);
@@ -421,9 +422,16 @@ public:
     }
 
     AMF_RESULT res = submitInput(packet);
+    if (res == AMF_INPUT_FULL) {
+      auto out = processOutput(frames);
+      if (out.isErr()) return out;
+      frames = std::move(out).unwrap();
+      res = submitInput(packet);
+    }
+
     if (res != AMF_OK) {
       if (res == AMF_NEED_MORE_INPUT) {
-        return Ok(std::move(frames));
+        return processOutput(frames);
       }
       return Err(OM_CODEC_DECODE_FAILED);
     }
@@ -439,17 +447,43 @@ public:
   }
 
 private:
+  void close() {
+    if (decoder_) {
+      decoder_->Terminate();
+      decoder_ = nullptr;
+    }
+    if (amf_context_) {
+      amf_context_->Terminate();
+    }
+    amf_context2_ = nullptr;
+    amf_context1_ = nullptr;
+    amf_context_ = nullptr;
+    if (owned_dx11_context_) {
+      HWD3D11Context_delete(owned_dx11_context_);
+      owned_dx11_context_ = nullptr;
+    }
+    initialized_ = false;
+    pending_surfaces_.clear();
+  }
+
   auto submitInput(const Packet& packet) -> AMF_RESULT {
     if (!decoder_) return AMF_FAIL;
 
     amf::AMFBufferPtr buf;
-    AMF_RESULT res = amf_context_->AllocBuffer(amf::AMF_MEMORY_HOST, packet.bytes.size(), &buf);
+    std::span<const uint8_t> bytes = packet.bytes;
+    std::vector<uint8_t> annexb;
+    if (codec_id_ == OM_CODEC_H264 && h264_.nal_length_size > 0 && !dx_h264::isAnnexB(bytes)) {
+      annexb = h264_.convertAvcc(bytes);
+      if (!annexb.empty()) bytes = annexb;
+    }
+
+    AMF_RESULT res = amf_context_->AllocBuffer(amf::AMF_MEMORY_HOST, bytes.size(), &buf);
     if (res != AMF_OK) return res;
 
-    memcpy(buf->GetNative(), packet.bytes.data(), packet.bytes.size());
-    buf->SetSize(packet.bytes.size());
+    memcpy(buf->GetNative(), bytes.data(), bytes.size());
+    buf->SetSize(bytes.size());
 
-    buf->SetProperty(L"PresentationTimeStamp", packet.pts);
+    buf->SetPts(packet.pts);
 
     if (packet.is_keyframe) {
       buf->SetProperty(L"IsKeyFrame", true);
@@ -461,80 +495,71 @@ private:
   auto processOutput(std::vector<Frame>& frames) -> Result<std::vector<Frame>, OMError> {
     if (!decoder_) return Err(OM_COMMON_NOT_INITIALIZED);
 
-    amf::AMFDataPtr data;
-    AMF_RESULT res = decoder_->QueryOutput(&data);
+    while (true) {
+      amf::AMFDataPtr data;
+      AMF_RESULT res = decoder_->QueryOutput(&data);
 
-    if (res == AMF_EOF) {
-      // End of stream
-      return Ok(std::move(frames));
-    }
-
-    if (res == AMF_INPUT_FULL) {
-      // Need more input
-      return Ok(std::move(frames));
-    }
-
-    if (res != AMF_OK || !data) {
-      return Err(OM_CODEC_DECODE_FAILED);
-    }
-
-    amf::AMFSurfacePtr surface;
-    res = data->QueryInterface(amf::AMFSurface::IID(), reinterpret_cast<void**>(&surface));
-    if (res != AMF_OK || !surface) {
-      return Err(OM_CODEC_DECODE_FAILED);
-    }
-
-    int64_t pts = 0;
-    data->GetProperty(L"PresentationTimeStamp", &pts);
-
-    Frame frame = {};
-    frame.pts = pts;
-    frame.dts = pts;
-
-    Picture* pic = nullptr;
-    if (std::holds_alternative<Picture>(frame.data)) {
-      pic = &std::get<Picture>(frame.data);
-    } else {
-      frame.data.emplace<Picture>();
-      pic = &std::get<Picture>(frame.data);
-    }
-
-    auto& host_pic = pic->buffer.emplace<HostPicture>();
-
-    amf::AMFSurfacePtr host_surface;
-    amf::AMFDataPtr data_ptr;
-    res = surface->Duplicate(amf::AMF_MEMORY_HOST, &data_ptr);
-    if (res == AMF_OK && data_ptr) {
-      res = data_ptr->QueryInterface(amf::AMFSurface::IID(), reinterpret_cast<void**>(&host_surface));
-    }
-
-    if (res == AMF_OK && host_surface) {
-      size_t total_size = 0;
-
-      for (size_t i = 0; i < host_surface->GetPlanesCount(); i++) {
-        total_size += host_surface->GetPlaneAt(i)->GetHPitch() * host_surface->GetPlaneAt(i)->GetHeight();
+      if (res == AMF_EOF || res == AMF_REPEAT || res == AMF_NEED_MORE_INPUT || res == AMF_INPUT_FULL) {
+        return Ok(std::move(frames));
       }
 
-      host_pic.buffer = BufferPool::getInstance().get(total_size);
-      uint8_t* dst = host_pic.buffer->bytes().data();
-      size_t offset = 0;
+      if (res == AMF_RESOLUTION_CHANGED || res == AMF_RESOLUTION_UPDATED) {
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
 
-      for (size_t i = 0; i < host_surface->GetPlanesCount(); i++) {
+      if (res != AMF_OK) {
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+
+      if (!data) return Ok(std::move(frames));
+
+      amf::AMFSurfacePtr surface;
+      res = data->QueryInterface(amf::AMFSurface::IID(), reinterpret_cast<void**>(&surface));
+      if (res != AMF_OK || !surface) {
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+
+      amf::AMFSurfacePtr host_surface;
+      amf::AMFDataPtr data_ptr;
+      res = surface->Duplicate(amf::AMF_MEMORY_HOST, &data_ptr);
+      if (res == AMF_OK && data_ptr) {
+        res = data_ptr->QueryInterface(amf::AMFSurface::IID(), reinterpret_cast<void**>(&host_surface));
+      }
+      if (res != AMF_OK || !host_surface) {
+        res = surface->Convert(amf::AMF_MEMORY_HOST);
+        if (res == AMF_OK) host_surface = surface;
+      }
+      if (res != AMF_OK || !host_surface) {
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+
+      const OMPixelFormat om_format = get_om_format(host_surface->GetFormat());
+      Frame frame = {};
+      frame.pts = data->GetPts();
+      frame.dts = frame.pts;
+      frame.data.emplace<Picture>(om_format, width_, height_);
+      Picture& pic = std::get<Picture>(frame.data);
+
+      const amf_size plane_count = std::min<amf_size>(host_surface->GetPlanesCount(), pic.planes.getPlaneCount());
+      for (amf_size i = 0; i < plane_count; ++i) {
         amf::AMFPlane* plane = host_surface->GetPlaneAt(i);
-        uint8_t* src = static_cast<uint8_t*>(plane->GetNative());
-        int pitch = plane->GetHPitch();
-        int height = plane->GetHeight();
+        if (!plane || !plane->GetNative()) continue;
 
-        memcpy(dst + offset, src, static_cast<size_t>(pitch) * height);
-        offset += static_cast<size_t>(pitch) * height;
+        const uint8_t* src = static_cast<const uint8_t*>(plane->GetNative());
+        uint8_t* dst = pic.planes.getData(i);
+        const uint32_t dst_stride = pic.planes.getLinesize(i);
+        const size_t row_bytes = std::min<size_t>(
+            static_cast<size_t>(plane->GetWidth()) * static_cast<size_t>(plane->GetPixelSizeInBytes()),
+            dst_stride);
+        const size_t rows = std::min<size_t>(static_cast<size_t>(plane->GetHeight()), pic.getPlaneDimensions(static_cast<uint32_t>(i)).second);
+        const int src_pitch = plane->GetHPitch();
+        for (size_t row = 0; row < rows; ++row) {
+          std::memcpy(dst + row * dst_stride, src + row * src_pitch, row_bytes);
+        }
       }
+
+      frames.push_back(std::move(frame));
     }
-
-    pic->format = get_om_format(output_format_amf_);
-    pic->width = width_;
-    pic->height = height_;
-
-    frames.push_back(std::move(frame));
     return Ok(std::move(frames));
   }
 
@@ -544,8 +569,13 @@ private:
     decoder_->Drain();
 
     while (true) {
+      const size_t before = frames.size();
       auto result = processOutput(frames);
-      if (!result.isOk() || result.unwrap().empty()) {
+      if (!result.isOk()) {
+        return result;
+      }
+      frames = std::move(result).unwrap();
+      if (frames.size() == before) {
         break;
       }
     }
@@ -559,6 +589,7 @@ class AMFEncoder final : public Encoder {
   amf::AMFContext1Ptr amf_context1_; // For Vulkan
   amf::AMFContext2Ptr amf_context2_; // For DX12
   amf::AMFComponentPtr encoder_;
+  OMDX11Context* owned_dx11_context_ = nullptr;
   bool initialized_ = false;
   VideoFormat input_format_ = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -576,10 +607,11 @@ public:
   AMFEncoder() {}
 
   ~AMFEncoder() override {
-    //flush();
+    close();
   }
 
   auto configure(const EncoderOptions& options) -> OMError override {
+    close();
     codec_id_ = options.format.codec_id;
 
     if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 && codec_id_ != OM_CODEC_AV1) {
@@ -618,6 +650,7 @@ public:
     amf_context_ = std::move(init_result.context);
     amf_context1_ = std::move(init_result.context1);
     amf_context2_ = std::move(init_result.context2);
+    owned_dx11_context_ = init_result.owned_dx11_context;
     device_type_ = init_result.device_type;
 
     const wchar_t* encoder_id = get_amf_encoder_id(codec_id_);
@@ -637,7 +670,7 @@ public:
       return OM_CODEC_HWACCEL_FAILED;
     }
 
-    input_format_amf_ = amf::AMF_SURFACE_NV12;
+    input_format_amf_ = get_amf_format(options.video_format.format);
     res = encoder_->Init(input_format_amf_, width_, height_);
     if (res != AMF_OK) {
       log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "Failed to initialize AMF encoder");
@@ -649,7 +682,7 @@ public:
 
     input_format_.width = width_;
     input_format_.height = height_;
-    input_format_.format = OM_FORMAT_NV12;
+    input_format_.format = options.video_format.format;
     initialized_ = true;
 
     return OM_SUCCESS;
@@ -674,6 +707,12 @@ public:
       const auto& pic = std::get<Picture>(frame.data);
       if (std::holds_alternative<HostPicture>(pic.buffer)) {
         AMF_RESULT res = submitFrame(frame);
+        if (res == AMF_INPUT_FULL) {
+          auto out = processOutput(packets);
+          if (out.isErr()) return out;
+          packets = std::move(out).unwrap();
+          res = submitFrame(frame);
+        }
         if (res != AMF_OK) {
           return Err(OM_CODEC_ENCODE_FAILED);
         }
@@ -694,6 +733,24 @@ public:
   }
 
 private:
+  void close() {
+    if (encoder_) {
+      encoder_->Terminate();
+      encoder_ = nullptr;
+    }
+    if (amf_context_) {
+      amf_context_->Terminate();
+    }
+    amf_context2_ = nullptr;
+    amf_context1_ = nullptr;
+    amf_context_ = nullptr;
+    if (owned_dx11_context_) {
+      HWD3D11Context_delete(owned_dx11_context_);
+      owned_dx11_context_ = nullptr;
+    }
+    initialized_ = false;
+  }
+
   auto configureEncoder() -> AMF_RESULT {
     if (!encoder_) return AMF_FAIL;
 
@@ -768,29 +825,31 @@ private:
     if (!encoder_) return AMF_FAIL;
 
     const auto& pic = std::get<Picture>(frame.data);
-    const auto& host_pic = std::get<HostPicture>(pic.buffer);
-    if (!host_pic.buffer) return AMF_FAIL;
+    if (pic.width != width_ || pic.height != height_ || pic.format != input_format_.format) return AMF_INVALID_FORMAT;
 
     amf::AMFSurfacePtr surface;
     AMF_RESULT res = amf_context_->AllocSurface(amf::AMF_MEMORY_HOST, input_format_amf_,
                                                 width_, height_, &surface);
     if (res != AMF_OK || !surface) return res;
 
-    const uint8_t* src = host_pic.buffer->bytes().data();
-    size_t offset = 0;
-
-    for (amf_int32 i = 0; i < surface->GetPlanesCount(); i++) {
+    const amf_int32 plane_count = static_cast<amf_int32>(std::min<amf_size>(surface->GetPlanesCount(), pic.planes.getPlaneCount()));
+    for (amf_int32 i = 0; i < plane_count; i++) {
       amf::AMFPlane* plane = surface->GetPlaneAt(i);
+      if (!plane || !plane->GetNative() || !pic.planes.getData(i)) continue;
       uint8_t* dst = static_cast<uint8_t*>(plane->GetNative());
-      amf_int32 pitch = plane->GetHPitch();
-      amf_int32 height = plane->GetHeight();
-      size_t plane_size = static_cast<size_t>(pitch) * height;
-
-      memcpy(dst, src + offset, plane_size);
-      offset += plane_size;
+      const uint8_t* src = pic.planes.getData(i);
+      const uint32_t src_stride = pic.planes.getLinesize(i);
+      const size_t row_bytes = std::min<size_t>(
+          static_cast<size_t>(plane->GetWidth()) * static_cast<size_t>(plane->GetPixelSizeInBytes()),
+          src_stride);
+      const size_t rows = std::min<size_t>(static_cast<size_t>(plane->GetHeight()), pic.getPlaneDimensions(static_cast<uint32_t>(i)).second);
+      const int dst_pitch = plane->GetHPitch();
+      for (size_t row = 0; row < rows; ++row) {
+        std::memcpy(dst + row * dst_pitch, src + row * src_stride, row_bytes);
+      }
     }
 
-    surface->SetProperty(AMF_VIDEO_ENCODER_PRESENTATION_TIME_STAMP, static_cast<amf_int64>(frame.pts));
+    surface->SetPts(static_cast<amf_pts>(frame.pts));
 
     if (pic.is_keyframe) {
       surface->SetProperty(AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE,
@@ -811,7 +870,7 @@ private:
         return Ok(std::move(packets));
       }
 
-      if (res == AMF_INPUT_FULL || res == AMF_NEED_MORE_INPUT) {
+      if (res == AMF_INPUT_FULL || res == AMF_NEED_MORE_INPUT || res == AMF_REPEAT) {
         return Ok(std::move(packets));
       }
 
@@ -831,10 +890,8 @@ private:
       packet.allocate(data_size);
       std::memcpy(packet.bytes.data(), data_ptr, data_size);
 
-      int64_t pts = 0;
-      data->GetProperty(AMF_VIDEO_ENCODER_PRESENTATION_TIME_STAMP, &pts);
-      packet.pts = pts;
-      packet.dts = pts;
+      packet.pts = data->GetPts();
+      packet.dts = packet.pts;
 
       amf_int64 frame_type = 0;
       data->GetProperty(AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE, &frame_type);
@@ -852,7 +909,7 @@ const CodecDescriptor CODEC_AMF_H264 = {
     .codec_id = OM_CODEC_H264,
     .type = OM_MEDIA_VIDEO,
     .name = "amf_h264",
-    .long_name = "AMD AMF H.264 Codec",
+    .long_name = "AMD AMF H.264/AVC Codec",
     .vendor = "AMD",
     .flags = HARDWARE,
     .caps = CodecCaps {

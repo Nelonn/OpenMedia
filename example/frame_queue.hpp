@@ -1,11 +1,12 @@
 #pragma once
-
+#include <openmedia/video.hpp>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <queue>
 #include <vector>
+#include <memory>
 
 // ---------------------------------------------------------------------------
 // VideoFrame
@@ -23,6 +24,8 @@ struct VideoFrame {
     int64_t  pts      = 0;      // native timebase units
     double   pts_sec  = 0.0;    // pre-computed seconds (set by decoder)
     uint8_t  bits_per_component = 8; // 8, 10, 12, or 16
+
+    std::shared_ptr<openmedia::HardwarePicture> hw_picture;
 };
 
 // ---------------------------------------------------------------------------

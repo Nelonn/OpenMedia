@@ -28,6 +28,9 @@ OPENMEDIA_ABI
 ID3D12Device* HWD3D12Context_getDevice(OMDX12Context* context);
 
 OPENMEDIA_ABI
+ID3D12CommandQueue* HWD3D12Context_getCommandQueue(OMDX12Context* context);
+
+OPENMEDIA_ABI
 ID3D12VideoDevice* HWD3D12Context_getVideoDevice(OMDX12Context* context);
 
 OPENMEDIA_ABI
