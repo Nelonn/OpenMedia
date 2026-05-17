@@ -41,6 +41,15 @@ OPENMEDIA_ABI
 void HWVulkanContext_delete(OMVulkanContext* context);
 
 OPENMEDIA_ABI
+VkInstance HWVulkanContext_getInstance(OMVulkanContext* context);
+
+OPENMEDIA_ABI
+VkPhysicalDevice HWVulkanContext_getPhysicalDevice(OMVulkanContext* context);
+
+OPENMEDIA_ABI
+VkDevice HWVulkanContext_getDevice(OMVulkanContext* context);
+
+OPENMEDIA_ABI
 OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context);
 
 OPENMEDIA_ABI

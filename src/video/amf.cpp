@@ -9,6 +9,8 @@
 #include <core/Surface.h>
 #include <d3d11.h>
 #include <openmedia/hw_dx11.h>
+#include <openmedia/hw_dx12.h>
+#include <openmedia/hw_vulkan.h>
 #include <windows.h>
 #include <algorithm>
 #include <codecs.hpp>
@@ -19,6 +21,9 @@
 #include <vector>
 
 #include "dx_h264.hpp"
+
+#include <core/D3D12AMF.h>
+#include <core/VulkanAMF.h>
 
 namespace openmedia {
 
@@ -212,15 +217,44 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device)
         break;
       }
       case HWDeviceType::DX12: {
-        log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING,
-            "AMF DX12 interop is not used by the software-output codec path; falling back to default DX11");
-        res = AMF_FAIL;
+        if (result.context2) {
+          ID3D12CommandQueue* queue = HWD3D12Context_getCommandQueue(static_cast<OMDX12Context*>(hw_device->context));
+          res = result.context2->InitDX12(queue);
+          if (res == AMF_OK) {
+            result.device_type = HWDeviceType::DX12;
+            log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with D3D12 device");
+          }
+        } else {
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMF DX12 initialization failed: Context2 interface not available");
+          res = AMF_NOT_SUPPORTED;
+        }
         break;
       }
       case HWDeviceType::VULKAN: {
-        log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING,
-            "AMF Vulkan interop requires a full AMF Vulkan device wrapper; falling back to default DX11");
-        res = AMF_FAIL;
+        if (result.context1) {
+          auto* vk_ctx = static_cast<OMVulkanContext*>(hw_device->context);
+          amf::AMFVulkanDevice amf_vk_dev = {};
+          amf_vk_dev.cbSizeof = sizeof(amf_vk_dev);
+          amf_vk_dev.hInstance = HWVulkanContext_getInstance(vk_ctx);
+          amf_vk_dev.hPhysicalDevice = HWVulkanContext_getPhysicalDevice(vk_ctx);
+          amf_vk_dev.hDevice = HWVulkanContext_getDevice(vk_ctx);
+
+          res = result.context1->InitVulkan(&amf_vk_dev);
+          if (res == AMF_OK) {
+            result.device_type = HWDeviceType::VULKAN;
+            log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with Vulkan device");
+          }
+        } else {
+          log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "AMF Vulkan initialization failed: Context1 interface not available");
+          res = AMF_NOT_SUPPORTED;
+        }
+        break;
+      }
+      case HWDeviceType::NONE: {
+        // No graphics device initialization, use host memory
+        result.device_type = HWDeviceType::NONE;
+        res = AMF_OK;
+        log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "AMF initialized with host memory (no graphics device)");
         break;
       }
       default:
@@ -875,7 +909,7 @@ const CodecDescriptor CODEC_AMF_H264 = {
     .codec_id = OM_CODEC_H264,
     .type = OM_MEDIA_VIDEO,
     .name = "amf_h264",
-    .long_name = "AMD AMF H.264 Codec",
+    .long_name = "AMD AMF H.264/AVC Codec",
     .vendor = "AMD",
     .flags = HARDWARE,
     .caps = CodecCaps {

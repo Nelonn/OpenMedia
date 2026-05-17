@@ -91,6 +91,21 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   free(context);
   }
 
+  VkInstance HWVulkanContext_getInstance(OMVulkanContext* context) {
+    if (!context) return VK_NULL_HANDLE;
+    return context->vk_instance;
+  }
+
+  VkPhysicalDevice HWVulkanContext_getPhysicalDevice(OMVulkanContext* context) {
+    if (!context) return VK_NULL_HANDLE;
+    return context->vk_physical_device;
+  }
+
+  VkDevice HWVulkanContext_getDevice(OMVulkanContext* context) {
+    if (!context) return VK_NULL_HANDLE;
+    return context->vk_device;
+  }
+
   OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context) {
   auto* picture = static_cast<OMVulkanPicture*>(malloc(sizeof(OMVulkanPicture)));
   if (!picture) return nullptr;
