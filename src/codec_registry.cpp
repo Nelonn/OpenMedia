@@ -174,19 +174,9 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_DX11_H264);
 #endif
 
-#if defined(OPENMEDIA_VAAPI)
-  registry->registerCodec(&CODEC_VAAPI_H264);
-  registry->registerCodec(&CODEC_VAAPI_H265);
-  registry->registerCodec(&CODEC_VAAPI_VP9);
-  registry->registerCodec(&CODEC_VAAPI_AV1);
-#endif
-
   // Video - DirectX12
 #if defined(OPENMEDIA_DX12_VIDEO)
-  //registry->registerCodec(&CODEC_DX12_H264);
-  //registry->registerCodec(&CODEC_DX12_H265);
-  //registry->registerCodec(&CODEC_DX12_VP9);
-  //registry->registerCodec(&CODEC_DX12_AV1);
+  registry->registerCodec(&CODEC_DX12_H264);
 #endif
 
   // Video - AMD AMF
@@ -197,11 +187,18 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_AMF_VP9);
 #endif
 
+#if defined(OPENMEDIA_VAAPI)
+  registry->registerCodec(&CODEC_VAAPI_H264);
+  registry->registerCodec(&CODEC_VAAPI_H265);
+  registry->registerCodec(&CODEC_VAAPI_VP9);
+  registry->registerCodec(&CODEC_VAAPI_AV1);
+#endif
+
 #if defined(OPENMEDIA_VULKAN)
   registry->registerCodec(&CODEC_VULKAN_H264);
   registry->registerCodec(&CODEC_VULKAN_H265);
-  registry->registerCodec(&CODEC_VULKAN_AV1);
-  registry->registerCodec(&CODEC_VULKAN_VP9);
+  //registry->registerCodec(&CODEC_VULKAN_AV1);
+  //registry->registerCodec(&CODEC_VULKAN_VP9);
 #endif
 
 #if defined(__ANDROID__)
