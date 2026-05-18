@@ -2,12 +2,13 @@
 #include <algorithm>
 #include <codecs.hpp>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <openmedia/codec_extra.hpp>
 #include <openmedia/video.hpp>
 #include <util/cpp.hpp>
 #include <util/dynamic_loader.hpp>
 #include <util/io_util.hpp>
-#include <mutex>
 #include <vector>
 
 namespace openmedia {
@@ -68,22 +69,38 @@ private:
   std::mutex mutex_;
 };
 
+struct OpenH264DecoderDeleter {
+  void operator()(ISVCDecoder* decoder) const noexcept {
+    if (!decoder) return;
+    decoder->Uninitialize();
+    OpenH264Loader::getInstance().WelsDestroyDecoder(decoder);
+  }
+};
+
+struct OpenH264EncoderDeleter {
+  void operator()(ISVCEncoder* encoder) const noexcept {
+    if (!encoder) return;
+    encoder->Uninitialize();
+    OpenH264Loader::getInstance().WelsDestroySVCEncoder(encoder);
+  }
+};
+
+using OpenH264DecoderPtr = std::unique_ptr<ISVCDecoder, OpenH264DecoderDeleter>;
+using OpenH264EncoderPtr = std::unique_ptr<ISVCEncoder, OpenH264EncoderDeleter>;
+
 class OpenH264Decoder final : public Decoder {
-  ISVCDecoder* decoder_ = nullptr;
+  OpenH264DecoderPtr decoder_;
   bool initialized_ = false;
   VideoFormat output_format_ = {};
 
 public:
   OpenH264Decoder() = default;
-
-  ~OpenH264Decoder() override {
-    if (decoder_) {
-      decoder_->Uninitialize();
-      OpenH264Loader::getInstance().WelsDestroyDecoder(decoder_);
-    }
-  }
+  ~OpenH264Decoder() override = default;
 
   auto configure(const DecoderOptions& options) -> OMError override {
+    decoder_.reset();
+    initialized_ = false;
+
     if (options.format.codec_id != OM_CODEC_H264) {
       return OM_CODEC_INVALID_PARAMS;
     }
@@ -93,27 +110,30 @@ public:
       return OM_CODEC_OPEN_FAILED;
     }
 
-    if (loader.WelsCreateDecoder(&decoder_) != 0 || !decoder_) {
+    ISVCDecoder* raw_decoder = nullptr;
+    if (loader.WelsCreateDecoder(&raw_decoder) != 0 || !raw_decoder) {
       return OM_CODEC_OPEN_FAILED;
     }
+    OpenH264DecoderPtr decoder(raw_decoder);
 
     SDecodingParam param = {};
     param.eEcActiveIdc = ERROR_CON_DISABLE;
     param.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_AVC;
 
-    if (decoder_->Initialize(&param) != 0) {
+    if (decoder->Initialize(&param) != 0) {
       return OM_CODEC_OPEN_FAILED;
     }
 
     if (!options.extradata.empty()) {
       unsigned char* data[3] = {nullptr, nullptr, nullptr};
       SBufferInfo buf_info = {};
-      decoder_->DecodeFrame2(options.extradata.data(), static_cast<int>(options.extradata.size()), data, &buf_info);
+      decoder->DecodeFrame2(options.extradata.data(), static_cast<int>(options.extradata.size()), data, &buf_info);
     }
 
     output_format_.width = options.format.video.width;
     output_format_.height = options.format.video.height;
     output_format_.format = OM_FORMAT_YUV420P;
+    decoder_ = std::move(decoder);
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -177,23 +197,27 @@ public:
 };
 
 class OpenH264Encoder final : public Encoder {
-  ISVCEncoder* encoder_ = nullptr;
+  OpenH264EncoderPtr encoder_;
   VideoFormat format_ = {};
   bool initialized_ = false;
 
 public:
   OpenH264Encoder() = default;
-
-  ~OpenH264Encoder() override {
-    if (encoder_) {
-      encoder_->Uninitialize();
-      OpenH264Loader::getInstance().WelsDestroySVCEncoder(encoder_);
-    }
-  }
+  ~OpenH264Encoder() override = default;
 
   auto configure(const EncoderOptions& options) -> OMError override {
+    encoder_.reset();
+    initialized_ = false;
+
     if (options.format.codec_id != OM_CODEC_H264) {
       return OM_CODEC_INVALID_PARAMS;
+    }
+    if (options.format.profile != OM_PROFILE_NONE &&
+        options.format.profile != OM_PROFILE_H264_CONSTRAINED_BASELINE) {
+      return OM_CODEC_NOT_SUPPORTED;
+    }
+    if (options.video_format.format != OM_FORMAT_YUV420P) {
+      return OM_CODEC_NOT_SUPPORTED;
     }
 
     auto& loader = OpenH264Loader::getInstance();
@@ -201,14 +225,16 @@ public:
       return OM_CODEC_OPEN_FAILED;
     }
 
-    if (loader.WelsCreateSVCEncoder(&encoder_) != 0 || !encoder_) {
+    ISVCEncoder* raw_encoder = nullptr;
+    if (loader.WelsCreateSVCEncoder(&raw_encoder) != 0 || !raw_encoder) {
       return OM_CODEC_OPEN_FAILED;
     }
+    OpenH264EncoderPtr encoder(raw_encoder);
 
     format_ = options.video_format;
 
     SEncParamExt param = {};
-    encoder_->GetDefaultParams(&param);
+    encoder->GetDefaultParams(&param);
 
     // Apply extended configuration options from dictionary
     param.iUsageType = static_cast<EUsageType>(options.extra.getInt32(OPENH264_ENC_USAGE_TYPE, CAMERA_VIDEO_REAL_TIME));
@@ -289,6 +315,7 @@ public:
     param.sSpatialLayers[0].fFrameRate = param.fMaxFrameRate;
     param.sSpatialLayers[0].iSpatialBitrate = param.iTargetBitrate;
     param.sSpatialLayers[0].iMaxSpatialBitrate = static_cast<int32_t>(options.extra.getInt64("max_bitrate", param.iTargetBitrate * 1.5));
+    param.sSpatialLayers[0].uiProfileIdc = PRO_BASELINE;
     param.sSpatialLayers[0].sSliceArgument.uiSliceMode = static_cast<SliceModeEnum>(options.extra.getInt32(OPENH264_ENC_SLICE_MODE, SM_SINGLE_SLICE));
 
     if (options.extra.contains(OPENH264_ENC_SLICE_NUM)) {
@@ -298,10 +325,11 @@ public:
       param.sSpatialLayers[0].sSliceArgument.uiSliceSizeConstraint = options.extra.getInt32(OPENH264_ENC_SLICE_SIZE);
     }
 
-    if (encoder_->InitializeExt(&param) != 0) {
+    if (encoder->InitializeExt(&param) != 0) {
       return OM_CODEC_OPEN_FAILED;
     }
 
+    encoder_ = std::move(encoder);
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -422,7 +450,30 @@ const CodecDescriptor CODEC_OPENH264 = {
     .vendor = "Cisco",
     .flags = NONE,
     .caps = CodecCaps {
-        .profiles = {OM_PROFILE_H264_CONSTRAINED_BASELINE, OM_PROFILE_H264_MAIN, OM_PROFILE_H264_HIGH},
+        .profiles = {OM_PROFILE_H264_CONSTRAINED_BASELINE},
+        .levels = {
+            LEVEL_1_B,
+            LEVEL_1_0,
+            LEVEL_1_1,
+            LEVEL_1_2,
+            LEVEL_1_3,
+            LEVEL_2_0,
+            LEVEL_2_1,
+            LEVEL_2_2,
+            LEVEL_3_0,
+            LEVEL_3_1,
+            LEVEL_3_2,
+            LEVEL_4_0,
+            LEVEL_4_1,
+            LEVEL_4_2,
+            LEVEL_5_0,
+            LEVEL_5_1,
+            LEVEL_5_2,
+        },
+        .threading = true,
+        .video = VideoCodecCaps {
+            .pix_fmts = {OM_FORMAT_YUV420P},
+        },
     },
     .decoder_factory = [] { return std::make_unique<OpenH264Decoder>(); },
     .encoder_factory = [] { return std::make_unique<OpenH264Encoder>(); },
