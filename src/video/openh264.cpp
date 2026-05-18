@@ -6,6 +6,7 @@
 #include <mutex>
 #include <openmedia/codec_extra.hpp>
 #include <openmedia/video.hpp>
+#include <type_traits>
 #include <util/cpp.hpp>
 #include <util/dynamic_loader.hpp>
 #include <util/io_util.hpp>
@@ -236,61 +237,66 @@ public:
     SEncParamExt param = {};
     encoder->GetDefaultParams(&param);
 
-    // Apply extended configuration options from dictionary
-    param.iUsageType = static_cast<EUsageType>(options.extra.getInt32(OPENH264_ENC_USAGE_TYPE, CAMERA_VIDEO_REAL_TIME));
-    param.iComplexityMode = static_cast<ECOMPLEXITY_MODE>(options.extra.getInt32(OPENH264_ENC_COMPLEXITY, LOW_COMPLEXITY));
+    const auto& extra = options.extra;
+    auto set_int32 = [&extra]<typename T0>(const Key& key, T0& field) {
+      if (!extra.contains(key)) return;
+      using Field = std::remove_reference_t<T0>;
+      field = static_cast<Field>(extra.getInt32(key));
+    };
+    auto set_int64 = [&extra]<typename T0>(const Key& key, T0& field) {
+      if (!extra.contains(key)) return;
+      using Field = std::remove_reference_t<T0>;
+      field = static_cast<Field>(extra.getInt64(key));
+    };
+    auto set_bool = [&extra](const Key& key, bool& field) {
+      if (extra.contains(key)) field = extra.getBool(key);
+    };
 
-    if (options.extra.contains(OPENH264_ENC_IDR_INTERVAL)) {
-      param.uiIntraPeriod = options.extra.getInt32(OPENH264_ENC_IDR_INTERVAL);
-    }
-    if (options.extra.contains(OPENH264_ENC_NUM_REF_FRAME)) {
-      param.iNumRefFrame = options.extra.getInt32(OPENH264_ENC_NUM_REF_FRAME);
-    }
-    if (options.extra.contains(OPENH264_ENC_ENTROPY_CODING)) {
-      param.iEntropyCodingModeFlag = options.extra.getInt32(OPENH264_ENC_ENTROPY_CODING);
-    }
+    param.iUsageType = static_cast<EUsageType>(extra.getInt32(OPENH264_ENC_USAGE_TYPE, CAMERA_VIDEO_REAL_TIME));
+    param.iComplexityMode = static_cast<ECOMPLEXITY_MODE>(extra.getInt32(OPENH264_ENC_COMPLEXITY, LOW_COMPLEXITY));
 
-    param.bEnableFrameSkip = options.extra.getBool(OPENH264_ENC_FRAME_SKIP, false);
-
-    if (options.extra.contains(OPENH264_ENC_MAX_QP)) {
-      param.iMaxQp = options.extra.getInt32(OPENH264_ENC_MAX_QP);
-    }
-    if (options.extra.contains(OPENH264_ENC_MIN_QP)) {
-      param.iMinQp = options.extra.getInt32(OPENH264_ENC_MIN_QP);
-    }
-
-    if (options.extra.contains(OPENH264_ENC_LTR)) {
-      param.bEnableLongTermReference = options.extra.getBool(OPENH264_ENC_LTR);
-    }
-    if (options.extra.contains(OPENH264_ENC_LTR_PERIOD)) {
-      param.iLtrMarkPeriod = options.extra.getInt32(OPENH264_ENC_LTR_PERIOD);
-    }
-    if (options.extra.contains(OPENH264_ENC_THREADS)) {
-      param.iMultipleThreadIdc = options.extra.getInt32(OPENH264_ENC_THREADS);
-    }
-    if (options.extra.contains(OPENH264_ENC_DENOISE)) {
-      param.bEnableDenoise = options.extra.getBool(OPENH264_ENC_DENOISE);
-    }
-    if (options.extra.contains(OPENH264_ENC_BGD)) {
-      param.bEnableBackgroundDetection = options.extra.getBool(OPENH264_ENC_BGD);
-    }
-    if (options.extra.contains(OPENH264_ENC_AQ)) {
-      param.bEnableAdaptiveQuant = options.extra.getBool(OPENH264_ENC_AQ);
-    }
-    if (options.extra.contains(OPENH264_ENC_SCENE_CHANGE)) {
-      param.bEnableSceneChangeDetect = options.extra.getBool(OPENH264_ENC_SCENE_CHANGE);
-    }
-    if (options.extra.contains(OPENH264_ENC_LOOP_FILTER)) {
-      param.iLoopFilterDisableIdc = options.extra.getInt32(OPENH264_ENC_LOOP_FILTER);
-    }
+    set_int32(OPENH264_ENC_IDR_INTERVAL, param.uiIntraPeriod);
+    set_int32(OPENH264_ENC_NUM_REF_FRAME, param.iNumRefFrame);
+    set_int32(OPENH264_ENC_SPS_PPS_ID_STRATEGY, param.eSpsPpsIdStrategy);
+    set_bool(OPENH264_ENC_PREFIX_NAL, param.bPrefixNalAddingCtrl);
+    set_bool(OPENH264_ENC_SSEI, param.bEnableSSEI);
+    set_bool(OPENH264_ENC_SIMULCAST_AVC, param.bSimulcastAVC);
+    set_int32(OPENH264_ENC_PADDING, param.iPaddingFlag);
+    set_int32(OPENH264_ENC_ENTROPY_CODING, param.iEntropyCodingModeFlag);
+    set_bool(OPENH264_ENC_FRAME_SKIP, param.bEnableFrameSkip);
+    set_int32(OPENH264_ENC_MAX_QP, param.iMaxQp);
+    set_int32(OPENH264_ENC_MIN_QP, param.iMinQp);
+    set_int32(OPENH264_ENC_MAX_NAL_SIZE, param.uiMaxNalSize);
+    set_bool(OPENH264_ENC_LTR, param.bEnableLongTermReference);
+    set_int32(OPENH264_ENC_LTR_REF_NUM, param.iLTRRefNum);
+    set_int32(OPENH264_ENC_LTR_PERIOD, param.iLtrMarkPeriod);
+    set_int32(OPENH264_ENC_THREADS, param.iMultipleThreadIdc);
+    set_bool(OPENH264_ENC_LOAD_BALANCING, param.bUseLoadBalancing);
+    set_int32(OPENH264_ENC_LOOP_FILTER, param.iLoopFilterDisableIdc);
+    set_int32(OPENH264_ENC_LOOP_FILTER_ALPHA, param.iLoopFilterAlphaC0Offset);
+    set_int32(OPENH264_ENC_LOOP_FILTER_BETA, param.iLoopFilterBetaOffset);
+    set_bool(OPENH264_ENC_DENOISE, param.bEnableDenoise);
+    set_bool(OPENH264_ENC_BGD, param.bEnableBackgroundDetection);
+    set_bool(OPENH264_ENC_AQ, param.bEnableAdaptiveQuant);
+    set_bool(OPENH264_ENC_FRAME_CROPPING, param.bEnableFrameCroppingFlag);
+    set_bool(OPENH264_ENC_SCENE_CHANGE, param.bEnableSceneChangeDetect);
+    set_bool(OPENH264_ENC_LOSSLESS_LINK, param.bIsLosslessLink);
+    set_bool(OPENH264_ENC_FIX_RC_OVERSHOOT, param.bFixRCOverShoot);
+    set_int32(OPENH264_ENC_IDR_BITRATE_RATIO, param.iIdrBitrateRatio);
+    set_bool(OPENH264_ENC_PSNR_Y, param.bPsnrY);
+    set_bool(OPENH264_ENC_PSNR_U, param.bPsnrU);
+    set_bool(OPENH264_ENC_PSNR_V, param.bPsnrV);
 
     // Rate Control, from options.rate_control (overrides extra, or supplements it)
     int32_t target_bitrate = 1000000; // 1 Mbps default
+    int32_t max_bitrate = UNSPECIFIED_BIT_RATE;
     if (auto* rc = std::get_if<CbrParams>(&options.rate_control.params)) {
       target_bitrate = static_cast<int32_t>(rc->bitrate.target_bitrate);
+      max_bitrate = target_bitrate;
       param.iRCMode = RC_BITRATE_MODE;
     } else if (auto* vbr = std::get_if<VbrParams>(&options.rate_control.params)) {
       target_bitrate = static_cast<int32_t>(vbr->bitrate.target_bitrate);
+      max_bitrate = static_cast<int32_t>(vbr->bitrate.max_bitrate.value_or(vbr->bitrate.target_bitrate));
       param.iRCMode = RC_BITRATE_MODE; // OpenH264's RC_BITRATE_MODE is essentially VBR-ish with target
     } else {
       param.iRCMode = RC_OFF_MODE;
@@ -303,26 +309,52 @@ public:
       param.iMinQp = *options.rate_control.min_qp;
     }
 
-    param.fMaxFrameRate = static_cast<float>(options.extra.getDouble("max_framerate", 30.0));
+    set_int64(OPENH264_ENC_MAX_BITRATE, max_bitrate);
+
+    const double frame_rate = options.format.video.framerate.toDouble();
+    param.fMaxFrameRate = frame_rate > 0.0 ? static_cast<float>(frame_rate) : 30.0f;
     param.iPicWidth = format_.width;
     param.iPicHeight = format_.height;
     param.iTargetBitrate = target_bitrate;
-    param.iTemporalLayerNum = std::max(1, options.extra.getInt32("temporal_layers", 1));
+    param.iMaxBitrate = max_bitrate;
+    param.iTemporalLayerNum = std::clamp(extra.getInt32(OPENH264_ENC_TEMPORAL_LAYERS, 1), 1, MAX_TEMPORAL_LAYER_NUM);
     param.iSpatialLayerNum = 1;
 
     param.sSpatialLayers[0].iVideoWidth = param.iPicWidth;
     param.sSpatialLayers[0].iVideoHeight = param.iPicHeight;
     param.sSpatialLayers[0].fFrameRate = param.fMaxFrameRate;
     param.sSpatialLayers[0].iSpatialBitrate = param.iTargetBitrate;
-    param.sSpatialLayers[0].iMaxSpatialBitrate = static_cast<int32_t>(options.extra.getInt64("max_bitrate", param.iTargetBitrate * 1.5));
+    param.sSpatialLayers[0].iMaxSpatialBitrate = max_bitrate > 0 ? max_bitrate : param.iTargetBitrate;
     param.sSpatialLayers[0].uiProfileIdc = PRO_BASELINE;
-    param.sSpatialLayers[0].sSliceArgument.uiSliceMode = static_cast<SliceModeEnum>(options.extra.getInt32(OPENH264_ENC_SLICE_MODE, SM_SINGLE_SLICE));
-
-    if (options.extra.contains(OPENH264_ENC_SLICE_NUM)) {
-      param.sSpatialLayers[0].sSliceArgument.uiSliceNum = options.extra.getInt32(OPENH264_ENC_SLICE_NUM);
+    if (options.format.level != 0) {
+      param.sSpatialLayers[0].uiLevelIdc = static_cast<ELevelIdc>(options.format.level);
     }
-    if (options.extra.contains(OPENH264_ENC_SLICE_SIZE)) {
-      param.sSpatialLayers[0].sSliceArgument.uiSliceSizeConstraint = options.extra.getInt32(OPENH264_ENC_SLICE_SIZE);
+    set_int32(OPENH264_ENC_LAYER_QP, param.sSpatialLayers[0].iDLayerQp);
+    set_int32(OPENH264_ENC_SLICE_MODE, param.sSpatialLayers[0].sSliceArgument.uiSliceMode);
+    set_int32(OPENH264_ENC_SLICE_NUM, param.sSpatialLayers[0].sSliceArgument.uiSliceNum);
+    set_int32(OPENH264_ENC_SLICE_SIZE, param.sSpatialLayers[0].sSliceArgument.uiSliceSizeConstraint);
+    set_bool(OPENH264_ENC_VIDEO_SIGNAL_TYPE_PRESENT, param.sSpatialLayers[0].bVideoSignalTypePresent);
+    set_int32(OPENH264_ENC_VIDEO_FORMAT, param.sSpatialLayers[0].uiVideoFormat);
+    set_bool(OPENH264_ENC_FULL_RANGE, param.sSpatialLayers[0].bFullRange);
+    set_bool(OPENH264_ENC_COLOR_DESCRIPTION_PRESENT, param.sSpatialLayers[0].bColorDescriptionPresent);
+    set_int32(OPENH264_ENC_COLOR_PRIMARIES, param.sSpatialLayers[0].uiColorPrimaries);
+    set_int32(OPENH264_ENC_TRANSFER_CHARACTERISTICS, param.sSpatialLayers[0].uiTransferCharacteristics);
+    set_int32(OPENH264_ENC_COLOR_MATRIX, param.sSpatialLayers[0].uiColorMatrix);
+    set_bool(OPENH264_ENC_ASPECT_RATIO_PRESENT, param.sSpatialLayers[0].bAspectRatioPresent);
+    set_int32(OPENH264_ENC_ASPECT_RATIO, param.sSpatialLayers[0].eAspectRatio);
+    set_int32(OPENH264_ENC_ASPECT_RATIO_EXT_WIDTH, param.sSpatialLayers[0].sAspectRatioExtWidth);
+    set_int32(OPENH264_ENC_ASPECT_RATIO_EXT_HEIGHT, param.sSpatialLayers[0].sAspectRatioExtHeight);
+
+    if (auto* value = extra.get(OPENH264_ENC_SLICE_MB_NUM)) {
+      if (auto values = value->getArray()) {
+        const auto& array = values->get();
+        const size_t count = std::min(array.size(), static_cast<size_t>(MAX_SLICES_NUM_TMP));
+        for (size_t i = 0; i < count; ++i) {
+          if (auto slice_mb_num = array[i].toInt64()) {
+            param.sSpatialLayers[0].sSliceArgument.uiSliceMbNum[i] = static_cast<unsigned int>(*slice_mb_num);
+          }
+        }
+      }
     }
 
     if (encoder->InitializeExt(&param) != 0) {
@@ -474,6 +506,59 @@ const CodecDescriptor CODEC_OPENH264 = {
         .video = VideoCodecCaps {
             .pix_fmts = {OM_FORMAT_YUV420P},
         },
+    },
+    .options = {
+        OPENH264_ENC_USAGE_TYPE,
+        OPENH264_ENC_COMPLEXITY,
+        OPENH264_ENC_IDR_INTERVAL,
+        OPENH264_ENC_TEMPORAL_LAYERS,
+        OPENH264_ENC_NUM_REF_FRAME,
+        OPENH264_ENC_SPS_PPS_ID_STRATEGY,
+        OPENH264_ENC_PREFIX_NAL,
+        OPENH264_ENC_SSEI,
+        OPENH264_ENC_SIMULCAST_AVC,
+        OPENH264_ENC_PADDING,
+        OPENH264_ENC_ENTROPY_CODING,
+        OPENH264_ENC_FRAME_SKIP,
+        OPENH264_ENC_MAX_BITRATE,
+        OPENH264_ENC_MAX_QP,
+        OPENH264_ENC_MIN_QP,
+        OPENH264_ENC_MAX_NAL_SIZE,
+        OPENH264_ENC_LTR,
+        OPENH264_ENC_LTR_REF_NUM,
+        OPENH264_ENC_LTR_PERIOD,
+        OPENH264_ENC_THREADS,
+        OPENH264_ENC_LOAD_BALANCING,
+        OPENH264_ENC_DENOISE,
+        OPENH264_ENC_BGD,
+        OPENH264_ENC_AQ,
+        OPENH264_ENC_SCENE_CHANGE,
+        OPENH264_ENC_LOOP_FILTER,
+        OPENH264_ENC_LOOP_FILTER_ALPHA,
+        OPENH264_ENC_LOOP_FILTER_BETA,
+        OPENH264_ENC_FRAME_CROPPING,
+        OPENH264_ENC_LOSSLESS_LINK,
+        OPENH264_ENC_FIX_RC_OVERSHOOT,
+        OPENH264_ENC_IDR_BITRATE_RATIO,
+        OPENH264_ENC_PSNR_Y,
+        OPENH264_ENC_PSNR_U,
+        OPENH264_ENC_PSNR_V,
+        OPENH264_ENC_LAYER_QP,
+        OPENH264_ENC_SLICE_MODE,
+        OPENH264_ENC_SLICE_NUM,
+        OPENH264_ENC_SLICE_MB_NUM,
+        OPENH264_ENC_SLICE_SIZE,
+        OPENH264_ENC_VIDEO_SIGNAL_TYPE_PRESENT,
+        OPENH264_ENC_VIDEO_FORMAT,
+        OPENH264_ENC_FULL_RANGE,
+        OPENH264_ENC_COLOR_DESCRIPTION_PRESENT,
+        OPENH264_ENC_COLOR_PRIMARIES,
+        OPENH264_ENC_TRANSFER_CHARACTERISTICS,
+        OPENH264_ENC_COLOR_MATRIX,
+        OPENH264_ENC_ASPECT_RATIO_PRESENT,
+        OPENH264_ENC_ASPECT_RATIO,
+        OPENH264_ENC_ASPECT_RATIO_EXT_WIDTH,
+        OPENH264_ENC_ASPECT_RATIO_EXT_HEIGHT,
     },
     .decoder_factory = [] { return std::make_unique<OpenH264Decoder>(); },
     .encoder_factory = [] { return std::make_unique<OpenH264Encoder>(); },
