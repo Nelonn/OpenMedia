@@ -4,11 +4,69 @@
 #include <cstring>
 #include <openmedia/codec_extra.hpp>
 #include <openmedia/video.hpp>
+#include <util/cpp.hpp>
+#include <util/dynamic_loader.hpp>
 #include <util/io_util.hpp>
+#include <mutex>
 #include <vector>
-#include "openh264_loader.hpp"
 
 namespace openmedia {
+
+using PFN_WelsCreateSVCEncoder = fn_ptr<int EXTAPI(ISVCEncoder**)>;
+using PFN_WelsDestroySVCEncoder = fn_ptr<void EXTAPI(ISVCEncoder*)>;
+using PFN_WelsCreateDecoder = fn_ptr<long EXTAPI(ISVCDecoder**)>;
+using PFN_WelsDestroyDecoder = fn_ptr<void EXTAPI(ISVCDecoder*)>;
+
+class OpenH264Loader {
+public:
+  static auto getInstance() -> OpenH264Loader& {
+    static OpenH264Loader instance;
+    return instance;
+  }
+
+  auto load() -> bool {
+    if (loaded_) return true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (loaded_) return true;
+
+#if defined(_WIN32)
+    lib_.open("openh264.dll");
+    if (!lib_.success()) {
+      lib_.open("openh264-2.6.0-win64.dll");
+    }
+#elif defined(__APPLE__)
+    lib_.open("libopenh264.dylib");
+#else
+    lib_.open("libopenh264.so");
+#endif
+
+    if (!lib_.success()) return false;
+
+    WelsCreateSVCEncoder = lib_.getProcAddress<PFN_WelsCreateSVCEncoder>("WelsCreateSVCEncoder");
+    WelsDestroySVCEncoder = lib_.getProcAddress<PFN_WelsDestroySVCEncoder>("WelsDestroySVCEncoder");
+    WelsCreateDecoder = lib_.getProcAddress<PFN_WelsCreateDecoder>("WelsCreateDecoder");
+    WelsDestroyDecoder = lib_.getProcAddress<PFN_WelsDestroyDecoder>("WelsDestroyDecoder");
+
+    if (!WelsCreateSVCEncoder || !WelsDestroySVCEncoder || !WelsCreateDecoder || !WelsDestroyDecoder) {
+      return false;
+    }
+
+    loaded_ = true;
+    return true;
+  }
+
+  PFN_WelsCreateSVCEncoder WelsCreateSVCEncoder = nullptr;
+  PFN_WelsDestroySVCEncoder WelsDestroySVCEncoder = nullptr;
+  PFN_WelsCreateDecoder WelsCreateDecoder = nullptr;
+  PFN_WelsDestroyDecoder WelsDestroyDecoder = nullptr;
+
+private:
+  OpenH264Loader() = default;
+
+  DynamicLoader lib_;
+  bool loaded_ = false;
+  std::mutex mutex_;
+};
 
 class OpenH264Decoder final : public Decoder {
   ISVCDecoder* decoder_ = nullptr;
