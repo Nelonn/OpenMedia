@@ -133,6 +133,9 @@ public:
     if (device_) SDL_SetAudioDeviceGain(device_, gain_);
   }
 
+  int sampleRate() const { return sample_rate_; }
+  int channels() const { return channels_; }
+
   float gain() const { return gain_; }
   bool isOpen() const { return open_; }
   bool started() const { return started_; }

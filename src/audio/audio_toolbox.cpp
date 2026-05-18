@@ -84,6 +84,11 @@ auto buildMagicCookie(OMCodecId codec_id, std::span<const uint8_t> extradata) ->
     return {};
   }
   if (codec_id == OM_CODEC_AAC) {
+    // If extradata is small (typically 2-5 bytes), it's likely a raw AudioSpecificConfig.
+    // AudioToolbox often accepts this directly or prefers it over a double-wrapped ESDS.
+    if (extradata.size() <= 5) {
+        return std::vector<uint8_t>(extradata.begin(), extradata.end());
+    }
     return buildAacMagicCookie(extradata);
   }
   return std::vector<uint8_t>(extradata.begin(), extradata.end());
@@ -276,6 +281,8 @@ public:
     frame.dts = packet.dts >= 0 ? static_cast<uint64_t>(packet.dts) : frame.pts;
     frame.data = std::move(samples);
 
+    log(OM_CATEGORY_DECODER, OM_LEVEL_DEBUG, std::format("AudioToolbox produced frame: pts={}, nb_samples={}", frame.pts, packet_count));
+
     std::vector<Frame> frames;
     frames.push_back(std::move(frame));
     updateOutputFormat();
@@ -359,8 +366,175 @@ private:
   bool initialized_ = false;
 };
 
+struct EncodeContext {
+  const AudioSamples* samples = nullptr;
+  bool consumed = false;
+};
+
+auto encodeCallback(AudioConverterRef,
+                    UInt32* io_number_data_packets,
+                    AudioBufferList* io_data,
+                    AudioStreamPacketDescription** out_data_packet_description,
+                    void* user_data) -> OSStatus {
+  auto* context = static_cast<EncodeContext*>(user_data);
+  if (!context || !io_number_data_packets || !io_data) {
+    return kParameterErrorStatus;
+  }
+
+  if (!context->samples || context->consumed) {
+    *io_number_data_packets = 0;
+    return noErr;
+  }
+
+  io_data->mNumberBuffers = 1;
+  io_data->mBuffers[0].mNumberChannels = context->samples->format.channels;
+  io_data->mBuffers[0].mDataByteSize = static_cast<UInt32>(context->samples->nb_samples * context->samples->format.channels * getBytesPerSample(context->samples->format.sample_format));
+  io_data->mBuffers[0].mData = context->samples->planes.data[0];
+
+  *io_number_data_packets = context->samples->nb_samples;
+  context->consumed = true;
+  return noErr;
+}
+
+class AudioToolboxEncoder final : public Encoder {
+public:
+  explicit AudioToolboxEncoder(OMCodecId codec_id)
+      : codec_id_(codec_id) {}
+
+  ~AudioToolboxEncoder() override {
+    closeConverter();
+  }
+
+  auto configure(const EncoderOptions& options) -> OMError override {
+    closeConverter();
+
+    if (options.format.type != OM_MEDIA_AUDIO || options.format.codec_id != codec_id_) {
+      return OM_CODEC_INVALID_PARAMS;
+    }
+
+    input_stream_description_ = {};
+    input_stream_description_.mSampleRate = static_cast<Float64>(options.audio_format.sample_rate);
+    input_stream_description_.mFormatID = kAudioFormatLinearPCM;
+    input_stream_description_.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    input_stream_description_.mBytesPerPacket = options.audio_format.channels * sizeof(int16_t);
+    input_stream_description_.mFramesPerPacket = 1;
+    input_stream_description_.mBytesPerFrame = options.audio_format.channels * sizeof(int16_t);
+    input_stream_description_.mChannelsPerFrame = options.audio_format.channels;
+    input_stream_description_.mBitsPerChannel = 16;
+
+    output_format_ = {};
+    output_format_.mFormatID = codecIdToAudioToolboxFormat(codec_id_);
+    output_format_.mSampleRate = input_stream_description_.mSampleRate;
+    output_format_.mChannelsPerFrame = input_stream_description_.mChannelsPerFrame;
+
+    OSStatus status = AudioConverterNew(&input_stream_description_, &output_format_, &converter_);
+    if (status != noErr || !converter_) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    if (options.rate_control.getMode() == RateControlMode::ABR || options.rate_control.getMode() == RateControlMode::CBR) {
+        uint32_t bitrate = 0;
+        if (options.rate_control.getMode() == RateControlMode::ABR) {
+            bitrate = static_cast<uint32_t>(std::get<AbrParams>(options.rate_control.params).target_bitrate);
+        } else {
+            bitrate = static_cast<uint32_t>(std::get<CbrParams>(options.rate_control.params).bitrate.target_bitrate);
+        }
+        if (bitrate > 0) {
+            AudioConverterSetProperty(converter_, kAudioConverterEncodeBitRate, sizeof(bitrate), &bitrate);
+        }
+    }
+
+    initialized_ = true;
+    return OM_SUCCESS;
+  }
+
+  auto getInfo() -> EncodingInfo override {
+    EncodingInfo info = {};
+    if (converter_) {
+        UInt32 size = 0;
+        OSStatus status = AudioConverterGetPropertyInfo(converter_, kAudioConverterCompressionMagicCookie, &size, nullptr);
+        if (status == noErr && size > 0) {
+            info.extradata.resize(size);
+            AudioConverterGetProperty(converter_, kAudioConverterCompressionMagicCookie, &size, info.extradata.data());
+        }
+    }
+    return info;
+  }
+
+  auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
+    if (!initialized_ || !converter_) {
+      return Err(OM_COMMON_NOT_INITIALIZED);
+    }
+
+    const auto* samples = std::get_if<AudioSamples>(&frame.data);
+    if (!samples) {
+      return Err(OM_CODEC_INVALID_PARAMS);
+    }
+
+    std::vector<uint8_t> output_buffer(65536); // Typical max AAC packet size
+    AudioBufferList output_buffers = {};
+    output_buffers.mNumberBuffers = 1;
+    output_buffers.mBuffers[0].mNumberChannels = output_format_.mChannelsPerFrame;
+    output_buffers.mBuffers[0].mDataByteSize = static_cast<UInt32>(output_buffer.size());
+    output_buffers.mBuffers[0].mData = output_buffer.data();
+
+    UInt32 packet_count = 1;
+    AudioStreamPacketDescription out_desc = {};
+    EncodeContext context;
+    context.samples = samples;
+
+    OSStatus status = AudioConverterFillComplexBuffer(converter_,
+                                                      encodeCallback,
+                                                      &context,
+                                                      &packet_count,
+                                                      &output_buffers,
+                                                      &out_desc);
+    
+    if (status != noErr && status != 1) { // 1 is often used to signal end of data in some contexts, but here we expect noErr
+        return Err(OM_CODEC_ENCODE_FAILED);
+    }
+
+    std::vector<Packet> packets;
+    if (packet_count > 0) {
+        Packet packet;
+        packet.allocate(output_buffers.mBuffers[0].mDataByteSize);
+        std::memcpy(packet.bytes.data(), output_buffers.mBuffers[0].mData, packet.bytes.size());
+        packet.pts = frame.pts;
+        packet.dts = frame.dts;
+        packets.push_back(std::move(packet));
+    }
+
+    return Ok(std::move(packets));
+  }
+
+  auto updateBitrate(const RateControlParams& rc) -> OMError override {
+    if (!converter_) return OM_COMMON_NOT_INITIALIZED;
+    // ... implement if needed
+    return OM_SUCCESS;
+  }
+
+private:
+  void closeConverter() {
+    initialized_ = false;
+    if (converter_) {
+      AudioConverterDispose(converter_);
+      converter_ = nullptr;
+    }
+  }
+
+  OMCodecId codec_id_ = OM_CODEC_NONE;
+  AudioConverterRef converter_ = nullptr;
+  AudioStreamBasicDescription input_stream_description_ = {};
+  AudioStreamBasicDescription output_format_ = {};
+  bool initialized_ = false;
+};
+
 auto createAudioToolboxDecoder(OMCodecId codec_id) -> std::unique_ptr<Decoder> {
   return std::make_unique<AudioToolboxDecoder>(codec_id);
+}
+
+auto createAudioToolboxEncoder(OMCodecId codec_id) -> std::unique_ptr<Encoder> {
+  return std::make_unique<AudioToolboxEncoder>(codec_id);
 }
 
 } // namespace
@@ -373,6 +547,7 @@ const CodecDescriptor CODEC_AUDIO_TOOLBOX_ALAC = {
   .vendor = "Apple",
   .flags = NONE,
   .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_ALAC); },
+  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_ALAC); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_MP3 = {
@@ -393,6 +568,7 @@ const CodecDescriptor CODEC_AUDIO_TOOLBOX_AAC = {
   .vendor = "Apple",
   .flags = NONE,
   .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_AAC); },
+  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_AAC); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_AC3 = {

@@ -93,10 +93,10 @@ auto isParameterSetCodec(OMCodecId codec_id) noexcept -> bool {
 }
 
 auto isAnnexB(std::span<const uint8_t> bytes) noexcept -> bool {
-  return bytes.size() >= 4 &&
-         bytes[0] == 0x00 &&
-         bytes[1] == 0x00 &&
-         (bytes[2] == 0x01 || (bytes[2] == 0x00 && bytes[3] == 0x01));
+  if (bytes.size() < 3) return false;
+  if (bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x01) return true;
+  if (bytes.size() >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0x01) return true;
+  return false;
 }
 
 auto nextStartCode(std::span<const uint8_t> bytes, size_t offset) noexcept -> size_t {
@@ -141,13 +141,9 @@ void forEachAnnexBNal(std::span<const uint8_t> bytes, Fn&& fn) {
 
     const size_t nal_start = start + prefix;
     size_t next = nextStartCode(bytes, nal_start);
-    size_t nal_end = next;
-    while (nal_end > nal_start && bytes[nal_end - 1] == 0x00) {
-      --nal_end;
-    }
-
-    if (nal_end > nal_start) {
-      fn(bytes.subspan(nal_start, nal_end - nal_start));
+    
+    if (next > nal_start) {
+      fn(bytes.subspan(nal_start, next - nal_start));
     }
     start = next;
   }
@@ -182,10 +178,15 @@ struct ParameterSets {
   int nal_length_size = 4;
 };
 
+auto isAVCC(std::span<const uint8_t> bytes) noexcept -> bool {
+  if (bytes.size() < 7) return false;
+  return bytes[0] == 1; // version
+}
+
 auto parseH264ParameterSets(std::span<const uint8_t> extradata) -> ParameterSets {
   ParameterSets result;
 
-  if (extradata.size() >= 7 && extradata[0] == 1) {
+  if (isAVCC(extradata)) {
     result.nal_length_size = (extradata[4] & 0x03u) + 1;
     size_t offset = 5;
     const uint8_t sps_count = extradata[offset++] & 0x1Fu;
@@ -206,10 +207,7 @@ auto parseH264ParameterSets(std::span<const uint8_t> extradata) -> ParameterSets
         offset += size;
       }
     }
-    return result;
-  }
-
-  if (isAnnexB(extradata)) {
+  } else if (isAnnexB(extradata)) {
     forEachAnnexBNal(extradata, [&](std::span<const uint8_t> nal) {
       const uint8_t type = h264NalType(nal);
       if (type == 7 || type == 8 || type == 13) {
@@ -224,12 +222,12 @@ auto parseH264ParameterSets(std::span<const uint8_t> extradata) -> ParameterSets
 auto parseHEVCParameterSets(std::span<const uint8_t> extradata) -> ParameterSets {
   ParameterSets result;
 
-  if (extradata.size() >= 23 && extradata[0] == 1) {
+  if (extradata.size() >= 23 && extradata[0] == 1) { // HVCC
     result.nal_length_size = (extradata[21] & 0x03u) + 1;
     size_t offset = 22;
     const uint8_t array_count = extradata[offset++];
     for (uint8_t i = 0; i < array_count && offset + 3 <= extradata.size(); ++i) {
-      offset += 1;
+      offset += 1; // nal_unit_type
       const uint16_t nal_count = static_cast<uint16_t>((extradata[offset] << 8u) | extradata[offset + 1]);
       offset += 2;
       for (uint16_t j = 0; j < nal_count && offset + 2 <= extradata.size(); ++j) {
@@ -240,10 +238,7 @@ auto parseHEVCParameterSets(std::span<const uint8_t> extradata) -> ParameterSets
         offset += size;
       }
     }
-    return result;
-  }
-
-  if (isAnnexB(extradata)) {
+  } else if (isAnnexB(extradata)) {
     forEachAnnexBNal(extradata, [&](std::span<const uint8_t> nal) {
       const uint8_t type = hevcNalType(nal);
       if (type == 32 || type == 33 || type == 34 || type == 39 || type == 40) {
@@ -332,11 +327,14 @@ auto createFormatDescription(OMCodecId codec_id,
                                                                             parameter_sets.nal_length_size,
                                                                             &raw_parameter_format);
       if (status == noErr && raw_parameter_format) {
+        log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, std::format("VideoToolbox H.264 format description created successfully, nal_length_size={}", parameter_sets.nal_length_size));
         return CFPtr<CMVideoFormatDescriptionRef>(static_cast<CMVideoFormatDescriptionRef>(raw_parameter_format));
       }
       log(OM_CATEGORY_DECODER,
-          OM_LEVEL_WARNING,
+          OM_LEVEL_ERROR,
           std::format("VideoToolbox H.264 parameter-set format creation failed: {}", static_cast<int32_t>(status)));
+    } else {
+        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("VideoToolbox H.264: Not enough parameter sets found ({})", parameter_sets.sets.size()));
     }
   }
 
@@ -362,11 +360,14 @@ auto createFormatDescription(OMCodecId codec_id,
                                                                             nullptr,
                                                                             &raw_parameter_format);
       if (status == noErr && raw_parameter_format) {
+        log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, std::format("VideoToolbox HEVC format description created successfully, nal_length_size={}", parameter_sets.nal_length_size));
         return CFPtr<CMVideoFormatDescriptionRef>(static_cast<CMVideoFormatDescriptionRef>(raw_parameter_format));
       }
       log(OM_CATEGORY_DECODER,
-          OM_LEVEL_WARNING,
+          OM_LEVEL_ERROR,
           std::format("VideoToolbox HEVC parameter-set format creation failed: {}", static_cast<int32_t>(status)));
+    } else {
+        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("VideoToolbox HEVC: Not enough parameter sets found ({})", parameter_sets.sets.size()));
     }
   }
 
@@ -447,91 +448,11 @@ auto cvPixelFormatToOpenMedia(OSType pixel_format) noexcept -> OMPixelFormat {
   }
 }
 
-struct CallbackContext {
-  std::vector<Frame>* frames = nullptr;
-  OMColorSpace color_space = OM_COLOR_SPACE_BT709;
-  OMTransferCharacteristic transfer_char = OM_TRANSFER_BT709;
-};
-
 struct FrameTiming {
   int64_t pts = -1;
   int64_t dts = -1;
   bool is_keyframe = false;
 };
-
-void decompressionCallback(void* decompression_output_ref_con,
-                           void* source_frame_ref_con,
-                           OSStatus status,
-                           VTDecodeInfoFlags,
-                           CVImageBufferRef image_buffer,
-                           CMTime,
-                           CMTime) {
-  auto** context_ptr = static_cast<CallbackContext**>(decompression_output_ref_con);
-  auto* context = context_ptr ? *context_ptr : nullptr;
-  auto* timing = static_cast<FrameTiming*>(source_frame_ref_con);
-  if (!context || !context->frames || status != noErr || !image_buffer) {
-    if (status != noErr) {
-      log(OM_CATEGORY_DECODER,
-          OM_LEVEL_ERROR,
-          std::format("VideoToolbox decode callback failed: {}", static_cast<int32_t>(status)));
-    }
-    return;
-  }
-
-  auto pixel_buffer = static_cast<CVPixelBufferRef>(image_buffer);
-  const OSType cv_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
-  const OMPixelFormat om_format = cvPixelFormatToOpenMedia(cv_format);
-  if (om_format == OM_FORMAT_UNKNOWN) {
-    log(OM_CATEGORY_DECODER,
-        OM_LEVEL_ERROR,
-        std::format("VideoToolbox produced unsupported pixel format: {}", static_cast<uint32_t>(cv_format)));
-    return;
-  }
-
-  CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
-
-  const auto width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
-  const auto height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
-  Picture picture(om_format, width, height);
-  picture.color_space = context->color_space;
-  picture.transfer_char = context->transfer_char;
-  picture.is_keyframe = timing ? timing->is_keyframe : false;
-
-  if (CVPixelBufferIsPlanar(pixel_buffer)) {
-    const size_t plane_count = std::min<size_t>(CVPixelBufferGetPlaneCount(pixel_buffer), picture.planes.count);
-    for (size_t i = 0; i < plane_count; ++i) {
-      const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
-      const size_t src_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
-      const size_t plane_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, i);
-      const size_t plane_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, i);
-      const size_t row_bytes = plane_width * getBytesPerPixel(om_format, static_cast<uint8_t>(i));
-      copyPlaneWithStride(picture.planes.data[i],
-                          picture.planes.linesize[i],
-                          src,
-                          src_stride,
-                          row_bytes,
-                          plane_height);
-    }
-  } else {
-    const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(pixel_buffer));
-    const size_t src_stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
-    const size_t row_bytes = static_cast<size_t>(width) * getBytesPerPixel(om_format, 0);
-    copyPlaneWithStride(picture.planes.data[0],
-                        picture.planes.linesize[0],
-                        src,
-                        src_stride,
-                        row_bytes,
-                        height);
-  }
-
-  CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
-
-  Frame frame = {};
-  frame.pts = timing && timing->pts >= 0 ? static_cast<uint64_t>(timing->pts) : 0;
-  frame.dts = timing && timing->dts >= 0 ? static_cast<uint64_t>(timing->dts) : frame.pts;
-  frame.data = std::move(picture);
-  context->frames->push_back(std::move(frame));
-}
 
 class VideoToolboxDecoder final : public Decoder {
 public:
@@ -600,20 +521,18 @@ public:
       return Err(OM_COMMON_NOT_INITIALIZED);
     }
 
-    std::vector<Frame> frames;
     if (packet.bytes.empty()) {
       VTDecompressionSessionFinishDelayedFrames(session_.get());
       VTDecompressionSessionWaitForAsynchronousFrames(session_.get());
-      return Ok(std::move(frames));
+      return Ok(collectFrames());
     }
 
     std::span<const uint8_t> payload(packet.bytes.data(), packet.bytes.size());
     std::vector<uint8_t> converted;
     if (isParameterSetCodec(codec_id_) && isAnnexB(payload)) {
-      converted = annexBToLengthPrefixed(payload, static_cast<size_t>(nal_length_size_));
-      payload = converted;
-      if (payload.empty()) {
-        return Ok(std::move(frames));
+      converted = annexBToLengthPrefixed(payload, 4);
+      if (!converted.empty()) {
+        payload = converted;
       }
     }
 
@@ -657,30 +576,23 @@ public:
       }
     }
 
-    CallbackContext callback_context;
-    callback_context.frames = &frames;
-    callback_context.color_space = color_space_;
-    callback_context.transfer_char = transfer_char_;
+    auto* frame_timing = new FrameTiming();
+    frame_timing->pts = packet.pts;
+    frame_timing->dts = packet.dts;
+    frame_timing->is_keyframe = packet.is_keyframe;
 
-    FrameTiming frame_timing;
-    frame_timing.pts = packet.pts;
-    frame_timing.dts = packet.dts;
-    frame_timing.is_keyframe = packet.is_keyframe;
-
-    callback_context_ = &callback_context;
     VTDecodeInfoFlags info_flags = 0;
     status = VTDecompressionSessionDecodeFrame(session_.get(),
                                                sample_buffer.get(),
-                                               0,
-                                               &frame_timing,
+                                               kVTDecodeFrame_EnableAsynchronousDecompression,
+                                               frame_timing,
                                                &info_flags);
-    callback_context_ = nullptr;
     if (status != noErr) {
       logStatus(OM_LEVEL_ERROR, "VTDecompressionSessionDecodeFrame", status);
-      return Err(OM_CODEC_DECODE_FAILED);
+      delete frame_timing;
     }
 
-    return Ok(std::move(frames));
+    return Ok(collectFrames());
   }
 
   void flush() override {
@@ -688,6 +600,65 @@ public:
       VTDecompressionSessionFinishDelayedFrames(session_.get());
       VTDecompressionSessionWaitForAsynchronousFrames(session_.get());
     }
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    decoded_frames_.clear();
+  }
+
+  void handleOutput(OSStatus status, CVImageBufferRef image_buffer, FrameTiming* timing, CMTime pts, CMTime duration) {
+    std::unique_ptr<FrameTiming> timing_ptr(timing);
+    if (status != noErr || !image_buffer) {
+      if (status != noErr) {
+        log(OM_CATEGORY_DECODER,
+            OM_LEVEL_ERROR,
+            std::format("VideoToolbox decode callback failed: {}", static_cast<int32_t>(status)));
+      }
+      return;
+    }
+
+    auto pixel_buffer = static_cast<CVPixelBufferRef>(image_buffer);
+    const OSType cv_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
+    const OMPixelFormat om_format = cvPixelFormatToOpenMedia(cv_format);
+    if (om_format == OM_FORMAT_UNKNOWN) {
+      return;
+    }
+
+    CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+    const auto width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
+    const auto height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
+    
+    Picture picture(om_format, width, height);
+    picture.color_space = color_space_;
+    picture.transfer_char = transfer_char_;
+    picture.is_keyframe = timing_ptr ? timing_ptr->is_keyframe : false;
+
+    if (CVPixelBufferIsPlanar(pixel_buffer)) {
+      const size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
+      for (size_t i = 0; i < plane_count && i < 2; ++i) {
+        const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
+        const size_t src_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
+        const size_t plane_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, i);
+        const size_t plane_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, i);
+        size_t bpp = (om_format == OM_FORMAT_NV12 && i == 1) ? 2 : getBytesPerPixel(om_format, static_cast<uint8_t>(i));
+        copyPlaneWithStride(picture.planes.data[i], picture.planes.linesize[i], src, src_stride, plane_width * bpp, plane_height);
+      }
+    } else {
+      const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(pixel_buffer));
+      const size_t src_stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
+      copyPlaneWithStride(picture.planes.data[0], picture.planes.linesize[0], src, src_stride, width * getBytesPerPixel(om_format, 0), height);
+    }
+    CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+
+    Frame frame = {};
+    if (CMTIME_IS_VALID(pts)) {
+        frame.pts = static_cast<uint64_t>(CMTimeGetSeconds(pts) * timescale_);
+    } else {
+        frame.pts = timing_ptr && timing_ptr->pts >= 0 ? static_cast<uint64_t>(timing_ptr->pts) : 0;
+    }
+    frame.dts = frame.pts; // VideoToolbox handles reordering, so we return frames in presentation order
+    frame.data = std::move(picture);
+
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    decoded_frames_.push_back(std::move(frame));
   }
 
 private:
@@ -695,8 +666,10 @@ private:
     auto output_attributes = makeOutputAttributes();
     auto decoder_specification = makeDecoderSpecification();
     VTDecompressionOutputCallbackRecord callback = {};
-    callback.decompressionOutputCallback = decompressionCallback;
-    callback.decompressionOutputRefCon = &callback_context_;
+    callback.decompressionOutputCallback = [](void* refcon, void* source, OSStatus status, VTDecodeInfoFlags, CVImageBufferRef img, CMTime pts, CMTime dur) {
+      static_cast<VideoToolboxDecoder*>(refcon)->handleOutput(status, img, static_cast<FrameTiming*>(source), pts, dur);
+    };
+    callback.decompressionOutputRefCon = this;
 
     VTDecompressionSessionRef raw_session = nullptr;
     OSStatus status = VTDecompressionSessionCreate(kCFAllocatorDefault,
@@ -716,7 +689,6 @@ private:
 
   void closeSession() {
     initialized_ = false;
-    callback_context_ = nullptr;
     if (session_) {
       VTDecompressionSessionInvalidate(session_.get());
       session_.reset();
@@ -726,6 +698,13 @@ private:
     profile_ = OM_PROFILE_NONE;
     nal_length_size_ = 4;
     timescale_ = kDefaultTimeScale;
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    decoded_frames_.clear();
+  }
+
+  auto collectFrames() -> std::vector<Frame> {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    return std::move(decoded_frames_);
   }
 
   auto makeBlockBuffer(std::span<const uint8_t> payload) const -> CFPtr<CMBlockBufferRef> {
@@ -764,17 +743,372 @@ private:
   OMProfile profile_ = OM_PROFILE_NONE;
   CFPtr<CMVideoFormatDescriptionRef> format_description_;
   CFPtr<VTDecompressionSessionRef> session_;
-  CallbackContext* callback_context_ = nullptr;
   VideoFormat output_format_ = {};
   OMColorSpace color_space_ = OM_COLOR_SPACE_BT709;
   OMTransferCharacteristic transfer_char_ = OM_TRANSFER_BT709;
   int nal_length_size_ = 4;
   int32_t timescale_ = kDefaultTimeScale;
   bool initialized_ = false;
+
+  std::mutex frames_mutex_;
+  std::vector<Frame> decoded_frames_;
+};
+
+auto h264CMSampleBufferToAnnexB(CMSampleBufferRef avcc_sample_buffer, bool is_keyframe, std::vector<uint8_t>& annexb_buffer) -> bool {
+  CMVideoFormatDescriptionRef description = CMSampleBufferGetFormatDescription(avcc_sample_buffer);
+  if (description == nullptr) {
+    return false;
+  }
+
+  OSStatus code;
+
+  int nalu_header_size = 0;
+  size_t param_set_count = 0;
+  code = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(description, 0, nullptr, nullptr, &param_set_count, &nalu_header_size);
+  if (code != noErr) {
+    return false;
+  }
+
+  if (is_keyframe) {
+    size_t param_set_size = 0;
+    const uint8_t* param_set = nullptr;
+    for (size_t i = 0; i < param_set_count; ++i) {
+      code = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+          description, i, &param_set, &param_set_size, nullptr, nullptr);
+      if (code != noErr) {
+        return false;
+      }
+      annexb_buffer.insert(annexb_buffer.end(), {0, 0, 0, 1});
+      annexb_buffer.insert(annexb_buffer.end(), param_set, param_set + param_set_size);
+    }
+  }
+
+  CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(avcc_sample_buffer);
+  if (block_buffer == nullptr) {
+    return false;
+  }
+  
+  size_t block_buffer_size = CMBlockBufferGetDataLength(block_buffer);
+  std::vector<uint8_t> tmp(block_buffer_size);
+  code = CMBlockBufferCopyDataBytes(block_buffer, 0, block_buffer_size, tmp.data());
+  if (code != noErr) {
+    return false;
+  }
+
+  size_t offset = 0;
+  while (offset + nalu_header_size <= block_buffer_size) {
+    uint32_t nalu_size = 0;
+    for (int i = 0; i < nalu_header_size; ++i) {
+        nalu_size = (nalu_size << 8) | tmp[offset + i];
+    }
+    offset += nalu_header_size;
+    if (offset + nalu_size > block_buffer_size) break;
+
+    annexb_buffer.insert(annexb_buffer.end(), {0, 0, 0, 1});
+    annexb_buffer.insert(annexb_buffer.end(), tmp.data() + offset, tmp.data() + offset + nalu_size);
+    offset += nalu_size;
+  }
+
+  return true;
+}
+
+auto hevcCMSampleBufferToAnnexB(CMSampleBufferRef hvcc_sample_buffer, bool is_keyframe, std::vector<uint8_t>& annexb_buffer) -> bool {
+  CMVideoFormatDescriptionRef description = CMSampleBufferGetFormatDescription(hvcc_sample_buffer);
+  if (description == nullptr) {
+    return false;
+  }
+
+  OSStatus code;
+
+  int nalu_header_size = 0;
+  size_t param_set_count = 0;
+  code = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(description, 0, nullptr, nullptr, &param_set_count, &nalu_header_size);
+  if (code != noErr) {
+    return false;
+  }
+
+  if (is_keyframe) {
+    size_t param_set_size = 0;
+    const uint8_t* param_set = nullptr;
+    for (size_t i = 0; i < param_set_count; ++i) {
+      code = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+          description, i, &param_set, &param_set_size, nullptr, nullptr);
+      if (code != noErr) {
+        return false;
+      }
+      annexb_buffer.insert(annexb_buffer.end(), {0, 0, 0, 1});
+      annexb_buffer.insert(annexb_buffer.end(), param_set, param_set + param_set_size);
+    }
+  }
+
+  CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(hvcc_sample_buffer);
+  if (block_buffer == nullptr) {
+    return false;
+  }
+  
+  size_t block_buffer_size = CMBlockBufferGetDataLength(block_buffer);
+  std::vector<uint8_t> tmp(block_buffer_size);
+  code = CMBlockBufferCopyDataBytes(block_buffer, 0, block_buffer_size, tmp.data());
+  if (code != noErr) {
+    return false;
+  }
+
+  size_t offset = 0;
+  while (offset + nalu_header_size <= block_buffer_size) {
+    uint32_t nalu_size = 0;
+    for (int i = 0; i < nalu_header_size; ++i) {
+        nalu_size = (nalu_size << 8) | tmp[offset + i];
+    }
+    offset += nalu_header_size;
+    if (offset + nalu_size > block_buffer_size) break;
+
+    annexb_buffer.insert(annexb_buffer.end(), {0, 0, 0, 1});
+    annexb_buffer.insert(annexb_buffer.end(), tmp.data() + offset, tmp.data() + offset + nalu_size);
+    offset += nalu_size;
+  }
+
+  return true;
+}
+
+struct EncoderCallbackContext {
+  std::vector<Packet> packets;
+  std::vector<uint8_t> extradata;
+  OMCodecId codec_id;
+  int32_t timescale;
+};
+
+void compressionCallback(void* compression_output_ref_con,
+                         void* source_frame_ref_con,
+                         OSStatus status,
+                         VTEncodeInfoFlags info_flags,
+                         CMSampleBufferRef sample_buffer) {
+  auto* context = static_cast<EncoderCallbackContext*>(compression_output_ref_con);
+  if (!context || status != noErr || !sample_buffer) {
+    return;
+  }
+
+  if (context->extradata.empty()) {
+      CMVideoFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sample_buffer);
+      if (desc) {
+          CFDictionaryRef extensions = CMFormatDescriptionGetExtensions(desc);
+          if (extensions) {
+              CFDataRef atom = static_cast<CFDataRef>(CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms));
+              if (atom) {
+                  const uint8_t* data = CFDataGetBytePtr(atom);
+                  CFIndex size = CFDataGetLength(atom);
+                  context->extradata.assign(data, data + size);
+              }
+          }
+      }
+  }
+
+  bool is_keyframe = false;
+  CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample_buffer, false);
+  if (attachments != nullptr && CFArrayGetCount(attachments)) {
+    CFDictionaryRef attachment = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(attachments, 0));
+    is_keyframe = !CFDictionaryContainsKey(attachment, kCMSampleAttachmentKey_NotSync);
+  }
+
+  std::vector<uint8_t> annexb;
+  bool ok = false;
+  if (context->codec_id == OM_CODEC_H264) {
+      ok = h264CMSampleBufferToAnnexB(sample_buffer, is_keyframe, annexb);
+  } else if (context->codec_id == OM_CODEC_H265) {
+      ok = hevcCMSampleBufferToAnnexB(sample_buffer, is_keyframe, annexb);
+  } else {
+      // For ProRes, we can probably just use the raw data
+      CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(sample_buffer);
+      if (block_buffer) {
+          size_t length = CMBlockBufferGetDataLength(block_buffer);
+          annexb.resize(length);
+          CMBlockBufferCopyDataBytes(block_buffer, 0, length, annexb.data());
+          ok = true;
+      }
+  }
+
+  if (ok) {
+    Packet packet;
+    packet.allocate(annexb.size());
+    std::memcpy(packet.bytes.data(), annexb.data(), annexb.size());
+    packet.pts = static_cast<int64_t>(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample_buffer)) * context->timescale);
+    packet.dts = static_cast<int64_t>(CMTimeGetSeconds(CMSampleBufferGetDecodeTimeStamp(sample_buffer)) * context->timescale);
+    packet.is_keyframe = is_keyframe;
+    context->packets.push_back(std::move(packet));
+  }
+}
+
+class VideoToolboxEncoder final : public Encoder {
+public:
+  explicit VideoToolboxEncoder(OMCodecId codec_id)
+      : codec_id_(codec_id) {}
+
+  ~VideoToolboxEncoder() override {
+    closeSession();
+  }
+
+  auto configure(const EncoderOptions& options) -> OMError override {
+    closeSession();
+
+    if (options.format.type != OM_MEDIA_VIDEO || options.format.codec_id != codec_id_) {
+      return OM_CODEC_INVALID_PARAMS;
+    }
+
+    width_ = options.format.video.width;
+    height_ = options.format.video.height;
+    timescale_ = kDefaultTimeScale;
+
+    OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault,
+                                                 static_cast<int32_t>(width_),
+                                                 static_cast<int32_t>(height_),
+                                                 codecIdToVideoToolboxFormat(codec_id_, options.format.profile),
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 compressionCallback,
+                                                 &callback_context_,
+                                                 &session_);
+    if (status != noErr || !session_) {
+        return OM_CODEC_OPEN_FAILED;
+    }
+
+    callback_context_.codec_id = codec_id_;
+    callback_context_.timescale = timescale_;
+
+    updateBitrate(options.rate_control);
+
+    VTCompressionSessionPrepareToEncodeFrames(session_);
+
+    initialized_ = true;
+    return OM_SUCCESS;
+  }
+
+  auto getInfo() -> EncodingInfo override {
+    EncodingInfo info = {};
+    info.extradata = extradata_;
+    return info;
+  }
+
+  auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
+    if (!initialized_ || !session_) {
+      return Err(OM_COMMON_NOT_INITIALIZED);
+    }
+
+    const auto* picture = std::get_if<Picture>(&frame.data);
+    if (!picture) {
+      return Err(OM_CODEC_INVALID_PARAMS);
+    }
+
+    CVPixelBufferRef pixel_buffer = nullptr;
+    OSStatus status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                          picture->width,
+                                          picture->height,
+                                          kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                          nullptr,
+                                          &pixel_buffer);
+    if (status != noErr || !pixel_buffer) {
+        return Err(OM_CODEC_ENCODE_FAILED);
+    }
+
+    CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+    for (uint32_t i = 0; i < picture->planes.count && i < 2; ++i) {
+        uint8_t* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
+        size_t dst_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
+        auto dims = picture->getPlaneDimensions(i);
+        copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * getBytesPerPixel(picture->format, i), dims.second);
+    }
+    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+
+    CMTime pts = CMTimeMake(frame.pts, timescale_);
+    
+    callback_context_.packets.clear();
+    status = VTCompressionSessionEncodeFrame(session_, pixel_buffer, pts, kCMTimeInvalid, nullptr, nullptr, nullptr);
+    CFRelease(pixel_buffer);
+
+    if (status != noErr) {
+        return Err(OM_CODEC_ENCODE_FAILED);
+    }
+
+    VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
+
+    if (extradata_.empty() && !callback_context_.extradata.empty()) {
+        extradata_ = callback_context_.extradata;
+    }
+
+    return Ok(std::move(callback_context_.packets));
+  }
+
+  auto updateBitrate(const RateControlParams& rc) -> OMError override {
+    if (!session_) return OM_COMMON_NOT_INITIALIZED;
+
+    int64_t target_bitrate = 0;
+    int64_t max_bitrate = 0;
+
+    switch (rc.getMode()) {
+        case RateControlMode::CBR:
+            target_bitrate = std::get<CbrParams>(rc.params).bitrate.target_bitrate;
+            max_bitrate = std::get<CbrParams>(rc.params).bitrate.max_bitrate.value_or(target_bitrate);
+            break;
+        case RateControlMode::VBR:
+            target_bitrate = std::get<VbrParams>(rc.params).bitrate.target_bitrate;
+            max_bitrate = std::get<VbrParams>(rc.params).bitrate.max_bitrate.value_or(target_bitrate * 2);
+            break;
+        case RateControlMode::ABR:
+            target_bitrate = std::get<AbrParams>(rc.params).target_bitrate;
+            break;
+        default:
+            break;
+    }
+
+    if (target_bitrate > 0) {
+        CFNumberRef br = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &target_bitrate);
+        VTSessionSetProperty(session_, kVTCompressionPropertyKey_AverageBitRate, br);
+        CFRelease(br);
+    }
+
+    if (max_bitrate > 0) {
+        int64_t bytes_per_second = max_bitrate / 8;
+        CFNumberRef limit_bytes = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &bytes_per_second);
+        double one = 1.0;
+        CFNumberRef limit_duration = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &one);
+        const void* values[] = { limit_bytes, limit_duration };
+        CFArrayRef limits = CFArrayCreate(kCFAllocatorDefault, values, 2, &kCFTypeArrayCallBacks);
+        VTSessionSetProperty(session_, kVTCompressionPropertyKey_DataRateLimits, limits);
+        CFRelease(limits);
+        CFRelease(limit_bytes);
+        CFRelease(limit_duration);
+    }
+
+    return OM_SUCCESS;
+  }
+
+private:
+  void closeSession() {
+    initialized_ = false;
+    if (session_) {
+      VTCompressionSessionInvalidate(session_);
+      CFRelease(session_);
+      session_ = nullptr;
+    }
+    extradata_.clear();
+    callback_context_.extradata.clear();
+  }
+
+  OMCodecId codec_id_;
+  VTCompressionSessionRef session_ = nullptr;
+  EncoderCallbackContext callback_context_;
+  std::vector<uint8_t> extradata_;
+  uint32_t width_ = 0;
+  uint32_t height_ = 0;
+  int32_t timescale_ = kDefaultTimeScale;
+  bool initialized_ = false;
 };
 
 auto createVideoToolboxDecoder(OMCodecId codec_id) -> std::unique_ptr<Decoder> {
   return std::make_unique<VideoToolboxDecoder>(codec_id);
+}
+
+auto createVideoToolboxEncoder(OMCodecId codec_id) -> std::unique_ptr<Encoder> {
+  return std::make_unique<VideoToolboxEncoder>(codec_id);
 }
 
 } // namespace
@@ -806,6 +1140,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H264 = {
         .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H264); },
+    .encoder_factory = [] { return createVideoToolboxEncoder(OM_CODEC_H264); },
 };
 
 const CodecDescriptor CODEC_VIDEOTOOLBOX_H265 = {
@@ -823,6 +1158,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H265 = {
         .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H265); },
+    .encoder_factory = [] { return createVideoToolboxEncoder(OM_CODEC_H265); },
 };
 
 const CodecDescriptor CODEC_VIDEOTOOLBOX_MPEG2 = {
@@ -878,6 +1214,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_PRORES = {
         .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_PRORES); },
+    .encoder_factory = [] { return createVideoToolboxEncoder(OM_CODEC_PRORES); },
 };
 
 } // namespace openmedia
