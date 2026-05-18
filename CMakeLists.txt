@@ -451,7 +451,7 @@ if (OPENMEDIA_OPENH264)
         src/video/openh264.cpp
     )
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPENH264)
-    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openh264/include)
+    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openh264)
 endif ()
 
 if (OPENMEDIA_VVDEC)
