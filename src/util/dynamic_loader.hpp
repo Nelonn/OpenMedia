@@ -13,9 +13,9 @@ namespace openmedia {
 
 class DynamicLoader {
 #if defined(__unix__) || defined(__APPLE__) || defined(__QNX__) || defined(__Fuchsia__)
-  void* library_;
+  void* library_ = nullptr;
 #elif defined(_WIN32)
-  ::HINSTANCE library_;
+  ::HINSTANCE library_ = nullptr;
 #endif
 
 public:
@@ -46,6 +46,7 @@ public:
 
   void open(const std::string& library_name) {
     if (library_name.empty()) return;
+    if (library_) return;
 #if defined(_WIN32)
     library_ = ::LoadLibraryA(library_name.c_str());
 #elif defined(__unix__) || defined(__APPLE__) || defined(__QNX__) || defined(__Fuchsia__)

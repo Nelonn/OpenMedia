@@ -12,7 +12,8 @@ namespace {
 auto isVideoDecoderArg(std::string_view arg) -> bool {
   return arg == "vulkan_h264" || arg == "dx11_h264" || arg == "dx12_h264" ||
          arg == "nvdec_h264" || arg == "nvdec_h265" || arg == "nvdec_av1" || arg == "nvdec_vp9" ||
-         arg == "amf_h264" || arg == "amf_h265" || arg == "amf_av1" || arg == "amf_vp9";
+         arg == "amf_h264" || arg == "amf_h265" || arg == "amf_av1" || arg == "amf_vp9" ||
+         arg == "vaapi_h264" || arg == "vaapi_h265" || arg == "vaapi_av1" || arg == "vaapi_vp9";
 }
 
 auto enableRequestedBackend(MediaPlayer& player, std::string_view decoder) -> bool {
@@ -20,6 +21,7 @@ auto enableRequestedBackend(MediaPlayer& player, std::string_view decoder) -> bo
   if (decoder.starts_with("nvdec_")) return player.enableCuda();
   if (decoder.starts_with("dx11_")) return player.enableDX11();
   if (decoder.starts_with("dx12_")) return player.enableDX12();
+  if (decoder.starts_with("vaapi_")) return player.enableVAAPI();
   if (decoder.starts_with("vulkan_")) return player.enableVulkan();
   return player.enableVulkan();
 }

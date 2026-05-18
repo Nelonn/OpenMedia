@@ -30,6 +30,9 @@
 #ifndef __APPLE__
 #include <openmedia/hw_vulkan.h>
 #endif
+#ifdef OPENMEDIA_VAAPI
+#include <openmedia/hw_vaapi.h>
+#endif
 #include <openmedia/io.hpp>
 #include <openmedia/video.hpp>
 #include <queue>
@@ -489,6 +492,8 @@ public:
         hw_device_ = HWDevice{HWDeviceType::DX11, ctx};
         SDL_Log("[DX11] Video acceleration enabled.");
         return true;
+#else
+        return false;
 #endif
     }
 
@@ -505,6 +510,25 @@ public:
         hw_device_ = HWDevice{HWDeviceType::DX12, ctx};
         SDL_Log("[DX12] Video acceleration enabled.");
         return true;
+#else
+        return false;
+#endif
+    }
+
+    auto enableVAAPI() -> bool {
+#ifdef OPENMEDIA_VAAPI
+        releaseHardwareDevice();
+        OMVAAPIInit init = {};
+        auto* ctx = HWVAAPIContext_create(init);
+        if (!ctx) {
+            SDL_Log("[VAAPI] HWVAAPIContext_create failed");
+            return false;
+        }
+        hw_device_ = HWDevice{HWDeviceType::VAAPI, ctx};
+        SDL_Log("[VAAPI] Video acceleration enabled.");
+        return true;
+#else
+        return false;
 #endif
     }
 
@@ -745,6 +769,7 @@ private:
                     return name.starts_with("nvdec_");
             case HWDeviceType::DX11:
             case HWDeviceType::DX12:   return name.starts_with("dx12_");
+            case HWDeviceType::VAAPI:  return name.starts_with("vaapi_");
             default:                   return false;
         }
     }
@@ -755,6 +780,11 @@ private:
 #ifndef __APPLE__
                 case HWDeviceType::VULKAN:
                     HWVulkanContext_delete(static_cast<OMVulkanContext*>(hw_device_->context));
+                    break;
+#endif
+#ifdef OPENMEDIA_VAAPI
+                case HWDeviceType::VAAPI:
+                    HWVAAPIContext_delete(static_cast<OMVAAPIContext*>(hw_device_->context));
                     break;
 #endif
 #ifdef _WIN32
@@ -1163,6 +1193,25 @@ private:
                                              vf.y_plane.data(), vf.y_stride,
                                              vf.u_plane.data(), vf.u_stride,
                                              pic.width, pic.height);
+#endif
+                  } else if (hw && hw->getType() == HWDeviceType::VAAPI) {
+#ifdef OPENMEDIA_VAAPI
+                    const auto vaapi_pic = std::static_pointer_cast<openmedia::VAAPIHardwarePicture>(hw);
+                    vf.y_stride = pic.width;
+                    vf.u_stride = pic.width;
+                    vf.v_stride = 0;
+                    vf.y_plane.resize(size_t(vf.y_stride) * pic.height);
+                    vf.u_plane.resize(size_t(vf.u_stride) * ((pic.height + 1) / 2));
+
+                    if (!hw_device_ || hw_device_->type != HWDeviceType::VAAPI)
+                        continue;
+
+                    if (!HWVAAPIContext_copyToHost(static_cast<OMVAAPIContext*>(hw_device_->context),
+                                                   vaapi_pic->surface(),
+                                                   vf.y_plane.data(), vf.y_stride,
+                                                   vf.u_plane.data(), vf.u_stride,
+                                                   pic.width, pic.height))
+                        continue;
 #endif
                   }
                 } else {
