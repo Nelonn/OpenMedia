@@ -127,22 +127,6 @@ struct State {
     }
   }
 
-  auto convertAvcc(std::span<const uint8_t> packet) const -> std::vector<uint8_t> {
-    std::vector<uint8_t> out;
-    size_t offset = 0;
-    while (nal_length_size > 0 && offset + nal_length_size <= packet.size()) {
-      uint32_t nal_size = 0;
-      for (uint8_t i = 0; i < nal_length_size; ++i) nal_size = (nal_size << 8u) | packet[offset + i];
-      offset += nal_length_size;
-      if (nal_size == 0 || offset + nal_size > packet.size()) break;
-      const uint8_t start_code[] = {0, 0, 1};
-      out.insert(out.end(), start_code, start_code + sizeof(start_code));
-      out.insert(out.end(), packet.begin() + offset, packet.begin() + offset + nal_size);
-      offset += nal_size;
-    }
-    return out;
-  }
-
   auto computePoc(const h264::SliceHeader& slice) -> int32_t {
     if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !pps_valid[slice.pic_parameter_set_id]) {
       return slice.pic_order_cnt_lsb;
@@ -175,10 +159,6 @@ struct State {
   auto parseFrame(std::span<const uint8_t> packet) -> ParsedFrame {
     ParsedFrame frame;
     frame.bitstream = packet;
-    if (nal_length_size > 0 && !isAnnexB(packet)) {
-      frame.owned_bitstream = convertAvcc(packet);
-      frame.bitstream = frame.owned_bitstream;
-    }
 
     h264::Bitstream bs;
     bs.init(frame.bitstream.data(), frame.bitstream.size());

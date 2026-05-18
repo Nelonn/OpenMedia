@@ -366,12 +366,7 @@ public:
     if (packet.bytes.empty()) return Ok(std::vector<Frame>{});
 
     if (codec_id_ == OM_CODEC_H264) {
-      std::vector<uint8_t> annexb_storage;
       std::span<const uint8_t> bitstream = packet.bytes;
-      if (h264_nal_length_size_ > 0 && !isAnnexB(bitstream)) {
-        annexb_storage = convertAvccPacket(packet.bytes);
-        bitstream = annexb_storage;
-      }
       if (bitstream.empty() || bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_HWACCEL_FAILED);
 
       h264::Bitstream bs;
@@ -534,24 +529,6 @@ private:
       }
       storeH264Nal({nal_start, static_cast<size_t>(nal_end - nal_start)});
     }
-  }
-
-  auto convertAvccPacket(std::span<const uint8_t> packet) -> std::vector<uint8_t> {
-    std::vector<uint8_t> out;
-    size_t offset = 0;
-    while (offset + h264_nal_length_size_ <= packet.size()) {
-      uint32_t nal_size = 0;
-      for (uint8_t i = 0; i < h264_nal_length_size_; ++i) {
-        nal_size = (nal_size << 8u) | packet[offset + i];
-      }
-      offset += h264_nal_length_size_;
-      if (nal_size == 0 || offset + nal_size > packet.size()) break;
-      const uint8_t start_code[] = {0, 0, 1};
-      out.insert(out.end(), start_code, start_code + sizeof(start_code));
-      out.insert(out.end(), packet.begin() + offset, packet.begin() + offset + nal_size);
-      offset += nal_size;
-    }
-    return out;
   }
 
   auto computeH264Poc(const h264::SliceHeader& slice) -> int32_t {

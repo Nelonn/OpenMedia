@@ -48,7 +48,7 @@ OM_ENUM(OMError, int32_t) {
 
   OM_CODEC_UNKNOWN_ERROR = 4000,
   OM_CODEC_NOT_FOUND = 4001,      // No decoder for codec_id
-  OM_CODEC_NOT_SUPPORTED = 4002,  // Profile/level not supported
+  OM_CODEC_NOT_SUPPORTED = 4002,  // PixelFormat/Profile/level not supported
   OM_CODEC_OPEN_FAILED = 4003,
   OM_CODEC_INVALID_PARAMS = 4004, // Bad width/height/sample_rate/etc.
   OM_CODEC_DECODE_FAILED = 4005,  // Unrecoverable decode error

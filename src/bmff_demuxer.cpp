@@ -1134,11 +1134,17 @@ public:
       return Err(OM_FORMAT_END_OF_FILE);
 
     std::vector<uint8_t> converted;
+    FilteredBitstream filtered;
     std::span<const uint8_t> payload(raw);
 
     if (bmff_track.bsf) {
-      converted = bmff_track.bsf->convert(payload, sample.is_keyframe);
-      payload = converted;
+      if (sample.is_keyframe) {
+        converted = bmff_track.bsf->convert(payload, true);
+        payload = converted;
+      } else {
+        filtered = bmff_track.bsf->filter(std::move(raw));
+        payload = filtered.bytes;
+      }
     }
 
     Packet pkt;

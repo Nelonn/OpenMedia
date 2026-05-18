@@ -23,7 +23,7 @@ extern const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3;
 
 // Video - Software
 extern const CodecDescriptor CODEC_DAV1D;
-//extern const CodecDescriptor CODEC_OPENH264;
+extern const CodecDescriptor CODEC_OPENH264;
 extern const CodecDescriptor CODEC_VVDEC;
 extern const CodecDescriptor CODEC_XEVD;
 extern const CodecDescriptor CODEC_XEVE;

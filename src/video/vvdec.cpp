@@ -46,38 +46,6 @@ static void vvdec_log_callback(void* opaque, int level, const char* format, va_l
   log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
 }
 
-static constexpr uint8_t ANNEX_B_START_CODE[] = {0x00, 0x00, 0x00, 0x01};
-static constexpr size_t ANNEX_B_START_CODE_LEN = sizeof(ANNEX_B_START_CODE);
-
-static auto isAnnexB(const uint8_t* data, size_t size) -> bool {
-  if (size < 4) return false;
-  return data[0] == 0x00 && data[1] == 0x00 &&
-         (data[2] == 0x01 ||
-          (data[2] == 0x00 && data[3] == 0x01));
-}
-
-static auto convertToAnnexB(const uint8_t* data, size_t size) -> std::vector<uint8_t> {
-  std::vector<uint8_t> out;
-  out.reserve(size + 16);
-
-  size_t offset = 0;
-  while (offset + 4 <= size) {
-    uint32_t nal_size = (static_cast<uint32_t>(data[offset]) << 24) |
-                        (static_cast<uint32_t>(data[offset + 1]) << 16) |
-                        (static_cast<uint32_t>(data[offset + 2]) << 8) |
-                        (static_cast<uint32_t>(data[offset + 3]));
-    offset += 4;
-
-    if (nal_size == 0 || offset + nal_size > size) break;
-
-    out.insert(out.end(), ANNEX_B_START_CODE,
-               ANNEX_B_START_CODE + ANNEX_B_START_CODE_LEN);
-    out.insert(out.end(), data + offset, data + offset + nal_size);
-    offset += nal_size;
-  }
-  return out;
-}
-
 class VvdecDecoder final : public Decoder {
   std::unique_ptr<vvdecDecoder, VvdecDecoderDeleter> ctx_;
   std::unique_ptr<vvdecParams, VvdecParamsDeleter> params_;
@@ -118,14 +86,7 @@ public:
     vvdec_accessUnit_alloc_payload(access_unit_.get(), 1024 * 1024);
 
     if (!options.extradata.empty()) {
-      const uint8_t* ed = options.extradata.data();
-      size_t ed_size = options.extradata.size();
-
-      if (isAnnexB(ed, ed_size)) {
-        extradata_.assign(ed, ed + ed_size);
-      } else {
-        extradata_ = convertToAnnexB(ed, ed_size);
-      }
+      extradata_.assign(options.extradata.begin(), options.extradata.end());
     }
 
     if (!extradata_.empty()) {
@@ -156,17 +117,7 @@ public:
     std::vector<Frame> frames;
 
     if (!packet.bytes.empty()) {
-      const uint8_t* raw = packet.bytes.data();
-      size_t raw_size = packet.bytes.size();
-
-      std::vector<uint8_t> converted;
-      if (!isAnnexB(raw, raw_size)) {
-        converted = convertToAnnexB(raw, raw_size);
-        raw = converted.data();
-        raw_size = converted.size();
-      }
-
-      auto err = sendAccessUnit(raw, raw_size, packet.pts, packet.dts, packet.is_keyframe, frames);
+      auto err = sendAccessUnit(packet.bytes.data(), packet.bytes.size(), packet.pts, packet.dts, packet.is_keyframe, frames);
       if (err != OM_SUCCESS) {
         return Err(err);
       }
