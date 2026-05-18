@@ -99,5 +99,6 @@ int HWVAAPIContext_copyToHost(OMVAAPIContext* context,
 
   libva.vaUnmapBuffer(context->display, image.buf);
   libva.vaDestroyImage(context->display, image.image_id);
+  log(OM_CATEGORY_HARDWARE, OM_LEVEL_DEBUG, "[VAAPI] called HWVAAPIContext_copyToHost");
   return 1;
 }
