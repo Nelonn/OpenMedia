@@ -208,6 +208,7 @@ public:
     auto* cuvid = NVLoader::getInstance().cuvid();
 
     codec_id_ = options.format.codec_id;
+    h264_ = {};
     if (codec_id_ == OM_CODEC_H264) {
       h264_.parseExtradata(options.extradata);
     }
@@ -256,7 +257,6 @@ public:
     auto* cuvid = NVLoader::getInstance().cuvid();
     CUVIDSOURCEDATAPACKET cupkt = {};
 
-    std::vector<uint8_t> annexb;
     std::span<const uint8_t> bytes = packet.bytes;
 
     static bool first_packet = true;
@@ -266,16 +266,6 @@ public:
         openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: nal_length_size: {}", h264_.nal_length_size);
       }
       first_packet = false;
-    }
-
-    if (codec_id_ == OM_CODEC_H264 && h264_.nal_length_size > 0 && !dx_h264::isAnnexB(bytes)) {
-      annexb = h264_.convertAvcc(bytes);
-      if (!annexb.empty()) bytes = annexb;
-    } else if (codec_id_ == OM_CODEC_H264 && !dx_h264::isAnnexB(bytes)) {
-      // Fallback: If nal_length_size is 0 but it's clearly not AnnexB, let's try assuming length is 4.
-      h264_.nal_length_size = 4;
-      annexb = h264_.convertAvcc(bytes);
-      if (!annexb.empty()) bytes = annexb;
     }
 
     cupkt.payload = bytes.data();

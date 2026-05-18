@@ -300,13 +300,16 @@ public:
   auto configure(const DecoderOptions& options) -> OMError override {
     close();
     codec_id_ = options.format.codec_id;
+    h264_ = {};
     if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 && codec_id_ != OM_CODEC_VP9 && codec_id_ != OM_CODEC_AV1) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
     if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
     if (!options.extradata.empty()) {
       extradata_.assign(options.extradata.begin(), options.extradata.end());
-      if (codec_id_ == OM_CODEC_H264) h264_.parseExtradata(options.extradata);
+      if (codec_id_ == OM_CODEC_H264) {
+        h264_.parseExtradata(options.extradata);
+      }
     }
 
     if (!load_amf_runtime()) return OM_CODEC_HWACCEL_FAILED;
@@ -391,18 +394,6 @@ private:
   auto submitInput(const Packet& packet) -> AMF_RESULT {
     amf::AMFBufferPtr buf;
     std::span<const uint8_t> bytes = packet.bytes;
-    std::vector<uint8_t> annexb;
-    if (codec_id_ == OM_CODEC_H264 && !dx_h264::isAnnexB(bytes)) {
-      if (h264_.nal_length_size > 0) {
-        annexb = h264_.convertAvcc(bytes);
-      } else {
-        // Fallback: many streams use 4-byte lengths. Try that if we don't know.
-        h264_.nal_length_size = 4;
-        annexb = h264_.convertAvcc(bytes);
-        if (annexb.empty()) h264_.nal_length_size = 0; // Reset if it failed
-      }
-      if (!annexb.empty()) bytes = annexb;
-    }
     AMF_RESULT res = amf_context_->AllocBuffer(amf::AMF_MEMORY_HOST, bytes.size(), &buf);
     if (res != AMF_OK) return res;
     memcpy(buf->GetNative(), bytes.data(), bytes.size());

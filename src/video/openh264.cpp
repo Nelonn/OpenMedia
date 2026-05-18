@@ -1,0 +1,346 @@
+#include <wels/codec_api.h>
+#include <algorithm>
+#include <codecs.hpp>
+#include <cstring>
+#include <openmedia/codec_extra.hpp>
+#include <openmedia/video.hpp>
+#include <util/io_util.hpp>
+#include <vector>
+#include "openh264_loader.hpp"
+
+namespace openmedia {
+
+class OpenH264Decoder final : public Decoder {
+  ISVCDecoder* decoder_ = nullptr;
+  bool initialized_ = false;
+  VideoFormat output_format_ = {};
+
+public:
+  OpenH264Decoder() = default;
+
+  ~OpenH264Decoder() override {
+    if (decoder_) {
+      decoder_->Uninitialize();
+      OpenH264Loader::getInstance().WelsDestroyDecoder(decoder_);
+    }
+  }
+
+  auto configure(const DecoderOptions& options) -> OMError override {
+    if (options.format.codec_id != OM_CODEC_H264) {
+      return OM_CODEC_INVALID_PARAMS;
+    }
+
+    auto& loader = OpenH264Loader::getInstance();
+    if (!loader.load()) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    if (loader.WelsCreateDecoder(&decoder_) != 0 || !decoder_) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    SDecodingParam param = {};
+    param.eEcActiveIdc = ERROR_CON_DISABLE;
+    param.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_AVC;
+
+    if (decoder_->Initialize(&param) != 0) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    if (!options.extradata.empty()) {
+      unsigned char* data[3] = {nullptr, nullptr, nullptr};
+      SBufferInfo buf_info = {};
+      decoder_->DecodeFrame2(options.extradata.data(), static_cast<int>(options.extradata.size()), data, &buf_info);
+    }
+
+    output_format_.width = options.format.video.width;
+    output_format_.height = options.format.video.height;
+    output_format_.format = OM_FORMAT_YUV420P;
+    initialized_ = true;
+    return OM_SUCCESS;
+  }
+
+  auto getInfo() -> std::optional<DecodingInfo> override {
+    if (!initialized_) return std::nullopt;
+
+    DecodingInfo info = {};
+    info.media_type = OM_MEDIA_VIDEO;
+    info.video_format = output_format_;
+    return info;
+  }
+
+  auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
+    if (!decoder_) return Err(OM_CODEC_DECODE_FAILED);
+
+    std::vector<Frame> frames;
+    SBufferInfo buf_info = {};
+    unsigned char* data[3] = {nullptr, nullptr, nullptr};
+
+    std::span<const uint8_t> raw = packet.bytes;
+
+    int ret;
+    if (packet.bytes.empty()) {
+      ret = decoder_->DecodeFrame2(nullptr, 0, data, &buf_info);
+    } else {
+      ret = decoder_->DecodeFrame2(raw.data(), static_cast<int>(raw.size()), data, &buf_info);
+    }
+
+    if (ret != 0) {
+      return Err(OM_CODEC_DECODE_FAILED);
+    }
+
+    if (buf_info.iBufferStatus == 1) {
+      output_format_.width = buf_info.UsrData.sSystemBuffer.iWidth;
+      output_format_.height = buf_info.UsrData.sSystemBuffer.iHeight;
+
+      Picture pic(OM_FORMAT_YUV420P, output_format_.width, output_format_.height);
+
+      copyPlane(pic.planes.data[0], data[0], output_format_.width, output_format_.height, buf_info.UsrData.sSystemBuffer.iStride[0]);
+      copyPlane(pic.planes.data[1], data[1], output_format_.width / 2, output_format_.height / 2, buf_info.UsrData.sSystemBuffer.iStride[1]);
+      copyPlane(pic.planes.data[2], data[2], output_format_.width / 2, output_format_.height / 2, buf_info.UsrData.sSystemBuffer.iStride[1]);
+
+      Frame frame = {};
+      frame.pts = packet.pts;
+      frame.dts = packet.dts;
+      frame.data = std::move(pic);
+      frames.push_back(std::move(frame));
+    }
+
+    return Ok(std::move(frames));
+  }
+
+  void flush() override {
+    if (decoder_) {
+      unsigned char* data[3] = {nullptr, nullptr, nullptr};
+      SBufferInfo buf_info = {};
+      decoder_->DecodeFrame2(nullptr, 0, data, &buf_info);
+    }
+  }
+};
+
+class OpenH264Encoder final : public Encoder {
+  ISVCEncoder* encoder_ = nullptr;
+  VideoFormat format_ = {};
+  bool initialized_ = false;
+
+public:
+  OpenH264Encoder() = default;
+
+  ~OpenH264Encoder() override {
+    if (encoder_) {
+      encoder_->Uninitialize();
+      OpenH264Loader::getInstance().WelsDestroySVCEncoder(encoder_);
+    }
+  }
+
+  auto configure(const EncoderOptions& options) -> OMError override {
+    if (options.format.codec_id != OM_CODEC_H264) {
+      return OM_CODEC_INVALID_PARAMS;
+    }
+
+    auto& loader = OpenH264Loader::getInstance();
+    if (!loader.load()) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    if (loader.WelsCreateSVCEncoder(&encoder_) != 0 || !encoder_) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    format_ = options.video_format;
+
+    SEncParamExt param = {};
+    encoder_->GetDefaultParams(&param);
+
+    // Apply extended configuration options from dictionary
+    param.iUsageType = static_cast<EUsageType>(options.extra.getInt32(OPENH264_ENC_USAGE_TYPE, CAMERA_VIDEO_REAL_TIME));
+    param.iComplexityMode = static_cast<ECOMPLEXITY_MODE>(options.extra.getInt32(OPENH264_ENC_COMPLEXITY, LOW_COMPLEXITY));
+
+    if (options.extra.contains(OPENH264_ENC_IDR_INTERVAL)) {
+      param.uiIntraPeriod = options.extra.getInt32(OPENH264_ENC_IDR_INTERVAL);
+    }
+    if (options.extra.contains(OPENH264_ENC_NUM_REF_FRAME)) {
+      param.iNumRefFrame = options.extra.getInt32(OPENH264_ENC_NUM_REF_FRAME);
+    }
+    if (options.extra.contains(OPENH264_ENC_ENTROPY_CODING)) {
+      param.iEntropyCodingModeFlag = options.extra.getInt32(OPENH264_ENC_ENTROPY_CODING);
+    }
+
+    param.bEnableFrameSkip = options.extra.getBool(OPENH264_ENC_FRAME_SKIP, false);
+
+    if (options.extra.contains(OPENH264_ENC_MAX_QP)) {
+      param.iMaxQp = options.extra.getInt32(OPENH264_ENC_MAX_QP);
+    }
+    if (options.extra.contains(OPENH264_ENC_MIN_QP)) {
+      param.iMinQp = options.extra.getInt32(OPENH264_ENC_MIN_QP);
+    }
+
+    if (options.extra.contains(OPENH264_ENC_LTR)) {
+      param.bEnableLongTermReference = options.extra.getBool(OPENH264_ENC_LTR);
+    }
+    if (options.extra.contains(OPENH264_ENC_LTR_PERIOD)) {
+      param.iLtrMarkPeriod = options.extra.getInt32(OPENH264_ENC_LTR_PERIOD);
+    }
+    if (options.extra.contains(OPENH264_ENC_THREADS)) {
+      param.iMultipleThreadIdc = options.extra.getInt32(OPENH264_ENC_THREADS);
+    }
+    if (options.extra.contains(OPENH264_ENC_DENOISE)) {
+      param.bEnableDenoise = options.extra.getBool(OPENH264_ENC_DENOISE);
+    }
+    if (options.extra.contains(OPENH264_ENC_BGD)) {
+      param.bEnableBackgroundDetection = options.extra.getBool(OPENH264_ENC_BGD);
+    }
+    if (options.extra.contains(OPENH264_ENC_AQ)) {
+      param.bEnableAdaptiveQuant = options.extra.getBool(OPENH264_ENC_AQ);
+    }
+    if (options.extra.contains(OPENH264_ENC_SCENE_CHANGE)) {
+      param.bEnableSceneChangeDetect = options.extra.getBool(OPENH264_ENC_SCENE_CHANGE);
+    }
+    if (options.extra.contains(OPENH264_ENC_LOOP_FILTER)) {
+      param.iLoopFilterDisableIdc = options.extra.getInt32(OPENH264_ENC_LOOP_FILTER);
+    }
+
+    // Rate Control, from options.rate_control (overrides extra, or supplements it)
+    int32_t target_bitrate = 1000000; // 1 Mbps default
+    if (auto* rc = std::get_if<CbrParams>(&options.rate_control.params)) {
+      target_bitrate = static_cast<int32_t>(rc->bitrate.target_bitrate);
+      param.iRCMode = RC_BITRATE_MODE;
+    } else if (auto* vbr = std::get_if<VbrParams>(&options.rate_control.params)) {
+      target_bitrate = static_cast<int32_t>(vbr->bitrate.target_bitrate);
+      param.iRCMode = RC_BITRATE_MODE; // OpenH264's RC_BITRATE_MODE is essentially VBR-ish with target
+    } else {
+      param.iRCMode = RC_OFF_MODE;
+    }
+
+    if (options.rate_control.max_qp) {
+      param.iMaxQp = *options.rate_control.max_qp;
+    }
+    if (options.rate_control.min_qp) {
+      param.iMinQp = *options.rate_control.min_qp;
+    }
+
+    param.fMaxFrameRate = static_cast<float>(options.extra.getDouble("max_framerate", 30.0));
+    param.iPicWidth = format_.width;
+    param.iPicHeight = format_.height;
+    param.iTargetBitrate = target_bitrate;
+    param.iTemporalLayerNum = std::max(1, options.extra.getInt32("temporal_layers", 1));
+    param.iSpatialLayerNum = 1;
+
+    param.sSpatialLayers[0].iVideoWidth = param.iPicWidth;
+    param.sSpatialLayers[0].iVideoHeight = param.iPicHeight;
+    param.sSpatialLayers[0].fFrameRate = param.fMaxFrameRate;
+    param.sSpatialLayers[0].iSpatialBitrate = param.iTargetBitrate;
+    param.sSpatialLayers[0].iMaxSpatialBitrate = static_cast<int32_t>(options.extra.getInt64("max_bitrate", param.iTargetBitrate * 1.5));
+    param.sSpatialLayers[0].sSliceArgument.uiSliceMode = static_cast<SliceModeEnum>(options.extra.getInt32(OPENH264_ENC_SLICE_MODE, SM_SINGLE_SLICE));
+
+    if (options.extra.contains(OPENH264_ENC_SLICE_NUM)) {
+      param.sSpatialLayers[0].sSliceArgument.uiSliceNum = options.extra.getInt32(OPENH264_ENC_SLICE_NUM);
+    }
+    if (options.extra.contains(OPENH264_ENC_SLICE_SIZE)) {
+      param.sSpatialLayers[0].sSliceArgument.uiSliceSizeConstraint = options.extra.getInt32(OPENH264_ENC_SLICE_SIZE);
+    }
+
+    if (encoder_->InitializeExt(&param) != 0) {
+      return OM_CODEC_OPEN_FAILED;
+    }
+
+    initialized_ = true;
+    return OM_SUCCESS;
+  }
+
+  auto getInfo() -> EncodingInfo override {
+    return {};
+  }
+
+  auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
+    if (!encoder_) return Err(OM_CODEC_ENCODE_FAILED);
+
+    const auto& pic = std::get<Picture>(frame.data);
+
+    // OpenH264 expects I420. If input is different, we'd need conversion,
+    // but for now we assume input frame matches configured format.
+    SSourcePicture src_pic = {};
+    src_pic.iColorFormat = videoFormatI420;
+    src_pic.iPicWidth = pic.width;
+    src_pic.iPicHeight = pic.height;
+    src_pic.iStride[0] = pic.planes.linesize[0];
+    src_pic.iStride[1] = pic.planes.linesize[1];
+    src_pic.iStride[2] = pic.planes.linesize[2];
+    src_pic.pData[0] = const_cast<uint8_t*>(pic.planes.data[0]);
+    src_pic.pData[1] = const_cast<uint8_t*>(pic.planes.data[1]);
+    src_pic.pData[2] = const_cast<uint8_t*>(pic.planes.data[2]);
+
+    SFrameBSInfo bs_info = {};
+    if (encoder_->EncodeFrame(&src_pic, &bs_info) != 0) {
+      return Err(OM_CODEC_ENCODE_FAILED);
+    }
+
+    std::vector<Packet> packets;
+    if (bs_info.eFrameType != videoFrameTypeSkip) {
+      size_t total_size = 0;
+      for (int i = 0; i < bs_info.iLayerNum; ++i) {
+        const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
+        for (int j = 0; j < layer.iNalCount; ++j) {
+          total_size += layer.pNalLengthInByte[j];
+        }
+      }
+
+      Packet pkt;
+      pkt.allocate(total_size);
+      pkt.pts = frame.pts;
+      pkt.dts = frame.dts;
+      pkt.is_keyframe = (bs_info.eFrameType == videoFrameTypeIDR);
+
+      size_t offset = 0;
+      for (int i = 0; i < bs_info.iLayerNum; ++i) {
+        const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
+        size_t layer_size = 0;
+        for (int j = 0; j < layer.iNalCount; ++j) {
+          layer_size += layer.pNalLengthInByte[j];
+        }
+        std::memcpy(pkt.bytes.data() + offset, layer.pBsBuf, layer_size);
+        offset += layer_size;
+      }
+      packets.push_back(std::move(pkt));
+    }
+
+    return Ok(std::move(packets));
+  }
+
+  auto updateBitrate(const RateControlParams& rc) -> OMError override {
+    if (!encoder_ || !initialized_) return OM_COMMON_NOT_INITIALIZED;
+
+    int32_t target_bitrate = 0;
+    if (auto* cbr = std::get_if<CbrParams>(&rc.params)) {
+      target_bitrate = static_cast<int32_t>(cbr->bitrate.target_bitrate);
+    } else if (auto* vbr = std::get_if<VbrParams>(&rc.params)) {
+      target_bitrate = static_cast<int32_t>(vbr->bitrate.target_bitrate);
+    }
+
+    if (target_bitrate > 0) {
+      SBitrateInfo info = {SPATIAL_LAYER_ALL, target_bitrate};
+      if (encoder_->SetOption(ENCODER_OPTION_BITRATE, &info) != 0) {
+        return OM_CODEC_INVALID_PARAMS;
+      }
+      return OM_SUCCESS;
+    }
+
+    return OM_COMMON_NOT_IMPLEMENTED;
+  }
+};
+
+const CodecDescriptor CODEC_OPENH264 = {
+    .codec_id = OM_CODEC_H264,
+    .type = OM_MEDIA_VIDEO,
+    .name = "openh264",
+    .long_name = "OpenH264",
+    .vendor = "Cisco",
+    .flags = NONE,
+    .caps = CodecCaps {
+        .profiles = {OM_PROFILE_H264_CONSTRAINED_BASELINE, OM_PROFILE_H264_MAIN, OM_PROFILE_H264_HIGH},
+    },
+    .decoder_factory = [] { return std::make_unique<OpenH264Decoder>(); },
+    .encoder_factory = [] { return std::make_unique<OpenH264Encoder>(); },
+};
+
+} // namespace openmedia
