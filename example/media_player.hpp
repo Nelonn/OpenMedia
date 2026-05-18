@@ -1197,8 +1197,9 @@ private:
                   } else if (hw && hw->getType() == HWDeviceType::VAAPI) {
 #ifdef OPENMEDIA_VAAPI
                     const auto vaapi_pic = std::static_pointer_cast<openmedia::VAAPIHardwarePicture>(hw);
-                    vf.y_stride = pic.width;
-                    vf.u_stride = pic.width;
+                    int bpp = (vf.bits_per_component > 8 ? 2 : 1);
+                    vf.y_stride = (pic.width * bpp + 31) & ~31;
+                    vf.u_stride = (pic.width * bpp + 31) & ~31;
                     vf.v_stride = 0;
                     vf.y_plane.resize(size_t(vf.y_stride) * pic.height);
                     vf.u_plane.resize(size_t(vf.u_stride) * ((pic.height + 1) / 2));

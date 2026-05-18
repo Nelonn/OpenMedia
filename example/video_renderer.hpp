@@ -149,30 +149,41 @@ private:
     const uint32_t h = vf.height;
     std::vector<uint32_t> rgba(w * h);
     const auto format = static_cast<OMPixelFormat>(vf.pixel_format);
+    const bool semi_planar = (getNumPlanes(format) == 2);
 
     auto yuvToRgba = [&](uint16_t y, uint16_t u, uint16_t v) -> uint32_t {
-      const float scale = 255.0f / static_cast<float>((1 << vf.bits_per_component) - 1);
-      const int yi = static_cast<int>(y * scale);
-      const int ui = static_cast<int>(u * scale) - 128;
-      const int vi = static_cast<int>(v * scale) - 128;
-      const int r = std::clamp(yi + static_cast<int>(1.5748f * vi), 0, 255);
-      const int g = std::clamp(yi - static_cast<int>(0.1873f * ui) - static_cast<int>(0.4681f * vi), 0, 255);
-      const int b = std::clamp(yi + static_cast<int>(1.8556f * ui), 0, 255);
+      // High bit depth formats like P010 are often MSB-packed in 16-bit words.
+      // We normalize to 8-bit for display in this simple renderer.
+      const int shift = (16 - vf.bits_per_component);
+      const int yi = (y >> shift);
+      const int ui = (u >> shift) - 128;
+      const int vi = (v >> shift) - 128;
+
+      const int r = std::clamp(yi + static_cast<int>(1.402f * vi), 0, 255);
+      const int g = std::clamp(yi - static_cast<int>(0.344f * ui + 0.714f * vi), 0, 255);
+      const int b = std::clamp(yi + static_cast<int>(1.772f * ui), 0, 255);
       return (0xFFu << 24) | (uint32_t(b) << 16) | (uint32_t(g) << 8) | uint32_t(r);
     };
 
     const auto* y_data = reinterpret_cast<const uint16_t*>(vf.y_plane.data());
-    const auto* u_data = reinterpret_cast<const uint16_t*>(vf.u_plane.data());
-    const auto* v_data = reinterpret_cast<const uint16_t*>(vf.v_plane.data());
+    const auto* uv_data = semi_planar ? reinterpret_cast<const uint16_t*>(vf.u_plane.data()) : nullptr;
+    const auto* u_data = !semi_planar ? reinterpret_cast<const uint16_t*>(vf.u_plane.data()) : nullptr;
+    const auto* v_data = !semi_planar ? reinterpret_cast<const uint16_t*>(vf.v_plane.data()) : nullptr;
 
     for (uint32_t y = 0; y < h; ++y) {
       for (uint32_t x = 0; x < w; ++x) {
         const uint16_t y_val = y_data[y * (vf.y_stride / 2) + x];
-        uint32_t uv_x = x / 2;
-        uint32_t uv_y = y / 2;
-        // Simplified mapping for brevity
-        const uint16_t u_val = u_data[uv_y * (vf.u_stride / 2) + uv_x];
-        const uint16_t v_val = v_data[uv_y * (vf.v_stride / 2) + uv_x];
+        const uint32_t uv_x = x / 2;
+        const uint32_t uv_y = y / 2;
+        
+        uint16_t u_val, v_val;
+        if (semi_planar) {
+            u_val = uv_data[uv_y * (vf.u_stride / 2) + uv_x * 2];
+            v_val = uv_data[uv_y * (vf.u_stride / 2) + uv_x * 2 + 1];
+        } else {
+            u_val = u_data[uv_y * (vf.u_stride / 2) + uv_x];
+            v_val = v_data[uv_y * (vf.v_stride / 2) + uv_x];
+        }
         rgba[y * w + x] = yuvToRgba(y_val, u_val, v_val);
       }
     }

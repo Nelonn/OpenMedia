@@ -80,7 +80,7 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 | API              |     Status      | Platform      | 
 |------------------|:---------------:|---------------|
 | VideoToolbox     |  Decoding Only  | macOS         |
-| VA-API           |    Untested     | Linux         |
+| VA-API           | Only H264 High  | Linux         |
 | AMF              |  Decoding Only  | Windows       |
 | Vulkan Video     | Buggy but works | Windows/Linux |
 | DirectX 11 Video | Buggy but works | Windows       |
