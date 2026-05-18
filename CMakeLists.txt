@@ -52,6 +52,7 @@ target_sources(OpenMedia PRIVATE
         src/util/io_util.cpp
         src/util/io_util.hpp
         src/audio/pcm.cpp
+        src/bitstream_filter.hpp
         src/bmff_demuxer.cpp
         src/codec_defs.cpp
         src/codec_registry.cpp
@@ -446,8 +447,13 @@ if (OPENMEDIA_DAV1D)
 endif ()
 
 if (OPENMEDIA_OPENH264)
-    target_sources(OpenMedia PRIVATE src/video/openh264.cpp)
+    target_sources(OpenMedia PRIVATE 
+        src/video/openh264.cpp
+        src/video/openh264_loader.cpp
+        src/video/openh264_loader.hpp
+    )
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPENH264)
+    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openh264/include)
 endif ()
 
 if (OPENMEDIA_VVDEC)

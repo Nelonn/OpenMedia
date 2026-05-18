@@ -47,7 +47,7 @@ integration while maintaining a simple, intuitive API.
 | Codec        | Decoding | Encoding | Backends                      |
 |--------------|:--------:|:--------:|-------------------------------|
 | AV1          |    ✅     |    🔧    | dav1d (decoding only)         |
-| H264         |    ✅     |    🔧    | OpenH264, FFmpeg              |
+| H264/AVC     |    ✅     |    ✅     | OpenH264, FFmpeg              |
 | H265/HEVC    |    ✅     |    🔧    | FFmpeg                        |
 | H266/VVC     |    ✅     |    🔧    | FFmpeg, VVdeC (Broken), VVenC |
 | Apple ProRes |    ✅     |    🔧    | FFmpeg                        |
