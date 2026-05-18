@@ -17,7 +17,8 @@
 
 FILE* h265_dbgfile = NULL;
 
-#define printf(...) fprintf((h265_dbgfile == NULL ? stdout : h265_dbgfile), __VA_ARGS__)
+//#define printf(...) fprintf((h265_dbgfile == NULL ? stdout : h265_dbgfile), __VA_ARGS__)
+#define printf(...) ((void)0)
 int more_rbsp_trailing_data(h265_stream_t* h, bs_t* b) { return !bs_eof(b); }
 //7.3.2.1 VPS
 void read_debug_video_parameter_set_rbsp(h265_stream_t* h, bs_t* b)
