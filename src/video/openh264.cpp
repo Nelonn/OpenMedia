@@ -249,7 +249,16 @@ public:
   }
 
   auto getInfo() -> EncodingInfo override {
-    return {};
+    EncodingInfo info = {};
+    if (!encoder_ || !initialized_) return info;
+
+    SFrameBSInfo bs_info = {};
+    if (encoder_->EncodeParameterSets(&bs_info) != 0 || bs_info.eFrameType == videoFrameTypeSkip) {
+      return info;
+    }
+
+    appendBitstream(bs_info, info.extradata);
+    return info;
   }
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
@@ -277,30 +286,12 @@ public:
 
     std::vector<Packet> packets;
     if (bs_info.eFrameType != videoFrameTypeSkip) {
-      size_t total_size = 0;
-      for (int i = 0; i < bs_info.iLayerNum; ++i) {
-        const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
-        for (int j = 0; j < layer.iNalCount; ++j) {
-          total_size += layer.pNalLengthInByte[j];
-        }
-      }
-
       Packet pkt;
-      pkt.allocate(total_size);
+      pkt.allocate(bitstreamSize(bs_info));
+      copyBitstream(bs_info, pkt.bytes);
       pkt.pts = frame.pts;
       pkt.dts = frame.dts;
       pkt.is_keyframe = (bs_info.eFrameType == videoFrameTypeIDR);
-
-      size_t offset = 0;
-      for (int i = 0; i < bs_info.iLayerNum; ++i) {
-        const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
-        size_t layer_size = 0;
-        for (int j = 0; j < layer.iNalCount; ++j) {
-          layer_size += layer.pNalLengthInByte[j];
-        }
-        std::memcpy(pkt.bytes.data() + offset, layer.pBsBuf, layer_size);
-        offset += layer_size;
-      }
       packets.push_back(std::move(pkt));
     }
 
@@ -326,6 +317,42 @@ public:
     }
 
     return OM_COMMON_NOT_IMPLEMENTED;
+  }
+
+private:
+  static auto bitstreamSize(const SFrameBSInfo& bs_info) -> size_t {
+    size_t total_size = 0;
+    for (int i = 0; i < bs_info.iLayerNum; ++i) {
+      const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
+      for (int j = 0; j < layer.iNalCount; ++j) {
+        total_size += layer.pNalLengthInByte[j];
+      }
+    }
+    return total_size;
+  }
+
+  static void appendBitstream(const SFrameBSInfo& bs_info, std::vector<uint8_t>& out) {
+    for (int i = 0; i < bs_info.iLayerNum; ++i) {
+      const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
+      size_t layer_size = 0;
+      for (int j = 0; j < layer.iNalCount; ++j) {
+        layer_size += layer.pNalLengthInByte[j];
+      }
+      out.insert(out.end(), layer.pBsBuf, layer.pBsBuf + layer_size);
+    }
+  }
+
+  static void copyBitstream(const SFrameBSInfo& bs_info, std::span<uint8_t> out) {
+    size_t offset = 0;
+    for (int i = 0; i < bs_info.iLayerNum; ++i) {
+      const SLayerBSInfo& layer = bs_info.sLayerInfo[i];
+      size_t layer_size = 0;
+      for (int j = 0; j < layer.iNalCount; ++j) {
+        layer_size += layer.pNalLengthInByte[j];
+      }
+      std::memcpy(out.data() + offset, layer.pBsBuf, layer_size);
+      offset += layer_size;
+    }
   }
 };
 
