@@ -16,9 +16,9 @@
 #include <memory>
 #include <openmedia/log.hpp>
 #include <openmedia/video.hpp>
-#include <util/io_util.hpp>
 #include <vector>
 #include "vaapi_loader.hpp"
+#include <util/io_util.hpp>
 
 namespace openmedia {
 
@@ -294,8 +294,8 @@ public:
     attrib.value = rt_format;
     VAStatus status = libva.vaCreateConfig(display_, profile, VAEntrypointVLD, &attrib, 1, &config_);
     if (status != VA_STATUS_SUCCESS) return OM_CODEC_HWACCEL_FAILED;
-
-    std::vector<VASurfaceID> surfaces(32);
+    
+    std::vector<VASurfaceID> surfaces(64);
     VASurfaceAttrib surf_attribs[1];
     surf_attribs[0].type = VASurfaceAttribPixelFormat;
     surf_attribs[0].flags = VA_SURFACE_ATTRIB_SETTABLE;
@@ -304,7 +304,7 @@ public:
 
     status = libva.vaCreateSurfaces(display_, rt_format, width_, height_, surfaces.data(), (uint32_t) surfaces.size(), surf_attribs, 1);
     if (status != VA_STATUS_SUCCESS) return OM_CODEC_HWACCEL_FAILED;
-
+    
     surface_slots_.clear();
     for (auto sid : surfaces) surface_slots_.push_back({sid, {}});
 
@@ -339,15 +339,15 @@ public:
     if (codec_id_ == OM_CODEC_H264) {
       const uint8_t* data = packet.bytes.data();
       size_t size = packet.bytes.size();
-
+      
       auto find_start_code = [](const uint8_t* p, size_t sz, size_t& header_size) -> size_t {
         for (size_t i = 0; i + 2 < sz; ++i) {
-          if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+          if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 1) {
             header_size = 3;
             size_t off = i;
-            while (off > 0 && p[off - 1] == 0) {
-              off--;
-              header_size++;
+            while (off > 0 && p[off-1] == 0) {
+                off--;
+                header_size++;
             }
             return off;
           }
@@ -370,7 +370,7 @@ public:
         size_t start = find_start_code(data + pos, size - pos, header_sz);
         if (start == size - pos) break;
         pos += start + header_sz;
-
+        
         size_t next_header_sz = 0;
         size_t next = find_start_code(data + pos, size - pos, next_header_sz);
         size_t nal_size = next;
@@ -390,15 +390,15 @@ public:
           h264::SPS sps;
           h264::read_sps(&sps, &bs);
           if (sps.seq_parameter_set_id < 32) {
-            h264_sps_table_[sps.seq_parameter_set_id] = sps;
-            has_h264_sps_ = true;
+              h264_sps_table_[sps.seq_parameter_set_id] = sps;
+              has_h264_sps_ = true;
           }
         } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
           h264::PPS pps;
           h264::read_pps(&pps, &bs);
           if (pps.pic_parameter_set_id < 256) {
-            h264_pps_table_[pps.pic_parameter_set_id] = pps;
-            has_h264_pps_ = true;
+              h264_pps_table_[pps.pic_parameter_set_id] = pps;
+              has_h264_pps_ = true;
           }
         } else if (nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) {
           if (!has_h264_sps_ || !has_h264_pps_) {
@@ -407,31 +407,30 @@ public:
           }
           h264::SliceHeader slice;
           h264::read_slice_header(&slice, &nal, h264_pps_table_, h264_sps_table_, &bs);
-
+          
           const auto& pps = h264_pps_table_[slice.pic_parameter_set_id];
           const auto& sps = h264_sps_table_[pps.seq_parameter_set_id];
 
           if (!picture_started) {
             auto is_surface_busy = [&](const SurfaceSlot& slot) {
-              if (!slot.last_pic.expired()) return true;
-              for (const auto& e : dpb_)
-                if (e.surface == slot.surface) return true;
-              return false;
+                if (!slot.last_pic.expired()) return true;
+                for (const auto& e : dpb_) if (e.surface == slot.surface) return true;
+                return false;
             };
             surface = VA_INVALID_ID;
-            for (size_t i = 0; i < surface_slots_.size(); i++) {
-              size_t idx = (surface_idx_ + i) % surface_slots_.size();
-              if (!is_surface_busy(surface_slots_[idx])) {
-                surface = surface_slots_[idx].surface;
-                first_surface_idx = idx;
-                surface_idx_ = (idx + 1) % surface_slots_.size();
-                break;
-              }
+            for (size_t i=0; i<surface_slots_.size(); i++) {
+                size_t idx = (surface_idx_ + i) % surface_slots_.size();
+                if (!is_surface_busy(surface_slots_[idx])) {
+                    surface = surface_slots_[idx].surface;
+                    first_surface_idx = idx;
+                    surface_idx_ = (idx + 1) % surface_slots_.size();
+                    break;
+                }
             }
             if (surface == VA_INVALID_ID) {
-              log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "[VAAPI] Surface pool exhausted!");
-              pos += next;
-              continue;
+                log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "[VAAPI] Surface pool exhausted!");
+                pos += next;
+                continue;
             }
 
             first_slice = slice;
@@ -440,19 +439,18 @@ public:
             int32_t poc = 0;
             int32_t poc_msb = prev_poc_msb_;
             if (sps.pic_order_cnt_type == 0) {
-              int32_t max_poc_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
-              if ((slice.pic_order_cnt_lsb < prev_poc_lsb_) &&
-                  ((prev_poc_lsb_ - slice.pic_order_cnt_lsb) >= (max_poc_lsb / 2))) {
-                poc_msb = prev_poc_msb_ + max_poc_lsb;
-              } else if ((slice.pic_order_cnt_lsb > prev_poc_lsb_) &&
-                         ((slice.pic_order_cnt_lsb - prev_poc_lsb_) > (max_poc_lsb / 2))) {
-                poc_msb = prev_poc_msb_ - max_poc_lsb;
-              }
-              poc = poc_msb + slice.pic_order_cnt_lsb;
-            } else if (sps.pic_order_cnt_type == 2)
-              poc = (int32_t) slice.frame_num * 2;
-            else
-              poc = (int32_t) packet.pts;
+                int32_t max_poc_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+                if ((slice.pic_order_cnt_lsb < prev_poc_lsb_) &&
+                    ((prev_poc_lsb_ - slice.pic_order_cnt_lsb) >= (max_poc_lsb / 2))) {
+                    poc_msb = prev_poc_msb_ + max_poc_lsb;
+                } else if ((slice.pic_order_cnt_lsb > prev_poc_lsb_) &&
+                           ((slice.pic_order_cnt_lsb - prev_poc_lsb_) > (max_poc_lsb / 2))) {
+                    poc_msb = prev_poc_msb_ - max_poc_lsb;
+                }
+                poc = poc_msb + slice.pic_order_cnt_lsb;
+            }
+            else if (sps.pic_order_cnt_type == 2) poc = (int32_t)slice.frame_num * 2;
+            else poc = (int32_t)packet.pts;
 
             first_poc = poc;
             first_poc_msb = poc_msb;
@@ -479,23 +477,17 @@ public:
 
             VABufferID pic_param_buf, iq_matrix_buf;
             VAStatus status = libva.vaCreateBuffer(display_, context_, VAPictureParameterBufferType, sizeof(pic_param), 1, &pic_param, &pic_param_buf);
-
+            
             VAIQMatrixBufferH264 iq_matrix = {};
             if (pps.pic_scaling_matrix_present_flag) {
-              for (int i = 0; i < 6; i++)
-                for (int j = 0; j < 16; j++) iq_matrix.ScalingList4x4[i][j] = (unsigned char) pps.ScalingList4x4[i][j];
-              for (int i = 0; i < 2; i++)
-                for (int j = 0; j < 64; j++) iq_matrix.ScalingList8x8[i][j] = (unsigned char) pps.ScalingList8x8[i][j];
+                for (int i=0; i<6; i++) for (int j=0; j<16; j++) iq_matrix.ScalingList4x4[i][j] = (unsigned char)pps.ScalingList4x4[i][j];
+                for (int i=0; i<2; i++) for (int j=0; j<64; j++) iq_matrix.ScalingList8x8[i][j] = (unsigned char)pps.ScalingList8x8[i][j];
             } else if (sps.seq_scaling_matrix_present_flag) {
-              for (int i = 0; i < 6; i++)
-                for (int j = 0; j < 16; j++) iq_matrix.ScalingList4x4[i][j] = (unsigned char) sps.ScalingList4x4[i][j];
-              for (int i = 0; i < 2; i++)
-                for (int j = 0; j < 64; j++) iq_matrix.ScalingList8x8[i][j] = (unsigned char) sps.ScalingList8x8[i][j];
+                for (int i=0; i<6; i++) for (int j=0; j<16; j++) iq_matrix.ScalingList4x4[i][j] = (unsigned char)sps.ScalingList4x4[i][j];
+                for (int i=0; i<2; i++) for (int j=0; j<64; j++) iq_matrix.ScalingList8x8[i][j] = (unsigned char)sps.ScalingList8x8[i][j];
             } else {
-              for (int i = 0; i < 6; i++)
-                for (int j = 0; j < 16; j++) iq_matrix.ScalingList4x4[i][j] = 16;
-              for (int i = 0; i < 2; i++)
-                for (int j = 0; j < 64; j++) iq_matrix.ScalingList8x8[i][j] = 16;
+                for (int i=0; i<6; i++) for (int j=0; j<16; j++) iq_matrix.ScalingList4x4[i][j] = 16;
+                for (int i=0; i<2; i++) for (int j=0; j<64; j++) iq_matrix.ScalingList8x8[i][j] = 16;
             }
             libva.vaCreateBuffer(display_, context_, VAIQMatrixBufferType, sizeof(iq_matrix), 1, &iq_matrix, &iq_matrix_buf);
 
@@ -509,29 +501,29 @@ public:
 
           VASliceParameterBufferH264 slice_param;
           fillSliceParamsH264(slice, pps, slice_param);
-
-          uint8_t slice_type = (uint8_t) (slice.slice_type % 5);
+          
+          uint8_t slice_type = (uint8_t)(slice.slice_type % 5);
           if (slice_type == 0 /* P */ || slice_type == 3 /* SP */ || slice_type == 1 /* B */) {
             size_t count = 0;
-            for (int i = (int) dpb_.size() - 1; i >= 0 && count < 32; i--) {
-              const auto& entry = dpb_[i];
-              slice_param.RefPicList0[count].picture_id = entry.surface;
-              slice_param.RefPicList0[count].TopFieldOrderCnt = entry.poc;
-              slice_param.RefPicList0[count].BottomFieldOrderCnt = entry.poc;
-              slice_param.RefPicList0[count].frame_idx = entry.frame_num;
-              slice_param.RefPicList0[count].flags = (entry.is_long_term ? VA_PICTURE_H264_LONG_TERM_REFERENCE : VA_PICTURE_H264_SHORT_TERM_REFERENCE) | VA_PICTURE_H264_TOP_FIELD | VA_PICTURE_H264_BOTTOM_FIELD;
-              count++;
+            for (int i = (int)dpb_.size() - 1; i >= 0 && count < 32; i--) {
+                const auto& entry = dpb_[i];
+                slice_param.RefPicList0[count].picture_id = entry.surface;
+                slice_param.RefPicList0[count].TopFieldOrderCnt = entry.poc;
+                slice_param.RefPicList0[count].BottomFieldOrderCnt = entry.poc;
+                slice_param.RefPicList0[count].frame_idx = entry.frame_num;
+                slice_param.RefPicList0[count].flags = (entry.is_long_term ? VA_PICTURE_H264_LONG_TERM_REFERENCE : VA_PICTURE_H264_SHORT_TERM_REFERENCE) | VA_PICTURE_H264_TOP_FIELD | VA_PICTURE_H264_BOTTOM_FIELD;
+                count++;
             }
           }
 
           slice_param.slice_data_size = (uint32_t) nal_size;
           slice_param.slice_data_offset = 0;
           slice_param.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-
-          size_t rbsp_byte_off = (size_t) (bs.p - rbsp.data.data());
+          
+          size_t rbsp_byte_off = (size_t)(bs.p - rbsp.data.data());
           if (rbsp_byte_off >= rbsp.src_offsets.size()) rbsp_byte_off = rbsp.src_offsets.size() - 1;
           size_t orig_byte_off = rbsp.src_offsets[rbsp_byte_off];
-          slice_param.slice_data_bit_offset = (uint16_t) (orig_byte_off * 8 + (8 - bs.bits_left));
+          slice_param.slice_data_bit_offset = (uint16_t)(orig_byte_off * 8 + (8 - bs.bits_left));
 
           VABufferID slice_param_buf, slice_data_buf;
           libva.vaCreateBuffer(display_, context_, VASliceParameterBufferType, sizeof(slice_param), 1, &slice_param, &slice_param_buf);
@@ -548,23 +540,20 @@ public:
         libva.vaEndPicture(display_, context_);
         libva.vaSyncSurface(display_, surface);
 
-        log(OM_CATEGORY_HARDWARE, OM_LEVEL_DEBUG, "[VAAPI] Decoded frame: vaEndPicture");
-
-        for (auto buf : cleanup_buffers) {
-          libva.vaDestroyBuffer(display_, buf);
-        }
+        for (auto buf : cleanup_buffers) libva.vaDestroyBuffer(display_, buf);
         cleanup_buffers.clear();
 
         if (first_nal_ref_idc != 0) {
-          const auto& pps = h264_pps_table_[first_slice.pic_parameter_set_id];
-          const auto& sps = h264_sps_table_[pps.seq_parameter_set_id];
-          if (sps.pic_order_cnt_type == 0) {
-            prev_poc_lsb_ = first_slice.pic_order_cnt_lsb;
-            prev_poc_msb_ = first_poc_msb;
-          }
-          if (first_slice.slice_type % 5 == 2 /* IDR */) dpb_.clear();
-          if (dpb_.size() >= MAX_DPB_SIZE) dpb_.erase(dpb_.begin());
-          dpb_.push_back({surface, first_poc, (uint32_t) first_slice.frame_num, false});
+            const auto& pps = h264_pps_table_[first_slice.pic_parameter_set_id];
+            const auto& sps = h264_sps_table_[pps.seq_parameter_set_id];
+            if (sps.pic_order_cnt_type == 0) {
+                prev_poc_lsb_ = first_slice.pic_order_cnt_lsb;
+                prev_poc_msb_ = first_poc_msb;
+            }
+            if (first_slice.slice_type % 5 == 2 /* IDR */) dpb_.clear();
+            size_t max_refs = std::max((size_t)1, (size_t)sps.num_ref_frames);
+            while (dpb_.size() >= max_refs) dpb_.erase(dpb_.begin());
+            dpb_.push_back({surface, first_poc, (uint32_t) first_slice.frame_num, false});
         }
 
         Frame frame = {};
@@ -578,7 +567,6 @@ public:
         surface_slots_[first_surface_idx].last_pic = pic_obj;
         pic.buffer = pic_obj;
         frame.data = std::move(pic);
-        log(OM_CATEGORY_HARDWARE, OM_LEVEL_DEBUG, "[VAAPI] Decoded frame: return VAAPIHardwarePicture");
         return Ok(std::vector<Frame> {std::move(frame)});
       }
     } else if (codec_id_ == OM_CODEC_H265) {
@@ -593,23 +581,22 @@ public:
           has_h265_pps_ = true;
         else if (h265_stream_->nal->nal_unit_type >= NAL_UNIT_CODED_SLICE_TRAIL_N && h265_stream_->nal->nal_unit_type <= NAL_UNIT_CODED_SLICE_RASL_R) {
           if (!has_h265_sps_ || !has_h265_pps_) continue;
-
+          
           auto is_surface_busy = [&](const SurfaceSlot& slot) {
-            if (!slot.last_pic.expired()) return true;
-            for (const auto& e : dpb_)
-              if (e.surface == slot.surface) return true;
-            return false;
+              if (!slot.last_pic.expired()) return true;
+              for (const auto& e : dpb_) if (e.surface == slot.surface) return true;
+              return false;
           };
           VASurfaceID surface = VA_INVALID_ID;
           size_t selected_slot_idx = 0;
-          for (size_t i = 0; i < surface_slots_.size(); i++) {
-            size_t idx = (surface_idx_ + i) % surface_slots_.size();
-            if (!is_surface_busy(surface_slots_[idx])) {
-              surface = surface_slots_[idx].surface;
-              selected_slot_idx = idx;
-              surface_idx_ = (idx + 1) % surface_slots_.size();
-              break;
-            }
+          for (size_t i=0; i<surface_slots_.size(); i++) {
+              size_t idx = (surface_idx_ + i) % surface_slots_.size();
+              if (!is_surface_busy(surface_slots_[idx])) {
+                  surface = surface_slots_[idx].surface;
+                  selected_slot_idx = idx;
+                  surface_idx_ = (idx + 1) % surface_slots_.size();
+                  break;
+              }
           }
           if (surface == VA_INVALID_ID) continue;
 
@@ -684,21 +671,20 @@ public:
         sz -= obu_size_len;
         if (obu_type == 6 /* FRAME */ || obu_type == 3 /* FRAME_HEADER */) {
           auto is_surface_busy = [&](const SurfaceSlot& slot) {
-            if (!slot.last_pic.expired()) return true;
-            for (const auto& e : dpb_)
-              if (e.surface == slot.surface) return true;
-            return false;
+              if (!slot.last_pic.expired()) return true;
+              for (const auto& e : dpb_) if (e.surface == slot.surface) return true;
+              return false;
           };
           VASurfaceID surface = VA_INVALID_ID;
           size_t selected_slot_idx = 0;
-          for (size_t i = 0; i < surface_slots_.size(); i++) {
-            size_t idx = (surface_idx_ + i) % surface_slots_.size();
-            if (!is_surface_busy(surface_slots_[idx])) {
-              surface = surface_slots_[idx].surface;
-              selected_slot_idx = idx;
-              surface_idx_ = (idx + 1) % surface_slots_.size();
-              break;
-            }
+          for (size_t i=0; i<surface_slots_.size(); i++) {
+              size_t idx = (surface_idx_ + i) % surface_slots_.size();
+              if (!is_surface_busy(surface_slots_[idx])) {
+                  surface = surface_slots_[idx].surface;
+                  selected_slot_idx = idx;
+                  surface_idx_ = (idx + 1) % surface_slots_.size();
+                  break;
+              }
           }
           if (surface == VA_INVALID_ID) break;
 
@@ -731,44 +717,43 @@ public:
       }
     } else if (codec_id_ == OM_CODEC_VP9) {
       auto is_surface_busy = [&](const SurfaceSlot& slot) {
-        if (!slot.last_pic.expired()) return true;
-        for (const auto& e : dpb_)
-          if (e.surface == slot.surface) return true;
-        return false;
+          if (!slot.last_pic.expired()) return true;
+          for (const auto& e : dpb_) if (e.surface == slot.surface) return true;
+          return false;
       };
       VASurfaceID surface = VA_INVALID_ID;
       size_t selected_slot_idx = 0;
-      for (size_t i = 0; i < surface_slots_.size(); i++) {
-        size_t idx = (surface_idx_ + i) % surface_slots_.size();
-        if (!is_surface_busy(surface_slots_[idx])) {
-          surface = surface_slots_[idx].surface;
-          selected_slot_idx = idx;
-          surface_idx_ = (idx + 1) % surface_slots_.size();
-          break;
-        }
+      for (size_t i=0; i<surface_slots_.size(); i++) {
+          size_t idx = (surface_idx_ + i) % surface_slots_.size();
+          if (!is_surface_busy(surface_slots_[idx])) {
+              surface = surface_slots_[idx].surface;
+              selected_slot_idx = idx;
+              surface_idx_ = (idx + 1) % surface_slots_.size();
+              break;
+          }
       }
       if (surface != VA_INVALID_ID) {
-        VADecPictureParameterBufferVP9 pic_param = {};
-        pic_param.frame_width = (uint16_t) width_;
-        pic_param.frame_height = (uint16_t) height_;
-        VABufferID pic_param_buf;
-        libva.vaCreateBuffer(display_, context_, VAPictureParameterBufferType, sizeof(pic_param), 1, &pic_param, &pic_param_buf);
-        libva.vaBeginPicture(display_, context_, surface);
-        libva.vaRenderPicture(display_, context_, &pic_param_buf, 1);
-        libva.vaEndPicture(display_, context_);
-        libva.vaSyncSurface(display_, surface);
-        libva.vaDestroyBuffer(display_, pic_param_buf);
-        Frame frame = {};
-        frame.pts = packet.pts;
-        Picture pic;
-        pic.format = output_format_.format;
-        pic.width = output_format_.width;
-        pic.height = output_format_.height;
-        auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
-        surface_slots_[selected_slot_idx].last_pic = pic_obj;
-        pic.buffer = pic_obj;
-        frame.data = std::move(pic);
-        return Ok(std::vector<Frame> {std::move(frame)});
+          VADecPictureParameterBufferVP9 pic_param = {};
+          pic_param.frame_width = (uint16_t) width_;
+          pic_param.frame_height = (uint16_t) height_;
+          VABufferID pic_param_buf;
+          libva.vaCreateBuffer(display_, context_, VAPictureParameterBufferType, sizeof(pic_param), 1, &pic_param, &pic_param_buf);
+          libva.vaBeginPicture(display_, context_, surface);
+          libva.vaRenderPicture(display_, context_, &pic_param_buf, 1);
+          libva.vaEndPicture(display_, context_);
+          libva.vaSyncSurface(display_, surface);
+          libva.vaDestroyBuffer(display_, pic_param_buf);
+          Frame frame = {};
+          frame.pts = packet.pts;
+          Picture pic;
+          pic.format = output_format_.format;
+          pic.width = output_format_.width;
+          pic.height = output_format_.height;
+          auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
+          surface_slots_[selected_slot_idx].last_pic = pic_obj;
+          pic.buffer = pic_obj;
+          frame.data = std::move(pic);
+          return Ok(std::vector<Frame> {std::move(frame)});
       }
     }
     return Ok(std::vector<Frame> {});
@@ -874,7 +859,10 @@ public:
     }
     if (profile == VAProfileNone) return OM_CODEC_NOT_SUPPORTED;
 
-    VAStatus status = libva.vaCreateConfig(display_, profile, VAEntrypointEncSlice, nullptr, 0, &config_);
+    VAConfigAttrib attrib;
+    attrib.type = VAConfigAttribRTFormat;
+    attrib.value = rt_format;
+    VAStatus status = libva.vaCreateConfig(display_, profile, VAEntrypointEncSlice, &attrib, 1, &config_);
     if (status != VA_STATUS_SUCCESS) return OM_CODEC_HWACCEL_FAILED;
     surface_pool_.resize(4);
     status = libva.vaCreateSurfaces(display_, rt_format, width_, height_, surface_pool_.data(), (uint32_t) surface_pool_.size(), nullptr, 0);
@@ -1001,6 +989,7 @@ private:
     }
     if (!surface_pool_.empty()) {
       libva.vaDestroySurfaces(display_, surface_pool_.data(), (int) surface_pool_.size());
+      surface_pool_.clear();
     }
     initialized_ = false;
   }
