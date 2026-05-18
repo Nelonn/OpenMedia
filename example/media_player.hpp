@@ -1091,7 +1091,15 @@ private:
                 const AudioSamples& s = std::get<AudioSamples>(frame.data);
                 if (s.nb_samples == 0) continue;
 
-                if (!audio_sink_.isOpen()) {
+                bool need_reopen = !audio_sink_.isOpen();
+                if (audio_sink_.isOpen()) {
+                    if (audio_sink_.sampleRate() != static_cast<int>(s.format.sample_rate) ||
+                        audio_sink_.channels() != static_cast<int>(s.format.channels)) {
+                        need_reopen = true;
+                    }
+                }
+
+                if (need_reopen) {
                     const size_t bps = getBytesPerSample(s.format.sample_format);
                     if (!audio_sink_.open(
                             detail::toSdlFormat(s.format.sample_format),
@@ -1099,6 +1107,7 @@ private:
                             int(s.format.sample_rate),
                             bps, &clock_))
                         continue;
+                    SDL_Log("[Player] Audio sink opened/re-opened: %u Hz, %u channels", s.format.sample_rate, s.format.channels);
                 }
 
                 auto pcm = detail::normaliseBits(
@@ -1236,6 +1245,13 @@ private:
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
                 if (!video_frame_queue_.blockingPush(std::move(vf))) break;
+            }
+            
+            // For hardware decoders like VideoToolbox, we might need to flush 
+            // periodically or ensure asynchronous frames are pushed out.
+            if (video_decoder_->getInfo() && video_decoder_->getInfo()->media_type == OM_MEDIA_VIDEO) {
+                // Potential flush here if needed, but blockingPop/decode should be enough 
+                // if the decoder doesn't have internal delay beyond one frame.
             }
         }
     }

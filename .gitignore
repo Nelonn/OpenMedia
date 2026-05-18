@@ -17,10 +17,14 @@ Makefile
 CMakeCache.txt
 CMakeFiles/
 compile_commands.json
+.cache/
+
 
 # Other
 *.log
 *.swp
+GEMINI.md
+err.log
 
 # Common
 .DS_Store
