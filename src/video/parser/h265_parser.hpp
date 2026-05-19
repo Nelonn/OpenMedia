@@ -6,6 +6,10 @@
 #include <span>
 #include <vector>
 
+namespace openmedia {
+class BitReader;
+}
+
 namespace openmedia::video_parser {
 
 enum NalUnitType {
@@ -275,10 +279,10 @@ private:
   auto startsNewAccessUnit(int nal_type) const -> bool;
   auto finishCurrentFrame() -> H265ParsedFrame;
 
-  auto parseVui(openmedia::BitReader& br, Sps& sps) -> bool;
-  auto parseStRefPicSet(openmedia::BitReader& br, H265StRefPicSet& st, int idx, int num_sets, const H265StRefPicSet* sets) -> bool;
-  auto skipScalingListData(openmedia::BitReader& br) -> bool;
-  auto skipHrdParameters(openmedia::BitReader& br, bool common_inf_present_flag, int max_num_sub_layers_minus1) -> bool;
+  auto parseVui(BitReader& br, Sps& sps) -> bool;
+  auto parseStRefPicSet(BitReader& br, H265StRefPicSet& st, int idx, int num_sets, const H265StRefPicSet* sets) -> bool;
+  auto skipScalingListData(BitReader& br) -> bool;
+  auto skipHrdParameters(BitReader& br, bool common_inf_present_flag, int max_num_sub_layers_minus1) -> bool;
 };
 
 } // namespace openmedia::video_parser
