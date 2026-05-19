@@ -167,7 +167,22 @@ public:
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
     if (packet.bytes.empty()) return Ok(std::vector<Frame> {});
 
+    if (codec_id_ == OM_CODEC_H264) return decodeH264(packet);
     if (codec_id_ == OM_CODEC_H265) return decodeH265(packet);
+    return Err(OM_CODEC_NOT_SUPPORTED);
+  }
+
+  void flush() override {
+    for (auto& entry : dpb_) entry = {};
+    reference_usage_.clear();
+    next_slot_ = 0;
+    next_ref_ = 0;
+    h264_.resetPoc();
+    h265_poc_.reset();
+  }
+
+private:
+  auto decodeH264(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
 
     auto parsed = h264_.parseFrame(packet.bytes);
     if (parsed.slice_offsets.empty()) return Ok(std::vector<Frame> {});
@@ -213,16 +228,6 @@ public:
     return Ok(std::vector<Frame> {std::move(frame)});
   }
 
-  void flush() override {
-    for (auto& entry : dpb_) entry = {};
-    reference_usage_.clear();
-    next_slot_ = 0;
-    next_ref_ = 0;
-    h264_.resetPoc();
-    h265_poc_.reset();
-  }
-
-private:
   auto decodeH265(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
     if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
     auto frames = h265_->parse(packet.bytes, true);
