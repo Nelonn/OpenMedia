@@ -20,6 +20,7 @@
 
 #include <util/wmf.hpp>
 #include "dx_h264.hpp"
+#include "dx_h265.hpp"
 #include "hw_common.hpp"
 
 #pragma comment(lib, "mfplat.lib")
@@ -316,6 +317,7 @@ class DX11Decoder final : public Decoder {
 
   dx_h264::State h264_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
+  dx_h265::PocState h265_poc_;
   OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
@@ -487,6 +489,8 @@ public:
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
     if (packet.bytes.empty()) return Ok(std::vector<Frame> {});
 
+    if (codec_id_ == OM_CODEC_H265) return decodeH265(packet);
+
     auto parsed = h264_.parseFrame(packet.bytes);
     if (parsed.slice_offsets.empty()) return Ok(std::vector<Frame> {});
     if (parsed.slice.pic_parameter_set_id < 0 || parsed.slice.pic_parameter_set_id >= 256 || !h264_.pps_valid[parsed.slice.pic_parameter_set_id]) {
@@ -594,9 +598,107 @@ public:
     next_slot_ = 0;
     next_ref_ = 0;
     h264_.resetPoc();
+    h265_poc_.reset();
   }
 
 private:
+  auto decodeH265(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
+    if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
+    auto frames = h265_->parse(packet.bytes, true);
+    if (frames.empty()) return Ok(std::vector<Frame> {});
+
+    std::vector<Frame> output;
+    output.reserve(frames.size());
+    for (auto& parsed : frames) {
+      if (parsed.slice_offsets.empty() || parsed.slice_headers.empty()) continue;
+      const auto& sh = parsed.slice_headers.front();
+      if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
+      const auto& pps = h265_->pps(sh.pps_id);
+      if (pps.sps_id < 0 || pps.sps_id >= 16 || !h265_->sps(pps.sps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
+      const auto& sps = h265_->sps(pps.sps_id);
+      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return Err(OM_CODEC_NOT_SUPPORTED);
+
+      const int32_t poc = h265_poc_.compute(sps, parsed, sh);
+      if (dx_h265::isIrap(parsed.nal_unit_type)) {
+        for (auto& slot : slots_) slot.dpb.is_reference = false;
+        reference_usage_.clear();
+        next_ref_ = 0;
+        next_slot_ = 0;
+      }
+
+      const uint32_t current_slot = next_slot_;
+      std::vector<dx_h264::DpbEntry> dpb;
+      dpb.reserve(slots_.size());
+      for (const auto& slot : slots_) dpb.push_back(slot.dpb);
+
+      DXVA_PicParams_HEVC pic_params = {};
+      dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb, feedback_++, pic_params);
+      DXVA_Qmatrix_HEVC qmatrix = {};
+      dx_h265::fillQMatrix(sps, pps, qmatrix);
+      std::vector<DXVA_Slice_HEVC_Short> slices;
+      dx_h265::fillSlices(parsed, slices);
+
+      HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+
+      UINT buffer_size = 0;
+      void* buffer = nullptr;
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
+      if (FAILED(hr) || parsed.bitstream.size() > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+      std::memcpy(buffer, parsed.bitstream.data(), parsed.bitstream.size());
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
+
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
+      if (FAILED(hr) || sizeof(pic_params) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+      std::memcpy(buffer, &pic_params, sizeof(pic_params));
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
+
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &buffer_size, &buffer);
+      if (FAILED(hr) || sizeof(qmatrix) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+      std::memcpy(buffer, &qmatrix, sizeof(qmatrix));
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX);
+
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
+      if (FAILED(hr) || slices.size() * sizeof(DXVA_Slice_HEVC_Short) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+      std::memcpy(buffer, slices.data(), slices.size() * sizeof(DXVA_Slice_HEVC_Short));
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
+
+      D3D11_VIDEO_DECODER_BUFFER_DESC descs[4] = {};
+      descs[0].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
+      descs[0].DataSize = static_cast<UINT>(parsed.bitstream.size());
+      descs[1].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
+      descs[1].DataSize = sizeof(pic_params);
+      descs[2].BufferType = D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX;
+      descs[2].DataSize = sizeof(qmatrix);
+      descs[3].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
+      descs[3].DataSize = static_cast<UINT>(slices.size() * sizeof(DXVA_Slice_HEVC_Short));
+      hr = video_context_->SubmitDecoderBuffers(decoder_.Get(), 4, descs);
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+      hr = video_context_->DecoderEndFrame(decoder_.Get());
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+
+      auto picture = download(current_slot);
+      if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+
+      slots_[current_slot].dpb.poc = poc;
+      slots_[current_slot].dpb.frame_num = static_cast<uint32_t>(poc);
+      slots_[current_slot].dpb.is_reference = parsed.is_reference;
+      if (parsed.is_reference && dpb_slot_count_ > 1) {
+        if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
+        reference_usage_[next_ref_] = static_cast<uint8_t>(current_slot);
+        next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
+      }
+      next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
+
+      Frame frame = {};
+      frame.pts = packet.pts;
+      frame.dts = packet.dts;
+      frame.data = std::move(*picture);
+      output.push_back(std::move(frame));
+    }
+    return Ok(std::move(output));
+  }
+
   auto download(uint32_t slot) -> std::optional<Picture> {
     D3D11_TEXTURE2D_DESC desc = {};
     dpb_texture_->GetDesc(&desc);

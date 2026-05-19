@@ -112,11 +112,21 @@ auto H265AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
   auto normalized = normalizePacket(packet);
   for (const auto& unit : findNalUnits(normalized)) {
     const auto nal_data = std::span<const uint8_t>(normalized.data() + unit.header, unit.end - unit.header);
+    const size_t slice_header_count = current_.slice_headers.size();
     if (!parseNal(nal_data)) continue;
 
     const int nal_type = nal_unit_type_;
     const bool is_vcl = isVclNal(nal_type);
-    if (startsNewAccessUnit(nal_type) && current_has_vcl_) frames.push_back(finishCurrentFrame());
+    H265SliceHeader pending_slice_header = {};
+    const bool added_slice_header = is_vcl && current_.slice_headers.size() > slice_header_count;
+    if (startsNewAccessUnit(nal_type) && current_has_vcl_) {
+      if (added_slice_header) {
+        pending_slice_header = current_.slice_headers.back();
+        current_.slice_headers.pop_back();
+      }
+      frames.push_back(finishCurrentFrame());
+      if (added_slice_header) current_.slice_headers.push_back(pending_slice_header);
+    }
 
     const uint32_t output_offset = static_cast<uint32_t>(current_.bitstream.size());
     current_.bitstream.insert(current_.bitstream.end(), normalized.begin() + static_cast<ptrdiff_t>(unit.start), normalized.begin() + static_cast<ptrdiff_t>(unit.end));
@@ -723,7 +733,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
             }
         }
       }
-      if (sh.slice_type == 1 /* B */) br.readBit(); // mvd_l1_zero_flag
+      if (sh.slice_type == 1 /* B */) sh.mvd_l1_zero_flag = br.readBit() != 0;
       if (pps.cabac_init_present_flag) sh.cabac_init_flag = br.readBit() != 0;
       if (sh.slice_temporal_mvp_enabled_flag) {
         if (sh.slice_type == 1 /* B */) sh.collocated_from_l0_flag = br.readBit() != 0;
