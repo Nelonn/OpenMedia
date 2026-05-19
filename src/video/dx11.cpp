@@ -385,7 +385,8 @@ public:
     device_->GetImmediateContext(&context_);
     if (!context_) return OM_CODEC_HWACCEL_FAILED;
 
-    GUID target_profile = (codec_id_ == OM_CODEC_H264) ? D3D11_DECODER_PROFILE_H264_VLD_NOFGT : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
+    GUID target_profile = (codec_id_ == OM_CODEC_H264) ? D3D11_DECODER_PROFILE_H264_VLD_NOFGT :
+                          (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10 : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
     bool profile_supported = false;
     const UINT profile_count = video_device_->GetVideoDecoderProfileCount();
     for (UINT i = 0; i < profile_count; ++i) {
@@ -419,10 +420,11 @@ public:
     for (UINT i = 0; i < config_count; ++i) {
       D3D11_VIDEO_DECODER_CONFIG config = {};
       if (FAILED(video_device_->GetVideoDecoderConfig(&decoder_desc, i, &config))) continue;
+      const UINT expected_raw = (codec_id_ == OM_CODEC_H264) ? 2u : 1u;
       if (config.guidConfigBitstreamEncryption == DXVA_NO_ENCRYPT &&
           config.guidConfigMBcontrolEncryption == DXVA_NO_ENCRYPT &&
           config.guidConfigResidDiffEncryption == DXVA_NO_ENCRYPT &&
-          config.ConfigBitstreamRaw == 2) {
+          config.ConfigBitstreamRaw == expected_raw) {
         decoder_config_ = config;
         found_config = true;
         break;

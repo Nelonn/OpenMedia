@@ -11,7 +11,7 @@ namespace {
 
 auto isVideoDecoderArg(std::string_view arg) -> bool {
   return arg == "vulkan_h264" || arg == "vulkan_h265" || arg == "vulkan_av1" ||
-         arg == "dx11_h264" || arg == "dx12_h264" || arg == "dx12_h265" ||
+         arg == "dx11_h264" || arg == "dx11_h265" || arg == "dx12_h264" || arg == "dx12_h265" ||
          arg == "nvdec_h264" || arg == "nvdec_h265" || arg == "nvdec_av1" || arg == "nvdec_vp9" ||
          arg == "amf_h264" || arg == "amf_h265" || arg == "amf_av1" || arg == "amf_vp9" ||
          arg == "vaapi_h264" || arg == "vaapi_h265" || arg == "vaapi_av1" || arg == "vaapi_vp9";
