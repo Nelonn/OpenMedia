@@ -155,10 +155,21 @@ static auto findRefIndex(uint32_t slot, const DXVA_PicParams_HEVC& pic) -> uint8
   return 0xff;
 }
 
+static auto addRefPic(uint32_t slot, const std::vector<dx_h264::DpbEntry>& dpb, uint8_t& ref_count, DXVA_PicParams_HEVC& pic) -> uint8_t {
+  if (slot >= dpb.size() || ref_count >= 15) return 0xff;
+  const uint8_t existing = findRefIndex(slot, pic);
+  if (existing != 0xff) return existing;
+  const uint8_t idx = ref_count++;
+  pic.RefPicList[idx].Index7Bits = static_cast<UCHAR>(slot);
+  pic.RefPicList[idx].AssociatedFlag = 0;
+  pic.PicOrderCntValList[idx] = dpb[slot].poc;
+  return idx;
+}
+
 static void fillRefSet(const video_parser::H265StRefPicSet& st,
                        const std::vector<dx_h264::DpbEntry>& dpb,
                        int32_t poc,
-                       const DXVA_PicParams_HEVC& pic,
+                       uint8_t& ref_count,
                        DXVA_PicParams_HEVC& out) {
   uint8_t before = 0;
   for (int i = 0; i < st.num_negative_pics && before < 8; ++i) {
@@ -166,7 +177,7 @@ static void fillRefSet(const video_parser::H265StRefPicSet& st,
     const int target_poc = poc + st.delta_poc_s0[i];
     for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
       if (dpb[slot].is_reference && dpb[slot].poc == target_poc) {
-        out.RefPicSetStCurrBefore[before++] = findRefIndex(slot, pic);
+        out.RefPicSetStCurrBefore[before++] = addRefPic(slot, dpb, ref_count, out);
         break;
       }
     }
@@ -178,7 +189,7 @@ static void fillRefSet(const video_parser::H265StRefPicSet& st,
     const int target_poc = poc + st.delta_poc_s1[i];
     for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
       if (dpb[slot].is_reference && dpb[slot].poc == target_poc) {
-        out.RefPicSetStCurrAfter[after++] = findRefIndex(slot, pic);
+        out.RefPicSetStCurrAfter[after++] = addRefPic(slot, dpb, ref_count, out);
         break;
       }
     }
@@ -222,16 +233,9 @@ static void fillPicParams(const Sps& sps,
 
   (void) reference_usage;
   uint8_t ref_count = 0;
-  for (uint32_t ref_slot = 0; ref_slot < dpb.size() && ref_count < 15; ++ref_slot) {
-    if (ref_slot == current_slot || !dpb[ref_slot].is_reference) continue;
-    pic.RefPicList[ref_count].Index7Bits = static_cast<UCHAR>(ref_slot);
-    pic.RefPicList[ref_count].AssociatedFlag = 0;
-    pic.PicOrderCntValList[ref_count] = dpb[ref_slot].poc;
-    ++ref_count;
-  }
 
   const auto& st = sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set;
-  fillRefSet(st, dpb, poc, pic, pic);
+  fillRefSet(st, dpb, poc, ref_count, pic);
 
   pic.sps_max_dec_pic_buffering_minus1 = static_cast<UCHAR>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1]);
   pic.log2_min_luma_coding_block_size_minus3 = static_cast<UCHAR>(sps.log2_min_luma_coding_block_size_minus3);

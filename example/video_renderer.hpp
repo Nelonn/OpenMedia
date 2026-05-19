@@ -152,12 +152,11 @@ private:
     const bool semi_planar = (getNumPlanes(format) == 2);
 
     auto yuvToRgba = [&](uint16_t y, uint16_t u, uint16_t v) -> uint32_t {
-      // High bit depth formats like P010 are often MSB-packed in 16-bit words.
-      // We normalize to 8-bit for display in this simple renderer.
-      const int shift = (16 - vf.bits_per_component);
-      const int yi = (y >> shift);
-      const int ui = (u >> shift) - 128;
-      const int vi = (v >> shift) - 128;
+      // P010/P012/P016 store valid bits in the MSBs. Convert to 8-bit before
+      // applying the simple BT.601-ish display matrix below.
+      const int yi = y >> 8;
+      const int ui = (u >> 8) - 128;
+      const int vi = (v >> 8) - 128;
 
       const int r = std::clamp(yi + static_cast<int>(1.402f * vi), 0, 255);
       const int g = std::clamp(yi - static_cast<int>(0.344f * ui + 0.714f * vi), 0, 255);
