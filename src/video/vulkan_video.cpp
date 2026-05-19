@@ -7,9 +7,12 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <span>
-#include <h264.h>
-#include <h265_stream.h>
+#include <video/parser/h264_parser.hpp>
+#include <video/parser/h265_parser.hpp>
+#include <video/parser/vp9_parser.hpp>
+#include <video/parser/av1_parser.hpp>
 #include <util/io_util.hpp>
 #include <cstdio>
 
@@ -26,11 +29,6 @@ template<typename T>
 static auto alignUp(T value, T alignment) -> T {
   if (alignment <= 1) return value;
   return ((value + alignment - 1) / alignment) * alignment;
-}
-
-static auto isAnnexB(std::span<const uint8_t> data) -> bool {
-  return data.size() >= 3 && data[0] == 0 && data[1] == 0 &&
-         (data[2] == 1 || (data.size() >= 4 && data[2] == 0 && data[3] == 1));
 }
 
 static auto h264LevelIdc(int level) -> StdVideoH264LevelIdc {
@@ -115,14 +113,13 @@ class VulkanDecoder final : public Decoder {
   bool h264_pps_valid_[256] = {};
   bool has_h264_sps_ = false;
   bool has_h264_pps_ = false;
-  uint8_t h264_nal_length_size_ = 0;
-  int prev_pic_order_cnt_lsb_ = 0;
-  int prev_pic_order_cnt_msb_ = 0;
-  bool have_prev_poc_ = false;
+  video_parser::H264AccessUnitParser h264_parser_;
 
-  h265_stream_t* h265_stream_ = nullptr;
   bool has_h265_sps_ = false;
   bool has_h265_pps_ = false;
+  video_parser::H265AccessUnitParser h265_parser_;
+  video_parser::VP9FrameParser vp9_parser_;
+  video_parser::AV1ObuParser av1_parser_;
   bool first_decode_ = true;
 
 public:
@@ -147,10 +144,6 @@ public:
     has_h264_pps_ = false;
     std::memset(h264_sps_valid_, 0, sizeof(h264_sps_valid_));
     std::memset(h264_pps_valid_, 0, sizeof(h264_pps_valid_));
-    h264_nal_length_size_ = 0;
-    prev_pic_order_cnt_lsb_ = 0;
-    prev_pic_order_cnt_msb_ = 0;
-    have_prev_poc_ = false;
     reference_usage_.clear();
     next_ref_ = 0;
     next_slot_ = 0;
@@ -168,7 +161,9 @@ public:
       h264_profile_.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_INTERLACED_INTERLEAVED_LINES_BIT_KHR;
       video_profile_.pNext = &h264_profile_;
       video_profile_.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
-      parseH264Extradata(options.extradata);
+      h264_parser_.reset();
+      h264_parser_.parseExtradata(options.extradata);
+      syncH264ParserState();
       for (uint32_t i = 0; i < 32; ++i) {
         if (!h264_sps_valid_[i]) continue;
         h264_profile_.stdProfileIdc = (StdVideoH264ProfileIdc)h264_sps_[i].profile_idc;
@@ -180,6 +175,10 @@ public:
       else h265_profile_.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
       video_profile_.pNext = &h265_profile_;
       video_profile_.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+      h265_parser_.reset();
+      h265_parser_.parseExtradata(options.extradata);
+      has_h265_sps_ = h265_parser_.hasSps();
+      has_h265_pps_ = h265_parser_.hasPps();
     } else {
       return OM_CODEC_NOT_SUPPORTED;
     }
@@ -355,7 +354,6 @@ public:
     VK(vkBindBufferMemory)(hw_context_->vk_device, bitstream_buffer_, bitstream_memory_, 0);
     VK(vkMapMemory)(hw_context_->vk_device, bitstream_memory_, 0, BITSTREAM_SIZE, 0, &bitstream_ptr_);
 
-    if (codec_id_ == OM_CODEC_H265) h265_stream_ = h265_new();
     output_format_ = {OM_FORMAT_NV12, width_, height_};
     initialized_ = true;
     return OM_SUCCESS;
@@ -366,83 +364,58 @@ public:
     if (packet.bytes.empty()) return Ok(std::vector<Frame>{});
 
     if (codec_id_ == OM_CODEC_H264) {
-      std::span<const uint8_t> bitstream = packet.bytes;
-      if (bitstream.empty() || bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_HWACCEL_FAILED);
+      auto parsed_frames = h264_parser_.parse(packet.bytes);
+      syncH264ParserState();
 
-      h264::Bitstream bs;
-      bs.init(bitstream.data(), bitstream.size());
-      std::vector<uint32_t> slice_offsets;
-      h264::SliceHeader last_slice = {};
-      h264::NALHeader last_nal = {};
-
-      while (h264::find_next_nal(&bs)) {
-        uint32_t nal_offset = (uint32_t)bs.byte_offset() - 3;
-        h264::NALHeader nal;
-        if (!h264::read_nal_header(&nal, &bs)) continue;
-        if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
-          h264::SPS sps;
-          h264::read_sps(&sps, &bs);
-          if (sps.seq_parameter_set_id >= 0 && sps.seq_parameter_set_id < 32) {
-            h264_sps_[sps.seq_parameter_set_id] = sps;
-            h264_sps_valid_[sps.seq_parameter_set_id] = true;
-            has_h264_sps_ = true;
-            updateSessionParametersH264();
-          }
-        } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
-          h264::PPS pps;
-          h264::read_pps(&pps, &bs);
-          if (pps.pic_parameter_set_id >= 0 && pps.pic_parameter_set_id < 256) {
-            h264_pps_[pps.pic_parameter_set_id] = pps;
-            h264_pps_valid_[pps.pic_parameter_set_id] = true;
-            has_h264_pps_ = true;
-            updateSessionParametersH264();
-          }
-        } else if (nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) {
-          if (!has_h264_sps_ || !has_h264_pps_ || !session_params_) continue;
-          h264::read_slice_header(&last_slice, &nal, h264_pps_, h264_sps_, &bs);
-          slice_offsets.push_back(nal_offset);
-          last_nal = nal;
+      std::vector<Frame> frames;
+      for (const auto& parsed : parsed_frames) {
+        if (parsed.slice_offsets.empty()) continue;
+        if (parsed.bitstream.empty() || parsed.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_HWACCEL_FAILED);
+        if (parsed.parameter_sets_changed || !session_params_) {
+          updateSessionParametersH264();
+          if (!session_params_) return Err(OM_CODEC_HWACCEL_FAILED);
         }
+
+        if (parsed.is_intra) {
+          for (auto& dpb : dpb_slots_) dpb.is_reference = false;
+          reference_usage_.clear();
+          next_ref_ = 0;
+          next_slot_ = 0;
+        }
+
+        uint32_t current_idx = next_slot_;
+        VulkanDPBEntry* slot = &dpb_slots_[current_idx];
+        recordDecodeH264(slot, current_idx, parsed.nal, parsed.slice, parsed.bitstream, parsed.poc, parsed.is_reference, parsed.slice_offsets);
+
+        slot->poc = parsed.poc;
+        slot->frame_num = (uint32_t)parsed.slice.frame_num;
+        slot->is_reference = parsed.is_reference;
+        if (parsed.is_reference && dpb_slot_count_ > 1) {
+          if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
+          reference_usage_[next_ref_] = static_cast<uint8_t>(current_idx);
+          next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
+          next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
+        }
+
+        Frame frame = {};
+        frame.pts = packet.pts;
+        frame.dts = packet.dts;
+        Picture pic(output_format_.format, output_format_.width, output_format_.height);
+        pic.buffer = std::make_shared<VulkanHardwarePicture>(coincide_supported_ ? &slot->picture : &output_pic_proxy_);
+        frame.data = std::move(pic);
+        frames.push_back(std::move(frame));
       }
-
-      if (!slice_offsets.empty()) {
-          const bool is_intra = last_nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
-          const bool is_reference = last_nal.idc != h264::NAL_REF_IDC_PRIORITY_DISPOSABLE;
-          if (is_intra) {
-            for (auto& dpb : dpb_slots_) dpb.is_reference = false;
-            reference_usage_.clear();
-            next_ref_ = 0;
-            next_slot_ = 0;
-            prev_pic_order_cnt_lsb_ = 0;
-            prev_pic_order_cnt_msb_ = 0;
-            have_prev_poc_ = false;
-          }
-
-          uint32_t current_idx = next_slot_;
-          VulkanDPBEntry* slot = &dpb_slots_[current_idx];
-          const int32_t poc = computeH264Poc(last_slice);
-          recordDecodeH264(slot, current_idx, last_nal, last_slice, bitstream, poc, is_reference, slice_offsets);
-
-          slot->poc = poc;
-          slot->frame_num = (uint32_t)last_slice.frame_num;
-          slot->is_reference = is_reference;
-          if (is_reference && dpb_slot_count_ > 1) {
-            if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
-            reference_usage_[next_ref_] = static_cast<uint8_t>(current_idx);
-            next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
-            next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
-          }
-          
-          Frame frame = {};
-          frame.pts = packet.pts;
-          frame.dts = packet.dts;
-          Picture pic(output_format_.format, output_format_.width, output_format_.height);
-          pic.buffer = std::make_shared<VulkanHardwarePicture>(coincide_supported_ ? &slot->picture : &output_pic_proxy_);
-          frame.data = std::move(pic);
-          return Ok(std::vector<Frame>{std::move(frame)});
-      }
+      return Ok(std::move(frames));
     } else if (codec_id_ == OM_CODEC_H265) {
-        // ... (H265 logic if any)
+      auto parsed_frames = h265_parser_.parse(packet.bytes);
+      has_h265_sps_ = h265_parser_.hasSps();
+      has_h265_pps_ = h265_parser_.hasPps();
+      for (const auto& parsed : parsed_frames) {
+        if (parsed.slice_offsets.empty()) continue;
+        if (parsed.bitstream.empty() || parsed.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_HWACCEL_FAILED);
+        // H.265 Vulkan picture parameter emission is still separate from bitstream parsing.
+        break;
+      }
     }
     return Ok(std::vector<Frame>{});
   }
@@ -457,108 +430,21 @@ public:
   void flush() override { }
 
 private:
+  void syncH264ParserState() {
+    const auto& state = h264_parser_.state();
+    std::copy(std::begin(state.sps), std::end(state.sps), std::begin(h264_sps_));
+    std::copy(std::begin(state.pps), std::end(state.pps), std::begin(h264_pps_));
+    std::copy(std::begin(state.sps_valid), std::end(state.sps_valid), std::begin(h264_sps_valid_));
+    std::copy(std::begin(state.pps_valid), std::end(state.pps_valid), std::begin(h264_pps_valid_));
+    has_h264_sps_ = state.has_sps;
+    has_h264_pps_ = state.has_pps;
+  }
+
   uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags props) {
     VkPhysicalDeviceMemoryProperties m;
     VK(vkGetPhysicalDeviceMemoryProperties)(hw_context_->vk_physical_device, &m);
     for (uint32_t i = 0; i < m.memoryTypeCount; i++) if ((filter & (1 << i)) && (m.memoryTypes[i].propertyFlags & props) == props) return i;
     return 0;
-  }
-
-  void storeH264Nal(std::span<const uint8_t> nal_data) {
-    if (nal_data.empty()) return;
-    h264::Bitstream bs;
-    bs.init(nal_data.data(), nal_data.size());
-    h264::NALHeader nal;
-    if (!h264::read_nal_header(&nal, &bs)) return;
-    if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
-      h264::SPS sps = {};
-      h264::read_sps(&sps, &bs);
-      if (sps.seq_parameter_set_id >= 0 && sps.seq_parameter_set_id < 32) {
-        h264_sps_[sps.seq_parameter_set_id] = sps;
-        h264_sps_valid_[sps.seq_parameter_set_id] = true;
-        has_h264_sps_ = true;
-      }
-    } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
-      h264::PPS pps = {};
-      h264::read_pps(&pps, &bs);
-      if (pps.pic_parameter_set_id >= 0 && pps.pic_parameter_set_id < 256) {
-        h264_pps_[pps.pic_parameter_set_id] = pps;
-        h264_pps_valid_[pps.pic_parameter_set_id] = true;
-        has_h264_pps_ = true;
-      }
-    }
-  }
-
-  void parseH264Extradata(std::span<const uint8_t> extradata) {
-    if (extradata.empty()) return;
-    if (extradata.size() >= 7 && extradata[0] == 1) {
-      h264_nal_length_size_ = static_cast<uint8_t>((extradata[4] & 0x03u) + 1);
-      size_t offset = 5;
-      const uint8_t sps_count = extradata[offset++] & 0x1fu;
-      for (uint8_t i = 0; i < sps_count && offset + 2 <= extradata.size(); ++i) {
-        const size_t size = (static_cast<size_t>(extradata[offset]) << 8u) | extradata[offset + 1];
-        offset += 2;
-        if (offset + size > extradata.size()) return;
-        storeH264Nal(extradata.subspan(offset, size));
-        offset += size;
-      }
-      if (offset >= extradata.size()) return;
-      const uint8_t pps_count = extradata[offset++];
-      for (uint8_t i = 0; i < pps_count && offset + 2 <= extradata.size(); ++i) {
-        const size_t size = (static_cast<size_t>(extradata[offset]) << 8u) | extradata[offset + 1];
-        offset += 2;
-        if (offset + size > extradata.size()) return;
-        storeH264Nal(extradata.subspan(offset, size));
-        offset += size;
-      }
-      return;
-    }
-
-    if (!isAnnexB(extradata)) return;
-    h264::Bitstream bs;
-    bs.init(extradata.data(), extradata.size());
-    while (h264::find_next_nal(&bs)) {
-      const size_t start = static_cast<size_t>(bs.byte_offset());
-      const uint8_t* nal_start = extradata.data() + start;
-      const uint8_t* nal_end = extradata.data() + extradata.size();
-      for (const uint8_t* p = nal_start; p + 3 <= extradata.data() + extradata.size(); ++p) {
-        if (p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p + 4 <= extradata.data() + extradata.size() && p[2] == 0 && p[3] == 1))) {
-          nal_end = p;
-          break;
-        }
-      }
-      storeH264Nal({nal_start, static_cast<size_t>(nal_end - nal_start)});
-    }
-  }
-
-  auto computeH264Poc(const h264::SliceHeader& slice) -> int32_t {
-    if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !h264_pps_valid_[slice.pic_parameter_set_id]) {
-      return slice.pic_order_cnt_lsb;
-    }
-    const auto& pps = h264_pps_[slice.pic_parameter_set_id];
-    if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32 || !h264_sps_valid_[pps.seq_parameter_set_id]) {
-      return slice.pic_order_cnt_lsb;
-    }
-    const auto& sps = h264_sps_[pps.seq_parameter_set_id];
-    if (sps.pic_order_cnt_type != 0) return slice.pic_order_cnt_lsb;
-
-    const int max_pic_order_cnt_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
-    int pic_order_cnt_msb = 0;
-    if (have_prev_poc_) {
-      if (slice.pic_order_cnt_lsb < prev_pic_order_cnt_lsb_ &&
-          (prev_pic_order_cnt_lsb_ - slice.pic_order_cnt_lsb) >= max_pic_order_cnt_lsb / 2) {
-        pic_order_cnt_msb = prev_pic_order_cnt_msb_ + max_pic_order_cnt_lsb;
-      } else if (slice.pic_order_cnt_lsb > prev_pic_order_cnt_lsb_ &&
-                 (slice.pic_order_cnt_lsb - prev_pic_order_cnt_lsb_) > max_pic_order_cnt_lsb / 2) {
-        pic_order_cnt_msb = prev_pic_order_cnt_msb_ - max_pic_order_cnt_lsb;
-      } else {
-        pic_order_cnt_msb = prev_pic_order_cnt_msb_;
-      }
-    }
-    prev_pic_order_cnt_lsb_ = slice.pic_order_cnt_lsb;
-    prev_pic_order_cnt_msb_ = pic_order_cnt_msb;
-    have_prev_poc_ = true;
-    return pic_order_cnt_msb + slice.pic_order_cnt_lsb;
   }
 
   void updateSessionParametersH264() {
@@ -897,11 +783,10 @@ private:
     if (output_view_) VK(vkDestroyImageView)(hw_context_->vk_device, output_view_, hw_context_->allocator);
     if (output_image_) VK(vkDestroyImage)(hw_context_->vk_device, output_image_, hw_context_->allocator);
     if (output_memory_) VK(vkFreeMemory)(hw_context_->vk_device, output_memory_, hw_context_->allocator);
-    if (h265_stream_) h265_free(h265_stream_);
     command_pool_ = VK_NULL_HANDLE; decode_fence_ = VK_NULL_HANDLE; bitstream_buffer_ = VK_NULL_HANDLE; bitstream_memory_ = VK_NULL_HANDLE; bitstream_ptr_ = nullptr;
     video_session_ = VK_NULL_HANDLE; session_params_ = VK_NULL_HANDLE; dpb_image_view_ = VK_NULL_HANDLE; dpb_image_ = VK_NULL_HANDLE;
     dpb_memory_ = VK_NULL_HANDLE; output_view_ = VK_NULL_HANDLE; output_image_ = VK_NULL_HANDLE; output_memory_ = VK_NULL_HANDLE;
-    h265_stream_ = nullptr; initialized_ = false;
+    initialized_ = false;
   }
 };
 

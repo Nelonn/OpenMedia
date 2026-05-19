@@ -1,4 +1,3 @@
-#include <h264.h>
 #include <h265_stream.h>
 #include <openmedia/hw_vaapi.h>
 #include <va/va.h>
@@ -17,6 +16,7 @@
 #include <openmedia/log.hpp>
 #include <openmedia/video.hpp>
 #include <util/io_util.hpp>
+#include <video/parser/h264_types.hpp>
 #include <vector>
 #include "vaapi_loader.hpp"
 
@@ -116,7 +116,7 @@ static void fillSliceParamsH264(const h264::SliceHeader& slice, const h264::PPS&
   }
 }
 
-static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slice_segment_header_t* ssh, VAPictureParameterBufferHEVC& va_pic) {
+static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slice_segment_header_t* ssh, int nal_type, VAPictureParameterBufferHEVC& va_pic) {
   std::memset(&va_pic, 0, sizeof(va_pic));
   va_pic.pic_width_in_luma_samples = (uint16_t) sps->pic_width_in_luma_samples;
   va_pic.pic_height_in_luma_samples = (uint16_t) sps->pic_height_in_luma_samples;
@@ -143,7 +143,7 @@ static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slic
   va_pic.log2_min_luma_coding_block_size_minus3 = (uint8_t) sps->log2_min_luma_coding_block_size_minus3;
   va_pic.log2_diff_max_min_luma_coding_block_size = (uint8_t) sps->log2_diff_max_min_luma_coding_block_size;
   va_pic.log2_min_transform_block_size_minus2 = (uint8_t) sps->log2_min_luma_transform_block_size_minus2;
-  va_pic.log2_diff_max_min_transform_block_size = (uint8_t) sps->log2_diff_max_min_luma_transform_block_size;
+  va_pic.log2_diff_max_min_transform_block_size = (uint8_t) (sps->log2_diff_max_min_luma_transform_block_size);
   va_pic.max_transform_hierarchy_depth_inter = (uint8_t) sps->max_transform_hierarchy_depth_inter;
   va_pic.max_transform_hierarchy_depth_intra = (uint8_t) sps->max_transform_hierarchy_depth_intra;
   va_pic.sps_max_dec_pic_buffering_minus1 = (uint8_t) sps->sps_max_dec_pic_buffering_minus1[sps->sps_max_sub_layers_minus1];
@@ -159,9 +159,24 @@ static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slic
   va_pic.pps_tc_offset_div2 = (int8_t) pps->pps_tc_offset_div2;
   va_pic.log2_parallel_merge_level_minus2 = (uint8_t) pps->log2_parallel_merge_level_minus2;
   va_pic.num_extra_slice_header_bits = (uint8_t) pps->num_extra_slice_header_bits;
-  va_pic.num_tile_columns_minus1 = (uint8_t) pps->num_tile_columns_minus1;
-  va_pic.num_tile_rows_minus1 = (uint8_t) pps->num_tile_rows_minus1;
   va_pic.log2_max_pic_order_cnt_lsb_minus4 = (uint8_t) sps->log2_max_pic_order_cnt_lsb_minus4;
+
+  va_pic.slice_parsing_fields.bits.lists_modification_present_flag = pps->lists_modification_present_flag;
+  va_pic.slice_parsing_fields.bits.long_term_ref_pics_present_flag = sps->long_term_ref_pics_present_flag;
+  va_pic.slice_parsing_fields.bits.sps_temporal_mvp_enabled_flag = sps->sps_temporal_mvp_enabled_flag;
+  va_pic.slice_parsing_fields.bits.cabac_init_present_flag = pps->cabac_init_present_flag;
+  va_pic.slice_parsing_fields.bits.output_flag_present_flag = pps->output_flag_present_flag;
+  va_pic.slice_parsing_fields.bits.dependent_slice_segments_enabled_flag = pps->dependent_slice_segments_enabled_flag;
+  va_pic.slice_parsing_fields.bits.pps_slice_chroma_qp_offsets_present_flag = pps->pps_slice_chroma_qp_offsets_present_flag;
+  va_pic.slice_parsing_fields.bits.sample_adaptive_offset_enabled_flag = sps->sample_adaptive_offset_enabled_flag;
+  va_pic.slice_parsing_fields.bits.deblocking_filter_override_enabled_flag = pps->deblocking_filter_override_enabled_flag;
+  va_pic.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag = pps->pps_deblocking_filter_disabled_flag;
+  va_pic.slice_parsing_fields.bits.slice_segment_header_extension_present_flag = pps->slice_segment_header_extension_present_flag;
+  
+  va_pic.slice_parsing_fields.bits.RapPicFlag = (nal_type >= 16 && nal_type <= 21);
+  va_pic.slice_parsing_fields.bits.IdrPicFlag = (nal_type == 19 || nal_type == 20);
+  va_pic.slice_parsing_fields.bits.IntraPicFlag = va_pic.slice_parsing_fields.bits.RapPicFlag;
+
   va_pic.CurrPic.picture_id = VA_INVALID_ID;
   for (int i = 0; i < 15; i++) va_pic.ReferenceFrames[i].picture_id = VA_INVALID_ID;
 }
@@ -178,16 +193,14 @@ static void fillSliceParamsHEVC(const slice_segment_header_t* ssh, VASliceParame
   va_slice.LongSliceFlags.fields.mvd_l1_zero_flag = ssh->mvd_l1_zero_flag;
   va_slice.LongSliceFlags.fields.cabac_init_flag = ssh->cabac_init_flag;
   va_slice.LongSliceFlags.fields.collocated_from_l0_flag = ssh->collocated_from_l0_flag;
-  va_slice.LongSliceFlags.fields.slice_deblocking_filter_disabled_flag = ssh->slice_deblocking_filter_disabled_flag;
   va_slice.LongSliceFlags.fields.slice_loop_filter_across_slices_enabled_flag = ssh->slice_loop_filter_across_slices_enabled_flag;
   va_slice.collocated_ref_idx = ssh->collocated_ref_idx;
   va_slice.num_ref_idx_l0_active_minus1 = (uint8_t) ssh->num_ref_idx_l0_active_minus1;
   va_slice.num_ref_idx_l1_active_minus1 = (uint8_t) ssh->num_ref_idx_l1_active_minus1;
   va_slice.slice_qp_delta = (int8_t) ssh->slice_qp_delta;
-  va_slice.slice_cb_qp_offset = (int8_t) ssh->slice_cb_qp_offset;
-  va_slice.slice_cr_qp_offset = (int8_t) ssh->slice_cr_qp_offset;
   va_slice.slice_beta_offset_div2 = (int8_t) ssh->slice_beta_offset_div2;
   va_slice.slice_tc_offset_div2 = (int8_t) ssh->slice_tc_offset_div2;
+  va_slice.five_minus_max_num_merge_cand = (uint8_t) (ssh->slice_type == 2 ? 0 : (5 - ssh->five_minus_max_num_merge_cand));
 }
 
 static void retrieveCodedBuffer(VADisplay display, VABufferID coded_buffer, std::vector<uint8_t>& out_data) {
@@ -366,9 +379,9 @@ public:
 
     if (profile == VAProfileNone) return OM_CODEC_NOT_SUPPORTED;
 
-    // Pad surface dimensions to 16x16 macroblock boundaries
-    uint32_t padded_w = (width_ + 15) & ~15;
-    uint32_t padded_h = (height_ + 15) & ~15;
+    // Pad surface dimensions to 64x64 macroblock boundaries (HEVC CTU size)
+    uint32_t padded_w = (width_ + 63) & ~63;
+    uint32_t padded_h = (height_ + 63) & ~63;
 
     VAConfigAttrib attrib;
     attrib.type = VAConfigAttribRTFormat;
@@ -463,21 +476,21 @@ public:
         h264::Bitstream bs;
         bs.init(rbsp.data.data(), rbsp.data.size());
         h264::NALHeader nal;
-        if (!h264::read_nal_header(&nal, &bs)) {
+        if (!h264::read_nal_header(nal, bs)) {
           pos += next;
           continue;
         }
 
         if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
           h264::SPS sps;
-          h264::read_sps(&sps, &bs);
+          h264::read_sps(sps, bs);
           if (sps.seq_parameter_set_id < 32) {
             h264_sps_table_[sps.seq_parameter_set_id] = sps;
             has_h264_sps_ = true;
           }
         } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
           h264::PPS pps;
-          h264::read_pps(&pps, &bs);
+          h264::read_pps(pps, bs);
           if (pps.pic_parameter_set_id < 256) {
             h264_pps_table_[pps.pic_parameter_set_id] = pps;
             has_h264_pps_ = true;
@@ -488,7 +501,7 @@ public:
             continue;
           }
           h264::SliceHeader slice;
-          h264::read_slice_header(&slice, &nal, h264_pps_table_, h264_sps_table_, &bs);
+          h264::read_slice_header(slice, nal, h264_pps_table_, h264_sps_table_, bs);
 
           const auto& pps = h264_pps_table_[slice.pic_parameter_set_id];
           const auto& sps = h264_sps_table_[pps.seq_parameter_set_id];
@@ -650,10 +663,11 @@ public:
           slice_param.slice_data_offset = 0;
           slice_param.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
 
-          size_t rbsp_byte_off = (size_t) (bs.p - rbsp.data.data());
+          const size_t rbsp_bit_off = 8u + static_cast<size_t>(slice.header_bit_size);
+          size_t rbsp_byte_off = rbsp_bit_off / 8u;
           if (rbsp_byte_off >= rbsp.src_offsets.size()) rbsp_byte_off = rbsp.src_offsets.size() - 1;
           size_t orig_byte_off = rbsp.src_offsets[rbsp_byte_off];
-          slice_param.slice_data_bit_offset = (uint16_t) (orig_byte_off * 8 + (8 - bs.bits_left));
+          slice_param.slice_data_bit_offset = (uint16_t) (orig_byte_off * 8 + (rbsp_bit_off & 7u));
 
           VABufferID slice_param_buf, slice_data_buf;
           libva.vaCreateBuffer(display_, context_, VASliceParameterBufferType, sizeof(slice_param), 1, &slice_param, &slice_param_buf);
@@ -701,87 +715,176 @@ public:
         return Ok(std::vector<Frame> {std::move(frame)});
       }
     } else if (codec_id_ == OM_CODEC_H265) {
-      int nal_start, nal_end;
-      uint8_t* p = const_cast<uint8_t*>(packet.bytes.data());
-      int sz = static_cast<int>(packet.bytes.size());
-      while (find_nal_unit(p, sz, &nal_start, &nal_end) > 0) {
-        read_debug_nal_unit(h265_stream_, p + nal_start, nal_end - nal_start);
-        if (h265_stream_->nal->nal_unit_type == NAL_UNIT_SPS)
-          has_h265_sps_ = true;
-        else if (h265_stream_->nal->nal_unit_type == NAL_UNIT_PPS)
-          has_h265_pps_ = true;
-        else if (h265_stream_->nal->nal_unit_type >= NAL_UNIT_CODED_SLICE_TRAIL_N && h265_stream_->nal->nal_unit_type <= NAL_UNIT_CODED_SLICE_RASL_R) {
-          if (!has_h265_sps_ || !has_h265_pps_) continue;
-
-          auto is_surface_busy = [&](const SurfaceSlot& slot) {
-            if (!slot.last_pic.expired()) return true;
-            for (const auto& e : dpb_)
-              if (e.surface == slot.surface) return true;
-            return false;
-          };
-          VASurfaceID surface = VA_INVALID_ID;
-          size_t selected_slot_idx = 0;
-          for (size_t i = 0; i < surface_slots_.size(); i++) {
-            size_t idx = (surface_idx_ + i) % surface_slots_.size();
-            if (!is_surface_busy(surface_slots_[idx])) {
-              surface = surface_slots_[idx].surface;
-              selected_slot_idx = idx;
-              surface_idx_ = (idx + 1) % surface_slots_.size();
-              break;
+      const uint8_t* data = packet.bytes.data();
+      size_t size = packet.bytes.size();
+      
+      auto find_start_code = [](const uint8_t* p, size_t sz, size_t& header_size) -> size_t {
+        for (size_t i = 0; i + 2 < sz; ++i) {
+          if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 1) {
+            header_size = 3;
+            size_t off = i;
+            while (off > 0 && p[off-1] == 0) {
+                off--;
+                header_size++;
             }
+            return off;
           }
-          if (surface == VA_INVALID_ID) continue;
+        }
+        return sz;
+      };
 
-          VAPictureParameterBufferHEVC pic_param;
-          fillPictureParamsHEVC(h265_stream_->sps, h265_stream_->pps, h265_stream_->ssh, pic_param);
-          pic_param.CurrPic.picture_id = surface;
-          pic_param.CurrPic.pic_order_cnt = (int32_t) packet.pts;
-          pic_param.CurrPic.flags = 0;
+      size_t pos = 0;
+      VASurfaceID surface = VA_INVALID_ID;
+      bool picture_started = false;
+      size_t first_surface_idx = 0;
+      std::vector<VABufferID> cleanup_bufs;
+      int32_t first_poc = 0;
+      int first_nal_type = 0;
 
-          for (size_t i = 0; i < dpb_.size() && i < 15; i++) {
-            pic_param.ReferenceFrames[i].picture_id = dpb_[i].surface;
-            pic_param.ReferenceFrames[i].pic_order_cnt = dpb_[i].poc;
-            pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE; // Default to short term
+      while (pos < size) {
+        size_t header_sz = 0;
+        size_t start = find_start_code(data + pos, size - pos, header_sz);
+        if (start == size - pos) break;
+        pos += start + header_sz;
+        
+        size_t next_header_sz = 0;
+        size_t next = find_start_code(data + pos, size - pos, next_header_sz);
+        size_t nal_size = next;
+        uint8_t* nal_ptr = const_cast<uint8_t*>(data + pos);
+        if (nal_size == 0) continue;
+
+        read_debug_nal_unit(h265_stream_, nal_ptr, (int)nal_size);
+        auto nal_type = h265_stream_->nal->nal_unit_type;
+
+        if (nal_type == NAL_UNIT_SPS) {
+          has_h265_sps_ = true;
+        } else if (nal_type == NAL_UNIT_PPS) {
+          has_h265_pps_ = true;
+        } else if (nal_type >= NAL_UNIT_CODED_SLICE_TRAIL_N && nal_type <= NAL_UNIT_CODED_SLICE_RASL_R) {
+          if (!has_h265_sps_ || !has_h265_pps_) {
+            pos += next;
+            continue;
           }
-          for (size_t i = dpb_.size(); i < 15; i++) {
-            pic_param.ReferenceFrames[i].picture_id = VA_INVALID_ID;
-            pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_INVALID;
+
+          if (!picture_started) {
+            auto is_surface_busy = [&](const SurfaceSlot& slot) {
+                if (!slot.last_pic.expired()) return true;
+                for (const auto& e : dpb_) if (e.surface == slot.surface) return true;
+                return false;
+            };
+            surface = VA_INVALID_ID;
+            for (size_t i=0; i<surface_slots_.size(); i++) {
+                size_t idx = (surface_idx_ + i) % surface_slots_.size();
+                if (!is_surface_busy(surface_slots_[idx])) {
+                    surface = surface_slots_[idx].surface;
+                    first_surface_idx = idx;
+                    surface_idx_ = (idx + 1) % surface_slots_.size();
+                    break;
+                }
+            }
+            if (surface == VA_INVALID_ID) {
+                log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "[VAAPI] Surface pool exhausted!");
+                break;
+            }
+
+            first_poc = h265_stream_->ssh->slice_pic_order_cnt_lsb;
+            first_nal_type = nal_type;
+
+            VAPictureParameterBufferHEVC pic_param;
+            fillPictureParamsHEVC(h265_stream_->sps, h265_stream_->pps, h265_stream_->ssh, first_nal_type, pic_param);
+            
+            if (h265_stream_->pps->tiles_enabled_flag) {
+                if (h265_stream_->pps->column_width_minus1) {
+                    for (int i = 0; i <= h265_stream_->pps->num_tile_columns_minus1 && i < 19; i++)
+                        pic_param.column_width_minus1[i] = (uint16_t)h265_stream_->pps->column_width_minus1[i];
+                }
+                if (h265_stream_->pps->row_height_minus1) {
+                    for (int i = 0; i <= h265_stream_->pps->num_tile_rows_minus1 && i < 21; i++)
+                        pic_param.row_height_minus1[i] = (uint16_t)h265_stream_->pps->row_height_minus1[i];
+                }
+            }
+
+            pic_param.CurrPic.picture_id = surface;
+            pic_param.CurrPic.pic_order_cnt = first_poc;
+            pic_param.CurrPic.flags = 0;
+
+            for (size_t i = 0; i < dpb_.size() && i < 15; i++) {
+              pic_param.ReferenceFrames[i].picture_id = dpb_[i].surface;
+              pic_param.ReferenceFrames[i].pic_order_cnt = dpb_[i].poc;
+              if (dpb_[i].poc < first_poc)
+                  pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
+              else
+                  pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_RPS_ST_CURR_AFTER;
+              if (dpb_[i].is_long_term)
+                  pic_param.ReferenceFrames[i].flags |= VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
+            }
+            for (size_t i = dpb_.size(); i < 15; i++) {
+              pic_param.ReferenceFrames[i].picture_id = VA_INVALID_ID;
+              pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_INVALID;
+            }
+
+            VABufferID pic_param_buf;
+            libva.vaCreateBuffer(display_, context_, VAPictureParameterBufferType, sizeof(pic_param), 1, &pic_param, &pic_param_buf);
+            libva.vaBeginPicture(display_, context_, surface);
+            libva.vaRenderPicture(display_, context_, &pic_param_buf, 1);
+            cleanup_bufs.push_back(pic_param_buf);
+            picture_started = true;
           }
 
           VASliceParameterBufferHEVC slice_param;
           fillSliceParamsHEVC(h265_stream_->ssh, slice_param);
-          slice_param.slice_data_size = (uint32_t) (nal_end - nal_start);
+          slice_param.slice_data_size = (uint32_t) nal_size;
           slice_param.slice_data_offset = 0;
           slice_param.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-          VABufferID pic_param_buf, slice_param_buf, slice_data_buf;
-          libva.vaCreateBuffer(display_, context_, VAPictureParameterBufferType, sizeof(pic_param), 1, &pic_param, &pic_param_buf);
+          
+          // Re-parse to get precise slice_data_byte_offset
+          bs_t* b = bs_new(nal_ptr, (int)nal_size);
+          bs_skip_u(b, 16); // Skip NAL unit header (2 bytes)
+          read_slice_segment_header(h265_stream_, b);
+          slice_param.slice_data_byte_offset = (uint32_t)bs_pos(b);
+          bs_free(b);
+          
+          // Initialize RefPicList with indices from our DPB
+          std::memset(slice_param.RefPicList, 0xFF, sizeof(slice_param.RefPicList));
+          if (h265_stream_->ssh->slice_type != 2 /* I */) {
+            for (int i = 0; i < (int)dpb_.size() && i < 15; i++) {
+                slice_param.RefPicList[0][i] = (uint8_t)i;
+                if (h265_stream_->ssh->slice_type == 0 /* B */) slice_param.RefPicList[1][i] = (uint8_t)i;
+            }
+          }
+
+          VABufferID slice_param_buf, slice_data_buf;
           libva.vaCreateBuffer(display_, context_, VASliceParameterBufferType, sizeof(slice_param), 1, &slice_param, &slice_param_buf);
-          libva.vaCreateBuffer(display_, context_, VASliceDataBufferType, (uint32_t) (nal_end - nal_start), 1, p + nal_start, &slice_data_buf);
-          libva.vaBeginPicture(display_, context_, surface);
-          VABufferID buffers[] = {pic_param_buf, slice_param_buf, slice_data_buf};
-          libva.vaRenderPicture(display_, context_, buffers, 3);
-          libva.vaEndPicture(display_, context_);
-          libva.vaSyncSurface(display_, surface);
-          libva.vaDestroyBuffer(display_, pic_param_buf);
-          libva.vaDestroyBuffer(display_, slice_param_buf);
-          libva.vaDestroyBuffer(display_, slice_data_buf);
-          if (dpb_.size() >= MAX_DPB_SIZE) dpb_.erase(dpb_.begin());
-          dpb_.push_back({surface, (int32_t) packet.pts, 0, false});
-          Frame frame = {};
-          frame.pts = packet.pts;
-          frame.dts = packet.dts;
-          Picture pic;
-          pic.format = output_format_.format;
-          pic.width = output_format_.width;
-          pic.height = output_format_.height;
-          auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
-          surface_slots_[selected_slot_idx].last_pic = pic_obj;
-          pic.buffer = pic_obj;
-          frame.data = std::move(pic);
-          return Ok(std::vector<Frame> {std::move(frame)});
+          libva.vaCreateBuffer(display_, context_, VASliceDataBufferType, (uint32_t) nal_size, 1, nal_ptr, &slice_data_buf);
+          VABufferID bufs[] = {slice_param_buf, slice_data_buf};
+          libva.vaRenderPicture(display_, context_, bufs, 2);
+          cleanup_bufs.push_back(slice_param_buf);
+          cleanup_bufs.push_back(slice_data_buf);
         }
-        p += nal_end;
-        sz -= nal_end;
+        pos += next;
+      }
+
+      if (picture_started) {
+        libva.vaEndPicture(display_, context_);
+        libva.vaSyncSurface(display_, surface);
+        for (auto buf : cleanup_bufs) libva.vaDestroyBuffer(display_, buf);
+
+        if (first_nal_type == NAL_UNIT_CODED_SLICE_IDR_W_RADL || first_nal_type == NAL_UNIT_CODED_SLICE_IDR_N_LP) dpb_.clear();
+        if (dpb_.size() >= MAX_DPB_SIZE) dpb_.erase(dpb_.begin());
+        dpb_.push_back({surface, first_poc, 0, false});
+
+        Frame frame = {};
+        frame.pts = packet.pts;
+        frame.dts = packet.dts;
+        Picture pic;
+        pic.format = output_format_.format;
+        pic.width = output_format_.width;
+        pic.height = output_format_.height;
+        auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
+        surface_slots_[first_surface_idx].last_pic = pic_obj;
+        pic.buffer = pic_obj;
+        frame.data = std::move(pic);
+        return Ok(std::vector<Frame> {std::move(frame)});
       }
     } else if (codec_id_ == OM_CODEC_AV1) {
       const uint8_t* p = packet.bytes.data();
