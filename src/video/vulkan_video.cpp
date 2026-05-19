@@ -502,6 +502,9 @@ private:
     }
 
     std::vector<StdVideoH265SequenceParameterSet> spss;
+    std::vector<StdVideoH265SequenceParameterSetVui> vuis(16);
+    std::vector<StdVideoH265ShortTermRefPicSet> sps_strps(16 * 64);
+
     for (int i = 0; i < 16; ++i) {
       const auto& d = h265_parser_.sps(i);
       if (!d.valid) continue;
@@ -534,6 +537,77 @@ private:
       s.flags.sps_temporal_mvp_enabled_flag = d.sps_temporal_mvp_enabled_flag;
       s.flags.strong_intra_smoothing_enabled_flag = d.strong_intra_smoothing_enabled_flag;
       s.flags.vui_parameters_present_flag = d.vui_parameters_present_flag;
+
+      if (d.num_short_term_ref_pic_sets > 0) {
+        s.pShortTermRefPicSet = &sps_strps[i * 64];
+        for (int j = 0; j < d.num_short_term_ref_pic_sets; ++j) {
+          auto& strps = sps_strps[i * 64 + j];
+          const auto& src = d.st_ref_pic_set[j];
+          strps.flags.inter_ref_pic_set_prediction_flag = src.inter_ref_pic_set_prediction_flag;
+          strps.flags.delta_rps_sign = src.delta_rps_sign;
+          strps.delta_idx_minus1 = src.delta_idx_minus1;
+          strps.abs_delta_rps_minus1 = src.abs_delta_rps_minus1;
+          for (int k = 0; k < 16; ++k) {
+            if (src.used_by_curr_pic_flag[k]) strps.used_by_curr_pic_flag |= (1 << k);
+            if (src.use_delta_flag[k]) strps.use_delta_flag |= (1 << k);
+          }
+          for (int k = 0; k < src.num_negative_pics; ++k) {
+            strps.delta_poc_s0_minus1[k] = -src.delta_poc_s0[k] - 1;
+            if (src.used_by_curr_pic_s0_flag[k]) strps.used_by_curr_pic_s0_flag |= (1 << k);
+          }
+          for (int k = 0; k < src.num_positive_pics; ++k) {
+            strps.delta_poc_s1_minus1[k] = src.delta_poc_s1[k] - 1;
+            if (src.used_by_curr_pic_s1_flag[k]) strps.used_by_curr_pic_s1_flag |= (1 << k);
+          }
+          strps.num_negative_pics = src.num_negative_pics;
+          strps.num_positive_pics = src.num_positive_pics;
+        }
+      }
+
+      if (d.vui_parameters_present_flag) {
+        auto& vui = vuis[i];
+        s.pSequenceParameterSetVui = &vui;
+        vui.flags.aspect_ratio_info_present_flag = d.vui.aspect_ratio_info_present_flag;
+        vui.flags.overscan_info_present_flag = d.vui.overscan_info_present_flag;
+        vui.flags.overscan_appropriate_flag = d.vui.overscan_appropriate_flag;
+        vui.flags.video_signal_type_present_flag = d.vui.video_signal_type_present_flag;
+        vui.flags.video_full_range_flag = d.vui.video_full_range_flag;
+        vui.flags.colour_description_present_flag = d.vui.colour_description_present_flag;
+        vui.flags.chroma_loc_info_present_flag = d.vui.chroma_loc_info_present_flag;
+        vui.flags.neutral_chroma_indication_flag = d.vui.neutral_chroma_indication_flag;
+        vui.flags.field_seq_flag = d.vui.field_seq_flag;
+        vui.flags.frame_field_info_present_flag = d.vui.frame_field_info_present_flag;
+        vui.flags.default_display_window_flag = d.vui.default_display_window_flag;
+        vui.flags.vui_timing_info_present_flag = d.vui.vui_timing_info_present_flag;
+        vui.flags.vui_poc_proportional_to_timing_flag = d.vui.vui_poc_proportional_to_timing_flag;
+        vui.flags.vui_hrd_parameters_present_flag = d.vui.vui_hrd_parameters_present_flag;
+        vui.flags.bitstream_restriction_flag = d.vui.bitstream_restriction_flag;
+        vui.flags.tiles_fixed_structure_flag = d.vui.tiles_fixed_structure_flag;
+        vui.flags.motion_vectors_over_pic_boundaries_flag = d.vui.motion_vectors_over_pic_boundaries_flag;
+        vui.flags.restricted_ref_pic_lists_flag = d.vui.restricted_ref_pic_lists_flag;
+        vui.aspect_ratio_idc = (StdVideoH265AspectRatioIdc)d.vui.aspect_ratio_idc;
+        vui.sar_width = (uint16_t)d.vui.sar_width;
+        vui.sar_height = (uint16_t)d.vui.sar_height;
+        vui.video_format = (uint8_t)d.vui.video_format;
+        vui.colour_primaries = (uint8_t)d.vui.colour_primaries;
+        vui.transfer_characteristics = (uint8_t)d.vui.transfer_characteristics;
+        vui.matrix_coeffs = (uint8_t)d.vui.matrix_coeffs;
+        vui.chroma_sample_loc_type_top_field = (uint8_t)d.vui.chroma_sample_loc_type_top_field;
+        vui.chroma_sample_loc_type_bottom_field = (uint8_t)d.vui.chroma_sample_loc_type_bottom_field;
+        vui.def_disp_win_left_offset = (uint16_t)d.vui.def_disp_win_left_offset;
+        vui.def_disp_win_right_offset = (uint16_t)d.vui.def_disp_win_right_offset;
+        vui.def_disp_win_top_offset = (uint16_t)d.vui.def_disp_win_top_offset;
+        vui.def_disp_win_bottom_offset = (uint16_t)d.vui.def_disp_win_bottom_offset;
+        vui.vui_num_units_in_tick = d.vui.vui_num_units_in_tick;
+        vui.vui_time_scale = d.vui.vui_time_scale;
+        vui.vui_num_ticks_poc_diff_one_minus1 = (uint32_t)d.vui.vui_num_ticks_poc_diff_one_minus1;
+        vui.min_spatial_segmentation_idc = (uint16_t)d.vui.min_spatial_segmentation_idc;
+        vui.max_bytes_per_pic_denom = (uint8_t)d.vui.max_bytes_per_pic_denom;
+        vui.max_bits_per_min_cu_denom = (uint8_t)d.vui.max_bits_per_min_cu_denom;
+        vui.log2_max_mv_length_horizontal = (uint8_t)d.vui.log2_max_mv_length_horizontal;
+        vui.log2_max_mv_length_vertical = (uint8_t)d.vui.log2_max_mv_length_vertical;
+      }
+
       spss.push_back(s);
     }
 
@@ -671,28 +745,71 @@ private:
     for (uint32_t i = 0; i < dpb_slot_count_; ++i) {
       slot_stds[i] = {};
       slot_stds[i].PicOrderCntVal = dpb_slots_[i].poc;
+      slot_stds[i].flags.unused_for_reference = dpb_slots_[i].is_reference ? 0 : 1;
       slot_h265[i] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR, nullptr, &slot_stds[i]};
       slot_pics[i] = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR, nullptr, {0, 0}, {padded_width_, padded_height_}, i, dpb_image_view_};
       slot_infos[i] = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR, nullptr, (int32_t)i, &slot_pics[i]};
       slot_infos[i].pNext = &slot_h265[i];
     }
 
+    const auto& sh = parsed.slice_headers.empty() ? video_parser::H265SliceHeader{} : parsed.slice_headers[0];
+    const auto& st_ref = sh.st_ref_pic_set;
+    
+    std::vector<int32_t> poc_st_curr_before;
+    std::vector<int32_t> poc_st_curr_after;
+    for (int i = 0; i < st_ref.num_negative_pics; ++i) {
+      if (st_ref.used_by_curr_pic_s0_flag[i]) poc_st_curr_before.push_back(parsed.poc + st_ref.delta_poc_s0[i]);
+    }
+    for (int i = 0; i < st_ref.num_positive_pics; ++i) {
+      if (st_ref.used_by_curr_pic_s1_flag[i]) poc_st_curr_after.push_back(parsed.poc + st_ref.delta_poc_s1[i]);
+    }
+
+    std::array<uint8_t, 15> st_curr_before; st_curr_before.fill(0xFF);
+    std::array<uint8_t, 15> st_curr_after; st_curr_after.fill(0xFF);
+    std::array<uint8_t, 15> lt_curr; lt_curr.fill(0xFF);
+
     std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> begin_slots{};
+    for(auto& s : begin_slots) s.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
     std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> ref_slots{};
+    for(auto& s : ref_slots) s.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+
     uint32_t ref_count = 0;
     for (uint8_t ref_slot : reference_usage_) {
       if (ref_slot >= dpb_slot_count_ || ref_slot == slot_idx || !dpb_slots_[ref_slot].is_reference) continue;
       ref_slots[ref_count] = slot_infos[ref_slot];
       begin_slots[ref_count] = slot_infos[ref_slot];
+      
+      int32_t ref_poc = dpb_slots_[ref_slot].poc;
+      auto it_b = std::find(poc_st_curr_before.begin(), poc_st_curr_before.end(), ref_poc);
+      if (it_b != poc_st_curr_before.end()) st_curr_before[std::distance(poc_st_curr_before.begin(), it_b)] = ref_count;
+      auto it_a = std::find(poc_st_curr_after.begin(), poc_st_curr_after.end(), ref_poc);
+      if (it_a != poc_st_curr_after.end()) st_curr_after[std::distance(poc_st_curr_after.begin(), it_a)] = ref_count;
+      
       ++ref_count;
     }
     begin_slots[ref_count] = slot_infos[slot_idx];
     begin_slots[ref_count].slotIndex = -1;
 
     StdVideoDecodeH265PictureInfo std_pic = {};
-    std_pic.PicOrderCntVal = parsed.poc;
     std_pic.flags.IrapPicFlag = parsed.is_irap;
-    std_pic.flags.IsReference = parsed.is_reference;
+    std_pic.flags.IdrPicFlag = (parsed.nal_unit_type == 19 || parsed.nal_unit_type == 20) ? 1 : 0;
+    std_pic.flags.IsReference = parsed.is_reference ? 1 : 0;
+    std_pic.flags.short_term_ref_pic_set_sps_flag = sh.short_term_ref_pic_set_sps_flag;
+    if (sh.pps_id >= 0 && sh.pps_id < 64 && h265_parser_.pps(sh.pps_id).valid) {
+      std_pic.pps_pic_parameter_set_id = (uint8_t)sh.pps_id;
+      int sps_id = h265_parser_.pps(sh.pps_id).sps_id;
+      if (sps_id >= 0 && sps_id < 16 && h265_parser_.sps(sps_id).valid) {
+        std_pic.pps_seq_parameter_set_id = (uint8_t)sps_id;
+        std_pic.sps_video_parameter_set_id = (uint8_t)h265_parser_.sps(sps_id).vps_id;
+      }
+    }
+    std_pic.PicOrderCntVal = parsed.poc;
+    for (size_t i = 0; i < 15; ++i) {
+      std_pic.RefPicSetStCurrBefore[i] = st_curr_before[i];
+      std_pic.RefPicSetStCurrAfter[i] = st_curr_after[i];
+      std_pic.RefPicSetLtCurr[i] = lt_curr[i];
+    }
+    
     VkVideoDecodeH265PictureInfoKHR h265_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR, nullptr, &std_pic, (uint32_t)parsed.slice_offsets.size(), parsed.slice_offsets.data()};
 
     VkVideoPictureResourceInfoKHR dst = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR, nullptr, {0, 0}, {padded_width_, padded_height_}, coincide_supported_ ? slot_idx : 0, coincide_supported_ ? dpb_image_view_ : output_view_};
@@ -976,7 +1093,10 @@ private:
     slot_stds[slot_idx].PicOrderCnt[1] = poc;
 
     std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> begin_slots{};
+    for(auto& s : begin_slots) s.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
     std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> ref_slots{};
+    for(auto& s : ref_slots) s.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+
     uint32_t ref_count = 0;
     for (uint8_t ref_slot : reference_usage_) {
       if (ref_slot >= dpb_slot_count_ || ref_slot == slot_idx || !dpb_slots_[ref_slot].is_reference) continue;
