@@ -738,23 +738,37 @@ private:
       VK(vkCmdPipelineBarrier2KHR)(cb, &dep);
     }
 
-    std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> slot_infos{};
-    std::array<VkVideoPictureResourceInfoKHR, MAX_DPB_SLOTS + 1> slot_pics{};
-    std::array<VkVideoDecodeH265DpbSlotInfoKHR, MAX_DPB_SLOTS + 1> slot_h265{};
-    std::array<StdVideoDecodeH265ReferenceInfo, MAX_DPB_SLOTS + 1> slot_stds{};
+    std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> slot_infos;
+    std::array<VkVideoPictureResourceInfoKHR, MAX_DPB_SLOTS + 1> slot_pics;
+    std::array<VkVideoDecodeH265DpbSlotInfoKHR, MAX_DPB_SLOTS + 1> slot_h265;
+    std::array<StdVideoDecodeH265ReferenceInfo, MAX_DPB_SLOTS + 1> slot_stds;
+
+    std::memset(slot_infos.data(), 0, sizeof(slot_infos));
+    std::memset(slot_pics.data(), 0, sizeof(slot_pics));
+    std::memset(slot_h265.data(), 0, sizeof(slot_h265));
+    std::memset(slot_stds.data(), 0, sizeof(slot_stds));
+
     for (uint32_t i = 0; i < dpb_slot_count_; ++i) {
-      slot_stds[i] = {};
       slot_stds[i].PicOrderCntVal = dpb_slots_[i].poc;
       slot_stds[i].flags.unused_for_reference = dpb_slots_[i].is_reference ? 0 : 1;
-      slot_h265[i] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR, nullptr, &slot_stds[i]};
-      slot_pics[i] = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR, nullptr, {0, 0}, {padded_width_, padded_height_}, i, dpb_image_view_};
-      slot_infos[i] = {VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR, nullptr, (int32_t)i, &slot_pics[i]};
+
+      slot_h265[i].sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR;
+      slot_h265[i].pStdReferenceInfo = &slot_stds[i];
+
+      slot_pics[i].sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
+      slot_pics[i].codedExtent = {padded_width_, padded_height_};
+      slot_pics[i].baseArrayLayer = i;
+      slot_pics[i].imageViewBinding = dpb_image_view_;
+
+      slot_infos[i].sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
       slot_infos[i].pNext = &slot_h265[i];
+      slot_infos[i].slotIndex = (int32_t)i;
+      slot_infos[i].pPictureResource = &slot_pics[i];
     }
 
     const auto& sh = parsed.slice_headers.empty() ? video_parser::H265SliceHeader{} : parsed.slice_headers[0];
     const auto& st_ref = sh.st_ref_pic_set;
-    
+
     std::vector<int32_t> poc_st_curr_before;
     std::vector<int32_t> poc_st_curr_after;
     for (int i = 0; i < st_ref.num_negative_pics; ++i) {
@@ -764,33 +778,42 @@ private:
       if (st_ref.used_by_curr_pic_s1_flag[i]) poc_st_curr_after.push_back(parsed.poc + st_ref.delta_poc_s1[i]);
     }
 
-    std::array<uint8_t, 15> st_curr_before; st_curr_before.fill(0xFF);
-    std::array<uint8_t, 15> st_curr_after; st_curr_after.fill(0xFF);
-    std::array<uint8_t, 15> lt_curr; lt_curr.fill(0xFF);
+    std::array<uint8_t, 8> st_curr_before; st_curr_before.fill(0xFF);
+    std::array<uint8_t, 8> st_curr_after; st_curr_after.fill(0xFF);
+    std::array<uint8_t, 8> lt_curr; lt_curr.fill(0xFF);
 
-    std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> begin_slots{};
-    for(auto& s : begin_slots) s.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
-    std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> ref_slots{};
-    for(auto& s : ref_slots) s.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+    std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> begin_slots;
+    std::array<VkVideoReferenceSlotInfoKHR, MAX_DPB_SLOTS + 1> ref_slots;
+    std::memset(begin_slots.data(), 0, sizeof(begin_slots));
+    std::memset(ref_slots.data(), 0, sizeof(ref_slots));
 
     uint32_t ref_count = 0;
     for (uint8_t ref_slot : reference_usage_) {
       if (ref_slot >= dpb_slot_count_ || ref_slot == slot_idx || !dpb_slots_[ref_slot].is_reference) continue;
+
+      bool already_added = false;
+      for (uint32_t i = 0; i < ref_count; ++i) if (ref_slots[i].slotIndex == (int32_t)ref_slot) { already_added = true; break; }
+      if (already_added) continue;
+
       ref_slots[ref_count] = slot_infos[ref_slot];
       begin_slots[ref_count] = slot_infos[ref_slot];
-      
+
       int32_t ref_poc = dpb_slots_[ref_slot].poc;
       auto it_b = std::find(poc_st_curr_before.begin(), poc_st_curr_before.end(), ref_poc);
-      if (it_b != poc_st_curr_before.end()) st_curr_before[std::distance(poc_st_curr_before.begin(), it_b)] = ref_count;
+      if (it_b != poc_st_curr_before.end() && std::distance(poc_st_curr_before.begin(), it_b) < 8) 
+        st_curr_before[std::distance(poc_st_curr_before.begin(), it_b)] = (uint8_t)ref_count;
+
       auto it_a = std::find(poc_st_curr_after.begin(), poc_st_curr_after.end(), ref_poc);
-      if (it_a != poc_st_curr_after.end()) st_curr_after[std::distance(poc_st_curr_after.begin(), it_a)] = ref_count;
-      
+      if (it_a != poc_st_curr_after.end() && std::distance(poc_st_curr_after.begin(), it_a) < 8) 
+        st_curr_after[std::distance(poc_st_curr_after.begin(), it_a)] = (uint8_t)ref_count;
+
       ++ref_count;
     }
     begin_slots[ref_count] = slot_infos[slot_idx];
     begin_slots[ref_count].slotIndex = -1;
 
-    StdVideoDecodeH265PictureInfo std_pic = {};
+    StdVideoDecodeH265PictureInfo std_pic;
+    std::memset(&std_pic, 0, sizeof(std_pic));
     std_pic.flags.IrapPicFlag = parsed.is_irap;
     std_pic.flags.IdrPicFlag = (parsed.nal_unit_type == 19 || parsed.nal_unit_type == 20) ? 1 : 0;
     std_pic.flags.IsReference = parsed.is_reference ? 1 : 0;
@@ -804,25 +827,43 @@ private:
       }
     }
     std_pic.PicOrderCntVal = parsed.poc;
-    for (size_t i = 0; i < 15; ++i) {
+    for (size_t i = 0; i < 8; ++i) {
       std_pic.RefPicSetStCurrBefore[i] = st_curr_before[i];
       std_pic.RefPicSetStCurrAfter[i] = st_curr_after[i];
       std_pic.RefPicSetLtCurr[i] = lt_curr[i];
     }
-    
-    VkVideoDecodeH265PictureInfoKHR h265_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR, nullptr, &std_pic, (uint32_t)parsed.slice_offsets.size(), parsed.slice_offsets.data()};
 
-    VkVideoPictureResourceInfoKHR dst = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR, nullptr, {0, 0}, {padded_width_, padded_height_}, coincide_supported_ ? slot_idx : 0, coincide_supported_ ? dpb_image_view_ : output_view_};
-    VkVideoBeginCodingInfoKHR begin = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR, nullptr, 0, video_session_, session_params_, ref_count + 1, begin_slots.data()};
+    VkVideoDecodeH265PictureInfoKHR h265_pic = {VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR};
+    h265_pic.pStdPictureInfo = &std_pic;
+    h265_pic.sliceSegmentCount = (uint32_t)parsed.slice_offsets.size();
+    h265_pic.pSliceSegmentOffsets = parsed.slice_offsets.data();
+
+    VkVideoPictureResourceInfoKHR dst = {VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR};
+    dst.codedExtent = {padded_width_, padded_height_};
+    dst.baseArrayLayer = coincide_supported_ ? slot_idx : 0;
+    dst.imageViewBinding = coincide_supported_ ? dpb_image_view_ : output_view_;
+
+    VkVideoBeginCodingInfoKHR begin = {VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
+    begin.videoSession = video_session_;
+    begin.videoSessionParameters = session_params_;
+    begin.referenceSlotCount = ref_count + 1;
+    begin.pReferenceSlots = begin_slots.data();
     VK(vkCmdBeginVideoCodingKHR)(cb, &begin);
     if (first_decode_) {
       VkVideoCodingControlInfoKHR ctrl = {VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR, nullptr, VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR};
       VK(vkCmdControlVideoCodingKHR)(cb, &ctrl);
       first_decode_ = false;
     }
-    VkVideoDecodeInfoKHR decode = {VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR, &h265_pic, 0, bitstream_buffer_, 0, aligned_size, dst, &slot_infos[slot_idx], ref_count, ref_count == 0 ? nullptr : ref_slots.data()};
-    VK(vkCmdDecodeVideoKHR)(cb, &decode);
-    VkVideoEndCodingInfoKHR end = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
+    VkVideoDecodeInfoKHR decode = {VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR};
+    decode.pNext = &h265_pic;
+    decode.srcBuffer = bitstream_buffer_;
+    decode.srcBufferOffset = 0;
+    decode.srcBufferRange = aligned_size;
+    decode.dstPictureResource = dst;
+    decode.pSetupReferenceSlot = &slot_infos[slot_idx];
+    decode.referenceSlotCount = ref_count;
+    decode.pReferenceSlots = ref_count == 0 ? nullptr : ref_slots.data();
+    VK(vkCmdDecodeVideoKHR)(cb, &decode);    VkVideoEndCodingInfoKHR end = {VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
     VK(vkCmdEndVideoCodingKHR)(cb, &end);
     VK(vkEndCommandBuffer)(cb);
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cb};
