@@ -142,15 +142,22 @@ static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slic
   va_pic.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag = pps->pps_loop_filter_across_slices_enabled_flag;
   va_pic.pic_fields.bits.loop_filter_across_tiles_enabled_flag = pps->loop_filter_across_tiles_enabled_flag;
   va_pic.pic_fields.bits.pcm_loop_filter_disabled_flag = sps->pcm_loop_filter_disabled_flag;
+  va_pic.pic_fields.bits.NoPicReorderingFlag = (sps->sps_max_num_reorder_pics[sps->max_sub_layers_minus1] == 0);
+
   va_pic.bit_depth_luma_minus8 = (uint8_t) sps->bit_depth_luma_minus8;
   va_pic.bit_depth_chroma_minus8 = (uint8_t) sps->bit_depth_chroma_minus8;
+  va_pic.pcm_sample_bit_depth_luma_minus1 = (uint8_t) sps->pcm_sample_bit_depth_luma_minus1;
+  va_pic.pcm_sample_bit_depth_chroma_minus1 = (uint8_t) sps->pcm_sample_bit_depth_chroma_minus1;
   va_pic.log2_min_luma_coding_block_size_minus3 = (uint8_t) sps->log2_min_luma_coding_block_size_minus3;
   va_pic.log2_diff_max_min_luma_coding_block_size = (uint8_t) sps->log2_diff_max_min_luma_coding_block_size;
   va_pic.log2_min_transform_block_size_minus2 = (uint8_t) sps->log2_min_luma_transform_block_size_minus2;
   va_pic.log2_diff_max_min_transform_block_size = (uint8_t) (sps->log2_diff_max_min_luma_transform_block_size);
+  va_pic.log2_min_pcm_luma_coding_block_size_minus3 = (uint8_t) sps->log2_min_pcm_luma_coding_block_size_minus3;
+  va_pic.log2_diff_max_min_pcm_luma_coding_block_size = (uint8_t) sps->log2_diff_max_min_pcm_luma_coding_block_size;
   va_pic.max_transform_hierarchy_depth_inter = (uint8_t) sps->max_transform_hierarchy_depth_inter;
   va_pic.max_transform_hierarchy_depth_intra = (uint8_t) sps->max_transform_hierarchy_depth_intra;
   va_pic.sps_max_dec_pic_buffering_minus1 = (uint8_t) sps->sps_max_dec_pic_buffering_minus1[sps->max_sub_layers_minus1];
+  va_pic.log2_max_pic_order_cnt_lsb_minus4 = (uint8_t) sps->log2_max_pic_order_cnt_lsb_minus4;
   va_pic.num_short_term_ref_pic_sets = (uint8_t) sps->num_short_term_ref_pic_sets;
   va_pic.num_long_term_ref_pic_sps = (uint8_t) sps->num_long_term_ref_pics_sps;
   va_pic.num_ref_idx_l0_default_active_minus1 = (uint8_t) pps->num_ref_idx_l0_default_active_minus1;
@@ -163,7 +170,7 @@ static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slic
   va_pic.pps_tc_offset_div2 = (int8_t) pps->pps_tc_offset_div2;
   va_pic.log2_parallel_merge_level_minus2 = (uint8_t) pps->log2_parallel_merge_level_minus2;
   va_pic.num_extra_slice_header_bits = (uint8_t) pps->num_extra_slice_header_bits;
-  va_pic.log2_max_pic_order_cnt_lsb_minus4 = (uint8_t) sps->log2_max_pic_order_cnt_lsb_minus4;
+  va_pic.st_rps_bits = ssh->short_term_ref_pic_set_sps_flag ? 0 : (uint8_t)ssh->st_rps_bits;
 
   va_pic.slice_parsing_fields.bits.lists_modification_present_flag = pps->lists_modification_present_flag;
   va_pic.slice_parsing_fields.bits.long_term_ref_pics_present_flag = sps->long_term_ref_pics_present_flag;
@@ -179,13 +186,39 @@ static void fillPictureParamsHEVC(const sps_t* sps, const pps_t* pps, const slic
   
   va_pic.slice_parsing_fields.bits.RapPicFlag = (nal_type >= 16 && nal_type <= 21);
   va_pic.slice_parsing_fields.bits.IdrPicFlag = (nal_type == 19 || nal_type == 20);
-  va_pic.slice_parsing_fields.bits.IntraPicFlag = va_pic.slice_parsing_fields.bits.RapPicFlag;
+  va_pic.slice_parsing_fields.bits.IntraPicFlag = (nal_type >= 16 && nal_type <= 21);
+
+  if (pps->tiles_enabled_flag) {
+    va_pic.num_tile_columns_minus1 = (uint8_t) pps->num_tile_columns_minus1;
+    va_pic.num_tile_rows_minus1 = (uint8_t) pps->num_tile_rows_minus1;
+    if (pps->uniform_spacing_flag) {
+      int ctb_log2_size_y = sps->log2_min_luma_coding_block_size_minus3 + 3 + sps->log2_diff_max_min_luma_coding_block_size;
+      int ctb_size_y = 1 << ctb_log2_size_y;
+      int pic_width_in_ctbs_y = (sps->pic_width_in_luma_samples + ctb_size_y - 1) / ctb_size_y;
+      int pic_height_in_ctbs_y = (sps->pic_height_in_luma_samples + ctb_size_y - 1) / ctb_size_y;
+      
+      for (int i = 0; i <= pps->num_tile_columns_minus1; ++i) {
+        va_pic.column_width_minus1[i] = (((i + 1) * pic_width_in_ctbs_y) / (pps->num_tile_columns_minus1 + 1)) -
+                                       ((i * pic_width_in_ctbs_y) / (pps->num_tile_columns_minus1 + 1)) - 1;
+      }
+      for (int j = 0; j <= pps->num_tile_rows_minus1; ++j) {
+        va_pic.row_height_minus1[j] = (((j + 1) * pic_height_in_ctbs_y) / (pps->num_tile_rows_minus1 + 1)) -
+                                     ((j * pic_height_in_ctbs_y) / (pps->num_tile_rows_minus1 + 1)) - 1;
+      }
+    } else {
+      for (int i = 0; i <= pps->num_tile_columns_minus1; ++i) va_pic.column_width_minus1[i] = (uint16_t) pps->column_width_minus1[i];
+      for (int i = 0; i <= pps->num_tile_rows_minus1; ++i) va_pic.row_height_minus1[i] = (uint16_t) pps->row_height_minus1[i];
+    }
+  }
 
   va_pic.CurrPic.picture_id = VA_INVALID_ID;
-  for (int i = 0; i < 15; i++) va_pic.ReferenceFrames[i].picture_id = VA_INVALID_ID;
+  for (int i = 0; i < 15; i++) {
+    va_pic.ReferenceFrames[i].picture_id = VA_INVALID_ID;
+    va_pic.ReferenceFrames[i].flags = VA_PICTURE_HEVC_INVALID;
+  }
 }
 
-static void fillSliceParamsHEVC(const slice_segment_header_t* ssh, VASliceParameterBufferHEVC& va_slice) {
+static void fillSliceParamsHEVC(const sps_t* sps, const slice_segment_header_t* ssh, VASliceParameterBufferHEVC& va_slice) {
   std::memset(&va_slice, 0, sizeof(va_slice));
   va_slice.slice_segment_address = (uint32_t) ssh->slice_segment_address;
   va_slice.LongSliceFlags.fields.dependent_slice_segment_flag = ssh->dependent_slice_segment_flag;
@@ -198,13 +231,47 @@ static void fillSliceParamsHEVC(const slice_segment_header_t* ssh, VASliceParame
   va_slice.LongSliceFlags.fields.cabac_init_flag = ssh->cabac_init_flag;
   va_slice.LongSliceFlags.fields.collocated_from_l0_flag = ssh->collocated_from_l0_flag;
   va_slice.LongSliceFlags.fields.slice_loop_filter_across_slices_enabled_flag = ssh->slice_loop_filter_across_slices_enabled_flag;
-  va_slice.collocated_ref_idx = ssh->collocated_ref_idx;
+  
+  if (!ssh->slice_temporal_mvp_enabled_flag)
+    va_slice.collocated_ref_idx = 0xFF;
+  else
+    va_slice.collocated_ref_idx = (uint8_t) ssh->collocated_ref_idx;
+
   va_slice.num_ref_idx_l0_active_minus1 = (uint8_t) ssh->num_ref_idx_l0_active_minus1;
   va_slice.num_ref_idx_l1_active_minus1 = (uint8_t) ssh->num_ref_idx_l1_active_minus1;
   va_slice.slice_qp_delta = (int8_t) ssh->slice_qp_delta;
+  va_slice.slice_cb_qp_offset = (int8_t) ssh->slice_cb_qp_offset;
+  va_slice.slice_cr_qp_offset = (int8_t) ssh->slice_cr_qp_offset;
   va_slice.slice_beta_offset_div2 = (int8_t) ssh->slice_beta_offset_div2;
   va_slice.slice_tc_offset_div2 = (int8_t) ssh->slice_tc_offset_div2;
-  va_slice.five_minus_max_num_merge_cand = (uint8_t) (ssh->slice_type == 2 ? 0 : (5 - ssh->five_minus_max_num_merge_cand));
+  va_slice.five_minus_max_num_merge_cand = (uint8_t) ssh->five_minus_max_num_merge_cand;
+
+  va_slice.luma_log2_weight_denom = (uint8_t) ssh->pred_weight_table.luma_log2_weight_denom;
+  va_slice.delta_chroma_log2_weight_denom = (int8_t) ssh->pred_weight_table.delta_chroma_log2_weight_denom;
+  
+  int chroma_log2_weight_denom = ssh->pred_weight_table.luma_log2_weight_denom + ssh->pred_weight_table.delta_chroma_log2_weight_denom;
+  int wp_offset_half_range_c = 1 << (sps->bit_depth_chroma_minus8 + 7);
+
+  for (int i = 0; i < 15; i++) {
+    va_slice.delta_luma_weight_l0[i] = (int8_t) ssh->pred_weight_table.delta_luma_weight_l0[i];
+    va_slice.luma_offset_l0[i] = (int8_t) ssh->pred_weight_table.luma_offset_l0[i];
+    va_slice.delta_luma_weight_l1[i] = (int8_t) ssh->pred_weight_table.delta_luma_weight_l1[i];
+    va_slice.luma_offset_l1[i] = (int8_t) ssh->pred_weight_table.luma_offset_l1[i];
+    
+    for (int j = 0; j < 2; j++) {
+      va_slice.delta_chroma_weight_l0[i][j] = (int8_t) ssh->pred_weight_table.delta_chroma_weight_l0[i][j];
+      va_slice.delta_chroma_weight_l1[i][j] = (int8_t) ssh->pred_weight_table.delta_chroma_weight_l1[i][j];
+
+      auto calc_chroma_offset = [&](int delta_chroma_offset, int delta_chroma_weight) -> int16_t {
+        int weight = (1 << chroma_log2_weight_denom) + delta_chroma_weight;
+        int offset = wp_offset_half_range_c + delta_chroma_offset - ((wp_offset_half_range_c * weight) >> chroma_log2_weight_denom);
+        return (int16_t) std::clamp(offset, -wp_offset_half_range_c, wp_offset_half_range_c - 1);
+      };
+
+      va_slice.ChromaOffsetL0[i][j] = calc_chroma_offset(ssh->pred_weight_table.delta_chroma_offset_l0[i][j], ssh->pred_weight_table.delta_chroma_weight_l0[i][j]);
+      va_slice.ChromaOffsetL1[i][j] = calc_chroma_offset(ssh->pred_weight_table.delta_chroma_offset_l1[i][j], ssh->pred_weight_table.delta_chroma_weight_l1[i][j]);
+    }
+  }
 }
 
 static void retrieveCodedBuffer(VADisplay display, VABufferID coded_buffer, std::vector<uint8_t>& out_data) {
@@ -756,30 +823,47 @@ public:
         VAPictureParameterBufferHEVC pic_param;
         fillPictureParamsHEVC(&sps, &pps, &first_sh, parsed.nal_unit_type, pic_param);
 
-        if (pps.tiles_enabled_flag) {
-          for (int i = 0; i <= pps.num_tile_columns_minus1 && i < 19; i++)
-            pic_param.column_width_minus1[i] = (uint16_t)pps.column_width_minus1[i];
-          for (int i = 0; i <= pps.num_tile_rows_minus1 && i < 21; i++)
-            pic_param.row_height_minus1[i] = (uint16_t)pps.row_height_minus1[i];
-        }
-
         pic_param.CurrPic.picture_id = surface;
         pic_param.CurrPic.pic_order_cnt = parsed.poc;
         pic_param.CurrPic.flags = 0;
 
+        // Identify which DPB entries are used by current picture using RPS
+        std::vector<int> st_curr_before, st_curr_after;
+        const auto& rps = first_sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[first_sh.short_term_ref_pic_set_idx] : first_sh.st_ref_pic_set;
+        
+        for (int i = 0; i < rps.num_negative_pics; i++) {
+          if (rps.used_by_curr_pic_s0_flag[i]) st_curr_before.push_back(parsed.poc + rps.delta_poc_s0[i]);
+        }
+        for (int i = 0; i < rps.num_positive_pics; i++) {
+          if (rps.used_by_curr_pic_s1_flag[i]) st_curr_after.push_back(parsed.poc + rps.delta_poc_s1[i]);
+        }
+
         for (size_t i = 0; i < dpb_.size() && i < 15; i++) {
           pic_param.ReferenceFrames[i].picture_id = dpb_[i].surface;
           pic_param.ReferenceFrames[i].pic_order_cnt = dpb_[i].poc;
-          if (dpb_[i].poc < (int32_t)parsed.poc)
-            pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
-          else
-            pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_RPS_ST_CURR_AFTER;
-          if (dpb_[i].is_long_term)
-            pic_param.ReferenceFrames[i].flags |= VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
-        }
-        for (size_t i = dpb_.size(); i < 15; i++) {
-          pic_param.ReferenceFrames[i].picture_id = VA_INVALID_ID;
-          pic_param.ReferenceFrames[i].flags = VA_PICTURE_HEVC_INVALID;
+          pic_param.ReferenceFrames[i].flags = 0;
+          
+          bool is_active = false;
+          for (int poc : st_curr_before) {
+            if (dpb_[i].poc == poc) {
+              pic_param.ReferenceFrames[i].flags |= VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
+              is_active = true;
+              break;
+            }
+          }
+          if (!is_active) {
+            for (int poc : st_curr_after) {
+              if (dpb_[i].poc == poc) {
+                pic_param.ReferenceFrames[i].flags |= VA_PICTURE_HEVC_RPS_ST_CURR_AFTER;
+                is_active = true;
+                break;
+              }
+            }
+          }
+          if (!is_active && dpb_[i].is_long_term) {
+             // Simplified: we don't track LT usage perfectly here
+             pic_param.ReferenceFrames[i].flags |= VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
+          }
         }
 
         VABufferID pic_param_buf;
@@ -789,6 +873,22 @@ public:
         std::vector<VABufferID> cleanup_bufs;
         cleanup_bufs.push_back(pic_param_buf);
 
+        if (sps.scaling_list_enabled_flag) {
+          VAIQMatrixBufferHEVC iq_matrix = {};
+          const auto& sl = pps.pps_scaling_list_data_present_flag ? pps.scaling_list_data : sps.scaling_list_data;
+          std::memcpy(iq_matrix.ScalingList4x4, sl.scaling_list_4x4, sizeof(iq_matrix.ScalingList4x4));
+          std::memcpy(iq_matrix.ScalingList8x8, sl.scaling_list_8x8, sizeof(iq_matrix.ScalingList8x8));
+          std::memcpy(iq_matrix.ScalingList16x16, sl.scaling_list_16x16, sizeof(iq_matrix.ScalingList16x16));
+          std::memcpy(iq_matrix.ScalingList32x32, sl.scaling_list_32x32, sizeof(iq_matrix.ScalingList32x32));
+          std::memcpy(iq_matrix.ScalingListDC16x16, sl.scaling_list_dc_coef_16x16, sizeof(iq_matrix.ScalingListDC16x16));
+          std::memcpy(iq_matrix.ScalingListDC32x32, sl.scaling_list_dc_coef_32x32, sizeof(iq_matrix.ScalingListDC32x32));
+          
+          VABufferID iq_buf;
+          libva.vaCreateBuffer(display_, context_, VAIQMatrixBufferType, sizeof(iq_matrix), 1, &iq_matrix, &iq_buf);
+          libva.vaRenderPicture(display_, context_, &iq_buf, 1);
+          cleanup_bufs.push_back(iq_buf);
+        }
+
         for (size_t i = 0; i < parsed.slice_offsets.size(); ++i) {
           const auto& sh = parsed.slice_headers[i];
           uint32_t offset = parsed.slice_offsets[i];
@@ -796,7 +896,7 @@ public:
           uint32_t slice_size = next_offset - offset;
 
           VASliceParameterBufferHEVC slice_param;
-          fillSliceParamsHEVC(&sh, slice_param);
+          fillSliceParamsHEVC(&sps, &sh, slice_param);
           slice_param.slice_data_size = slice_size;
           slice_param.slice_data_offset = 0;
           slice_param.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
@@ -804,9 +904,38 @@ public:
 
           std::memset(slice_param.RefPicList, 0xFF, sizeof(slice_param.RefPicList));
           if (sh.slice_type != 2 /* I */) {
+            int l0_count = 0;
+            int l1_count = 0;
+            // Populating L0 using ST_CURR_BEFORE POCs
+            for (int poc : st_curr_before) {
+              for (size_t j = 0; j < dpb_.size() && j < 15; j++) {
+                if (dpb_[j].poc == poc) {
+                  if (l0_count <= sh.num_ref_idx_l0_active_minus1) slice_param.RefPicList[0][l0_count++] = (uint8_t)j;
+                  break;
+                }
+              }
+            }
+            // Populating L1 using ST_CURR_AFTER POCs
+            for (int poc : st_curr_after) {
+              for (size_t j = 0; j < dpb_.size() && j < 15; j++) {
+                if (dpb_[j].poc == poc) {
+                  if (l1_count <= sh.num_ref_idx_l1_active_minus1) slice_param.RefPicList[1][l1_count++] = (uint8_t)j;
+                  break;
+                }
+              }
+            }
+            // Fallback: fill remaining slots with any DPB entries if needed
             for (int j = 0; j < (int)dpb_.size() && j < 15; j++) {
-              slice_param.RefPicList[0][j] = (uint8_t)j;
-              if (sh.slice_type == 1 /* B */) slice_param.RefPicList[1][j] = (uint8_t)j;
+              if (l0_count <= sh.num_ref_idx_l0_active_minus1) {
+                bool already_in = false;
+                for (int k = 0; k < l0_count; k++) if (slice_param.RefPicList[0][k] == j) already_in = true;
+                if (!already_in) slice_param.RefPicList[0][l0_count++] = (uint8_t)j;
+              }
+              if (sh.slice_type == 1 /* B */ && l1_count <= sh.num_ref_idx_l1_active_minus1) {
+                bool already_in = false;
+                for (int k = 0; k < l1_count; k++) if (slice_param.RefPicList[1][k] == j) already_in = true;
+                if (!already_in) slice_param.RefPicList[1][l1_count++] = (uint8_t)j;
+              }
             }
           }
 

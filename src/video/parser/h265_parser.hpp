@@ -55,6 +55,28 @@ struct H265StRefPicSet {
   bool use_delta_flag[32] = {};
 };
 
+struct H265ScalingListData {
+  uint8_t scaling_list_4x4[6][16];
+  uint8_t scaling_list_8x8[6][64];
+  uint8_t scaling_list_16x16[6][64];
+  uint8_t scaling_list_32x32[2][64];
+  uint8_t scaling_list_dc_coef_16x16[6];
+  uint8_t scaling_list_dc_coef_32x32[2];
+};
+
+struct H265PredWeightTable {
+  int luma_log2_weight_denom = 0;
+  int delta_chroma_log2_weight_denom = 0;
+  int delta_luma_weight_l0[15] = {};
+  int luma_offset_l0[15] = {};
+  int delta_chroma_weight_l0[15][2] = {};
+  int delta_chroma_offset_l0[15][2] = {};
+  int delta_luma_weight_l1[15] = {};
+  int luma_offset_l1[15] = {};
+  int delta_chroma_weight_l1[15][2] = {};
+  int delta_chroma_offset_l1[15][2] = {};
+};
+
 struct H265SliceHeader {
   int pps_id = 0;
   int slice_segment_address = 0;
@@ -65,6 +87,7 @@ struct H265SliceHeader {
   bool short_term_ref_pic_set_sps_flag = false;
   int short_term_ref_pic_set_idx = 0;
   H265StRefPicSet st_ref_pic_set = {};
+  int st_rps_bits = 0;
   bool slice_temporal_mvp_enabled_flag = false;
   bool slice_sao_luma_flag = false;
   bool slice_sao_chroma_flag = false;
@@ -74,6 +97,7 @@ struct H265SliceHeader {
   int collocated_ref_idx = 0;
   int num_ref_idx_l0_active_minus1 = 0;
   int num_ref_idx_l1_active_minus1 = 0;
+  H265PredWeightTable pred_weight_table = {};
   int slice_qp_delta = 0;
   int slice_cb_qp_offset = 0;
   int slice_cr_qp_offset = 0;
@@ -143,6 +167,7 @@ public:
     int max_transform_hierarchy_depth_intra = 0;
     bool scaling_list_enabled_flag = false;
     bool sps_scaling_list_data_present_flag = false;
+    H265ScalingListData scaling_list_data = {};
     bool amp_enabled_flag = false;
     bool sample_adaptive_offset_enabled_flag = false;
     bool pcm_enabled_flag = false;
@@ -238,6 +263,7 @@ public:
     int pps_beta_offset_div2 = 0;
     int pps_tc_offset_div2 = 0;
     bool pps_scaling_list_data_present_flag = false;
+    H265ScalingListData scaling_list_data = {};
     bool lists_modification_present_flag = false;
     int log2_parallel_merge_level_minus2 = 0;
     bool slice_segment_header_extension_present_flag = false;
@@ -281,7 +307,8 @@ private:
 
   auto parseVui(BitReader& br, Sps& sps) -> bool;
   auto parseStRefPicSet(BitReader& br, H265StRefPicSet& st, int idx, int num_sets, const H265StRefPicSet* sets) -> bool;
-  auto skipScalingListData(BitReader& br) -> bool;
+  auto parseScalingListData(BitReader& br, H265ScalingListData& sl) -> bool;
+  auto parsePredWeightTable(BitReader& br, const Sps& sps, H265SliceHeader& sh) -> bool;
   auto skipHrdParameters(BitReader& br, bool common_inf_present_flag, int max_num_sub_layers_minus1) -> bool;
 };
 
