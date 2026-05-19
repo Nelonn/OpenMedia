@@ -154,13 +154,13 @@ private:
     auto yuvToRgba = [&](uint16_t y, uint16_t u, uint16_t v) -> uint32_t {
       // P010/P012/P016 store valid bits in the MSBs. Convert to 8-bit before
       // applying the simple BT.601-ish display matrix below.
-      const int yi = y >> 8;
-      const int ui = (u >> 8) - 128;
-      const int vi = (v >> 8) - 128;
+      const int yi = std::max(0, static_cast<int>(y >> 8) - 16);
+      const int ui = static_cast<int>(u >> 8) - 128;
+      const int vi = static_cast<int>(v >> 8) - 128;
 
-      const int r = std::clamp(yi + static_cast<int>(1.402f * vi), 0, 255);
-      const int g = std::clamp(yi - static_cast<int>(0.344f * ui + 0.714f * vi), 0, 255);
-      const int b = std::clamp(yi + static_cast<int>(1.772f * ui), 0, 255);
+      const int r = std::clamp(static_cast<int>(1.164f * yi + 1.793f * vi), 0, 255);
+      const int g = std::clamp(static_cast<int>(1.164f * yi - 0.213f * ui - 0.533f * vi), 0, 255);
+      const int b = std::clamp(static_cast<int>(1.164f * yi + 2.112f * ui), 0, 255);
       return (0xFFu << 24) | (uint32_t(b) << 16) | (uint32_t(g) << 8) | uint32_t(r);
     };
 
