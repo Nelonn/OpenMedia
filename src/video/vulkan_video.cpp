@@ -83,7 +83,7 @@ class VulkanDecoder final : public Decoder {
   VkImageTiling out_tiling_ = VK_IMAGE_TILING_OPTIMAL;
   uint32_t dpb_slot_count_ = 0;
   uint32_t max_active_refs_ = 0;
-  
+
   VkImage dpb_image_ = VK_NULL_HANDLE;
   VkDeviceMemory dpb_memory_ = VK_NULL_HANDLE;
   VkImageView dpb_image_view_ = VK_NULL_HANDLE;
@@ -800,11 +800,11 @@ private:
 
       int32_t ref_poc = dpb_slots_[ref_slot].poc;
       auto it_b = std::find(poc_st_curr_before.begin(), poc_st_curr_before.end(), ref_poc);
-      if (it_b != poc_st_curr_before.end() && std::distance(poc_st_curr_before.begin(), it_b) < 8) 
+      if (it_b != poc_st_curr_before.end() && std::distance(poc_st_curr_before.begin(), it_b) < 8)
         st_curr_before[std::distance(poc_st_curr_before.begin(), it_b)] = (uint8_t)ref_count;
 
       auto it_a = std::find(poc_st_curr_after.begin(), poc_st_curr_after.end(), ref_poc);
-      if (it_a != poc_st_curr_after.end() && std::distance(poc_st_curr_after.begin(), it_a) < 8) 
+      if (it_a != poc_st_curr_after.end() && std::distance(poc_st_curr_after.begin(), it_a) < 8)
         st_curr_after[std::distance(poc_st_curr_after.begin(), it_a)] = (uint8_t)ref_count;
 
       ++ref_count;
@@ -1053,7 +1053,7 @@ private:
     VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK(vkBeginCommandBuffer)(cb, &begin_info);
-    
+
     std::array<VkImageMemoryBarrier2, MAX_DPB_SLOTS + 2> b{};
     uint32_t bc = 0;
     if (first_decode_) {
@@ -1225,7 +1225,23 @@ private:
   }
 };
 
-const CodecDescriptor CODEC_VULKAN_H264 = { .codec_id = OM_CODEC_H264, .type = OM_MEDIA_VIDEO, .name = "vulkan_h264", .long_name = "Vulkan H.264/AVC Codec", .vendor = "Vulkan", .flags = HARDWARE, .decoder_factory = [] { return std::make_unique<VulkanDecoder>(); } };
-const CodecDescriptor CODEC_VULKAN_H265 = { .codec_id = OM_CODEC_H265, .type = OM_MEDIA_VIDEO, .name = "vulkan_h265", .long_name = "Vulkan H.265/HEVC Codec", .vendor = "Vulkan", .flags = HARDWARE, .decoder_factory = [] { return std::make_unique<VulkanDecoder>(); } };
+const CodecDescriptor CODEC_VULKAN_H264 = {
+    .codec_id = OM_CODEC_H264,
+    .type = OM_MEDIA_VIDEO,
+    .name = "vulkan_h264",
+    .long_name = "Vulkan H.264/AVC Codec",
+    .vendor = "Vulkan",
+    .flags = HARDWARE,
+    .decoder_factory = [] { return std::make_unique<VulkanDecoder>(); },
+};
+const CodecDescriptor CODEC_VULKAN_H265 = {
+    .codec_id = OM_CODEC_H265,
+    .type = OM_MEDIA_VIDEO,
+    .name = "vulkan_h265",
+    .long_name = "Vulkan H.265/HEVC Codec",
+    .vendor = "Vulkan",
+    .flags = HARDWARE,
+    .decoder_factory = [] { return std::make_unique<VulkanDecoder>(); },
+};
 
 } // namespace openmedia
