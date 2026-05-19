@@ -89,21 +89,24 @@ static void read_pred_weight_table(BitReader& br, const PPS& pps, const SPS& sps
   }
 }
 
-static void skip_dec_ref_pic_marking(BitReader& br, const NALHeader& nal) {
+static auto read_dec_ref_pic_marking(BitReader& br, const NALHeader& nal) -> bool {
   if (nal.type == NAL_UNIT_TYPE_CODED_SLICE_IDR) {
     br.readBit();
     br.readBit();
-    return;
+    return false;
   }
-  if (!br.readBit()) return;
+  if (!br.readBit()) return false;
   uint32_t op = 0;
+  bool mmco5 = false;
   do {
     op = br.readUE();
     if (op == 1 || op == 3) br.readUE();
     if (op == 2) br.readUE();
     if (op == 3 || op == 6) br.readUE();
     if (op == 4) br.readUE();
+    if (op == 5) mmco5 = true;
   } while (op != 0 && br.ok());
+  return mmco5;
 }
 
 auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256], const SPS sps_table[32], Bitstream& bs) -> bool {
@@ -154,7 +157,7 @@ auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_t
   if ((pps.weighted_pred_flag && (normalized == 0 || normalized == 3)) || (pps.weighted_bipred_idc == 1 && normalized == 1)) {
     read_pred_weight_table(br, pps, sps, slice);
   }
-  if (nal.idc != NAL_REF_IDC_PRIORITY_DISPOSABLE) skip_dec_ref_pic_marking(br, nal);
+  if (nal.idc != NAL_REF_IDC_PRIORITY_DISPOSABLE) slice.mmco5 = read_dec_ref_pic_marking(br, nal);
   if (pps.entropy_coding_mode_flag && !isIntraSlice(slice.slice_type)) slice.cabac_init_idc = static_cast<int>(br.readUE());
   slice.slice_qp_delta = br.readSE();
   if (normalized == 3 || normalized == 4) {

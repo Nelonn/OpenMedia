@@ -30,6 +30,8 @@ void H264AccessUnitParser::reset() {
 void H264AccessUnitParser::resetPoc() {
   state_.prev_pic_order_cnt_lsb = 0;
   state_.prev_pic_order_cnt_msb = 0;
+  state_.prev_frame_num = 0;
+  state_.prev_frame_num_offset = 0;
   state_.have_prev_poc = false;
 }
 
@@ -209,25 +211,83 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
   const auto& pps = state_.pps[slice.pic_parameter_set_id];
   if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32 || !state_.sps_valid[pps.seq_parameter_set_id]) return slice.pic_order_cnt_lsb;
   const auto& sps = state_.sps[pps.seq_parameter_set_id];
-  if (sps.pic_order_cnt_type != 0) return slice.pic_order_cnt_lsb;
 
-  const int max_pic_order_cnt_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
-  int pic_order_cnt_msb = 0;
-  if (state_.have_prev_poc) {
-    if (slice.pic_order_cnt_lsb < state_.prev_pic_order_cnt_lsb &&
-        (state_.prev_pic_order_cnt_lsb - slice.pic_order_cnt_lsb) >= max_pic_order_cnt_lsb / 2) {
-      pic_order_cnt_msb = state_.prev_pic_order_cnt_msb + max_pic_order_cnt_lsb;
-    } else if (slice.pic_order_cnt_lsb > state_.prev_pic_order_cnt_lsb &&
-               (slice.pic_order_cnt_lsb - state_.prev_pic_order_cnt_lsb) > max_pic_order_cnt_lsb / 2) {
-      pic_order_cnt_msb = state_.prev_pic_order_cnt_msb - max_pic_order_cnt_lsb;
-    } else {
-      pic_order_cnt_msb = state_.prev_pic_order_cnt_msb;
+  const bool is_idr = current_.nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
+  int32_t poc = 0;
+
+  if (sps.pic_order_cnt_type == 0) {
+    if (is_idr) {
+      state_.prev_pic_order_cnt_msb = 0;
+      state_.prev_pic_order_cnt_lsb = 0;
     }
+    const int max_pic_order_cnt_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+    int pic_order_cnt_msb = 0;
+    if (state_.have_prev_poc) {
+      if (slice.pic_order_cnt_lsb < state_.prev_pic_order_cnt_lsb &&
+          (state_.prev_pic_order_cnt_lsb - slice.pic_order_cnt_lsb) >= max_pic_order_cnt_lsb / 2) {
+        pic_order_cnt_msb = state_.prev_pic_order_cnt_msb + max_pic_order_cnt_lsb;
+      } else if (slice.pic_order_cnt_lsb > state_.prev_pic_order_cnt_lsb &&
+                 (slice.pic_order_cnt_lsb - state_.prev_pic_order_cnt_lsb) > max_pic_order_cnt_lsb / 2) {
+        pic_order_cnt_msb = state_.prev_pic_order_cnt_msb - max_pic_order_cnt_lsb;
+      } else {
+        pic_order_cnt_msb = state_.prev_pic_order_cnt_msb;
+      }
+    }
+    poc = pic_order_cnt_msb + slice.pic_order_cnt_lsb;
+    if (current_.nal.idc != 0) {
+      state_.prev_pic_order_cnt_lsb = slice.pic_order_cnt_lsb;
+      state_.prev_pic_order_cnt_msb = pic_order_cnt_msb;
+    }
+    if (slice.mmco5) {
+      state_.prev_pic_order_cnt_msb = 0;
+      state_.prev_pic_order_cnt_lsb = !slice.field_pic_flag ? poc : 0;
+    }
+  } else if (sps.pic_order_cnt_type == 1) {
+    const int max_frame_num = 1 << (sps.log2_max_frame_num_minus4 + 4);
+    int frame_num_offset = 0;
+    if (is_idr) frame_num_offset = 0;
+    else if (state_.prev_frame_num > slice.frame_num) frame_num_offset = state_.prev_frame_num_offset + max_frame_num;
+    else frame_num_offset = state_.prev_frame_num_offset;
+
+    int abs_frame_num = 0;
+    if (sps.num_ref_frames_in_pic_order_cnt_cycle > 0) abs_frame_num = frame_num_offset + slice.frame_num;
+    if (current_.nal.idc == 0 && abs_frame_num > 0) abs_frame_num--;
+
+    int expected_poc = 0;
+    if (abs_frame_num > 0) {
+      const int cycle_cnt = (abs_frame_num - 1) / sps.num_ref_frames_in_pic_order_cnt_cycle;
+      const int frame_num_in_cycle = (abs_frame_num - 1) % sps.num_ref_frames_in_pic_order_cnt_cycle;
+      int expected_delta_per_cycle = 0;
+      for (int i = 0; i < sps.num_ref_frames_in_pic_order_cnt_cycle; ++i) expected_delta_per_cycle += sps.offset_for_ref_frame[i];
+      expected_poc = cycle_cnt * expected_delta_per_cycle;
+      for (int i = 0; i <= frame_num_in_cycle; ++i) expected_poc += sps.offset_for_ref_frame[i];
+    }
+    if (current_.nal.idc == 0) expected_poc += sps.offset_for_non_ref_pic;
+
+    if (!slice.field_pic_flag) poc = expected_poc + slice.delta_pic_order_cnt[0];
+    else if (!slice.bottom_field_flag) poc = expected_poc + slice.delta_pic_order_cnt[0];
+    else poc = expected_poc + sps.offset_for_top_to_bottom_field + slice.delta_pic_order_cnt[0];
+
+    state_.prev_frame_num = slice.mmco5 ? 0 : slice.frame_num;
+    state_.prev_frame_num_offset = slice.mmco5 ? 0 : frame_num_offset;
+  } else if (sps.pic_order_cnt_type == 2) {
+    const int max_frame_num = 1 << (sps.log2_max_frame_num_minus4 + 4);
+    int frame_num_offset = 0;
+    if (is_idr) frame_num_offset = 0;
+    else if (state_.prev_frame_num > slice.frame_num) frame_num_offset = state_.prev_frame_num_offset + max_frame_num;
+    else frame_num_offset = state_.prev_frame_num_offset;
+
+    const int abs_frame_num = frame_num_offset + slice.frame_num;
+    if (is_idr) poc = 0;
+    else if (current_.nal.idc == 0) poc = 2 * abs_frame_num - 1;
+    else poc = 2 * abs_frame_num;
+
+    state_.prev_frame_num = slice.mmco5 ? 0 : slice.frame_num;
+    state_.prev_frame_num_offset = slice.mmco5 ? 0 : frame_num_offset;
   }
-  state_.prev_pic_order_cnt_lsb = slice.pic_order_cnt_lsb;
-  state_.prev_pic_order_cnt_msb = pic_order_cnt_msb;
+
   state_.have_prev_poc = true;
-  return pic_order_cnt_msb + slice.pic_order_cnt_lsb;
+  return poc;
 }
 
 auto H264AccessUnitParser::finishCurrentFrame() -> H264ParsedFrame {

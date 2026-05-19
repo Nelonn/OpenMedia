@@ -210,6 +210,7 @@ struct SliceHeader {
   int disable_deblocking_filter_idc = 0;
   int slice_alpha_c0_offset_div2 = 0;
   int slice_beta_offset_div2 = 0;
+  int mmco5 = 0;
   int header_bit_size = 0;
 };
 
