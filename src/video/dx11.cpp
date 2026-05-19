@@ -17,7 +17,6 @@
 #include <mfidl.h>
 #include <mfobjects.h>
 #include <mftransform.h>
-#include <cstdio>
 
 #include <util/wmf.hpp>
 #include "dx_h264.hpp"
@@ -329,8 +328,6 @@ class DX11Decoder final : public Decoder {
   uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
   std::vector<uint8_t> reference_usage_;
-  bool h265_logged_ = false;
-  uint32_t h265_debug_frames_ = 0;
 
 public:
   ~DX11Decoder() override { release(); }
@@ -610,7 +607,6 @@ private:
   auto decodeH265(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
     if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
     auto frames = h265_->parse(packet.bytes, true);
-    if (h265_debug_frames_ < 8) std::fprintf(stderr, "[dx11_h265] packet bytes=%zu parsed_frames=%zu\n", packet.bytes.size(), frames.size());
     if (frames.empty()) return Ok(std::vector<Frame> {});
 
     std::vector<Frame> output;
@@ -618,20 +614,11 @@ private:
     for (auto& parsed : frames) {
       if (parsed.slice_offsets.empty() || parsed.slice_headers.empty()) continue;
       const auto& sh = parsed.slice_headers.front();
-      if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) {
-        std::fprintf(stderr, "[dx11_h265] fail invalid pps=%d\n", sh.pps_id);
-        return Err(OM_CODEC_DECODE_FAILED);
-      }
+      if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
       const auto& pps = h265_->pps(sh.pps_id);
-      if (pps.sps_id < 0 || pps.sps_id >= 16 || !h265_->sps(pps.sps_id).valid) {
-        std::fprintf(stderr, "[dx11_h265] fail invalid sps=%d\n", pps.sps_id);
-        return Err(OM_CODEC_DECODE_FAILED);
-      }
+      if (pps.sps_id < 0 || pps.sps_id >= 16 || !h265_->sps(pps.sps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
       const auto& sps = h265_->sps(pps.sps_id);
-      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) {
-        std::fprintf(stderr, "[dx11_h265] fail unsupported chroma=%d depth=%d/%d\n", sps.chroma_format_idc, sps.bit_depth_luma_minus8 + 8, sps.bit_depth_chroma_minus8 + 8);
-        return Err(OM_CODEC_NOT_SUPPORTED);
-      }
+      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return Err(OM_CODEC_NOT_SUPPORTED);
 
       const uint8_t bit_depth = static_cast<uint8_t>(sps.bit_depth_luma_minus8 + 8);
       const OMPixelFormat expected_format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
@@ -643,10 +630,7 @@ private:
         next_ref_ = 0;
         next_slot_ = 0;
         h265_poc_.reset();
-        if (!createDecoderResources(bit_depth)) {
-          std::fprintf(stderr, "[dx11_h265] fail recreate bitdepth=%u\n", bit_depth);
-          return Err(OM_CODEC_HWACCEL_FAILED);
-        }
+        if (!createDecoderResources(bit_depth)) return Err(OM_CODEC_HWACCEL_FAILED);
       }
 
       const int32_t poc = h265_poc_.compute(sps, parsed, sh);
@@ -665,71 +649,35 @@ private:
       DXVA_PicParams_HEVC pic_params = {};
       dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb, feedback_++, pic_params);
       const auto slice_data = dx_h265::appendBitstreamAndSliceDataWithStartCode(parsed);
-      if (slice_data.bitstream.empty() || slice_data.slices.empty()) {
-        std::fprintf(stderr, "[dx11_h265] fail empty slice data offsets=%zu nalus=%zu\n", parsed.slice_offsets.size(), parsed.slice_nalus.size());
-        return Err(OM_CODEC_DECODE_FAILED);
-      }
+      if (slice_data.bitstream.empty() || slice_data.slices.empty()) return Err(OM_CODEC_DECODE_FAILED);
       DXVA_Qmatrix_HEVC qmatrix = {};
       const bool submit_qmatrix = sps.scaling_list_enabled_flag;
       if (submit_qmatrix) dx_h265::fillQMatrix(sps, pps, qmatrix);
 
-      if (h265_debug_frames_ < 8) {
-        std::fprintf(stderr,
-                     "[dx11_h265] nal=%d ref=%d poc=%d slot=%u size=%dx%d chroma=%d bitdepth=%d/%d mincb=%u/%u slice_type=%d first_pps=%d rps_sps=%d rps_idx=%d st=%d/%d st_bits=%d num_pic_total=%d slices=%zu slice_bytes=%zu qmatrix=%d first=%02x %02x %02x %02x %02x %02x\n",
-                     parsed.nal_unit_type,
-                     parsed.is_reference ? 1 : 0,
-                     poc,
-                     current_slot,
-                     sps.pic_width_in_luma_samples,
-                     sps.pic_height_in_luma_samples,
-                     sps.chroma_format_idc,
-                     sps.bit_depth_luma_minus8 + 8,
-                     sps.bit_depth_chroma_minus8 + 8,
-                     pic_params.PicWidthInMinCbsY,
-                     pic_params.PicHeightInMinCbsY,
-                     sh.slice_type,
-                     sh.pps_id,
-                     sh.short_term_ref_pic_set_sps_flag ? 1 : 0,
-                     sh.short_term_ref_pic_set_idx,
-                     (sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set).num_negative_pics,
-                     (sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set).num_positive_pics,
-                     sh.st_rps_bits,
-                     sh.num_pic_total_curr,
-                     slice_data.slices.size(),
-                     slice_data.bitstream.size(),
-                     submit_qmatrix ? 1 : 0,
-                     slice_data.bitstream.size() > 0 ? slice_data.bitstream[0] : 0,
-                     slice_data.bitstream.size() > 1 ? slice_data.bitstream[1] : 0,
-                     slice_data.bitstream.size() > 2 ? slice_data.bitstream[2] : 0,
-                     slice_data.bitstream.size() > 3 ? slice_data.bitstream[3] : 0,
-                     slice_data.bitstream.size() > 4 ? slice_data.bitstream[4] : 0,
-                     slice_data.bitstream.size() > 5 ? slice_data.bitstream[5] : 0);
-      }
-
       HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
-      if (FAILED(hr)) { std::fprintf(stderr, "[dx11_h265] fail BeginFrame hr=%08lx\n", static_cast<unsigned long>(hr)); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
 
       UINT buffer_size = 0;
       void* buffer = nullptr;
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-      if (FAILED(hr) || slice_data.bitstream.size() > buffer_size) { std::fprintf(stderr, "[dx11_h265] fail bitstream buffer hr=%08lx need=%zu have=%u\n", static_cast<unsigned long>(hr), slice_data.bitstream.size(), buffer_size); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr) || slice_data.bitstream.size() > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
       std::memcpy(buffer, slice_data.bitstream.data(), slice_data.bitstream.size());
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
-      if (FAILED(hr) || sizeof(pic_params) > buffer_size) { std::fprintf(stderr, "[dx11_h265] fail pic buffer hr=%08lx\n", static_cast<unsigned long>(hr)); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr) || sizeof(pic_params) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
       std::memcpy(buffer, &pic_params, sizeof(pic_params));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
 
       if (submit_qmatrix) {
         hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &buffer_size, &buffer);
-        if (FAILED(hr) || sizeof(qmatrix) > buffer_size) { std::fprintf(stderr, "[dx11_h265] fail qmatrix buffer hr=%08lx\n", static_cast<unsigned long>(hr)); return Err(OM_CODEC_DECODE_FAILED); }
+        if (FAILED(hr) || sizeof(qmatrix) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
         std::memcpy(buffer, &qmatrix, sizeof(qmatrix));
         video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX);
       }
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
-      if (FAILED(hr) || slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short) > buffer_size) { std::fprintf(stderr, "[dx11_h265] fail slice buffer hr=%08lx need=%zu have=%u\n", static_cast<unsigned long>(hr), slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short), buffer_size); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr) || slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
       std::memcpy(buffer, slice_data.slices.data(), slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
 
@@ -746,26 +694,12 @@ private:
       descs[desc_count].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
       descs[desc_count++].DataSize = static_cast<UINT>(slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short));
       hr = video_context_->SubmitDecoderBuffers(decoder_.Get(), desc_count, descs);
-      if (FAILED(hr)) { std::fprintf(stderr, "[dx11_h265] fail SubmitBuffers hr=%08lx descs=%u\n", static_cast<unsigned long>(hr), desc_count); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
       hr = video_context_->DecoderEndFrame(decoder_.Get());
-      if (FAILED(hr)) { std::fprintf(stderr, "[dx11_h265] fail EndFrame hr=%08lx\n", static_cast<unsigned long>(hr)); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
 
       auto picture = download(current_slot);
-      if (!picture.has_value()) { std::fprintf(stderr, "[dx11_h265] fail download slot=%u\n", current_slot); return Err(OM_CODEC_DECODE_FAILED); }
-
-      if (!h265_logged_) {
-        const auto& pic = *picture;
-        const uint8_t* y = pic.planes.getData(0);
-        const uint8_t* uv = pic.planes.getData(1);
-        std::fprintf(stderr,
-                     "[dx11_h265] output fmt=%u wh=%ux%u stride=%u/%u y=%02x %02x %02x %02x uv=%02x %02x %02x %02x\n",
-                     static_cast<unsigned>(pic.format), pic.width, pic.height,
-                     pic.planes.getLinesize(0), pic.planes.getLinesize(1),
-                     y ? y[0] : 0, y ? y[1] : 0, y ? y[2] : 0, y ? y[3] : 0,
-                     uv ? uv[0] : 0, uv ? uv[1] : 0, uv ? uv[2] : 0, uv ? uv[3] : 0);
-        h265_logged_ = true;
-      }
-      ++h265_debug_frames_;
+      if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
 
       slots_[current_slot].dpb.poc = poc;
       slots_[current_slot].dpb.frame_num = static_cast<uint32_t>(poc);
@@ -795,23 +729,11 @@ private:
     desc.Usage = D3D11_USAGE_STAGING;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> staging;
-    HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &staging);
-    if (FAILED(hr)) {
-      std::fprintf(stderr, "[dx11_h265] download CreateTexture2D failed slot=%u hr=%08lx fmt=%u size=%ux%u\n",
-                   slot, static_cast<unsigned long>(hr), static_cast<unsigned>(desc.Format), desc.Width, desc.Height);
-      return std::nullopt;
-    }
-    context_->Flush();
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &staging))) return std::nullopt;
     context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, dpb_texture_.Get(), D3D11CalcSubresource(0, slot, 1), nullptr);
-    context_->Flush();
 
     D3D11_MAPPED_SUBRESOURCE map = {};
-    hr = context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map);
-    if (FAILED(hr)) {
-      std::fprintf(stderr, "[dx11_h265] download Map failed slot=%u hr=%08lx fmt=%u row_pitch=%u\n",
-                   slot, static_cast<unsigned long>(hr), static_cast<unsigned>(desc.Format), desc.Width);
-      return std::nullopt;
-    }
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return std::nullopt;
 
     const OMPixelFormat om_fmt = (desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
     Picture pic(om_fmt, width_, height_);
