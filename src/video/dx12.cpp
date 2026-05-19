@@ -228,7 +228,8 @@ private:
     output.reserve(frames.size());
     for (auto& parsed : frames) {
       if (parsed.slice_offsets.empty() || parsed.slice_headers.empty()) continue;
-      if (parsed.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_DECODE_FAILED);
+      const auto slice_data = dx_h265::buildSliceData(parsed);
+      if (slice_data.bitstream.empty() || slice_data.slices.empty() || slice_data.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_DECODE_FAILED);
       const auto& sh = parsed.slice_headers.front();
       if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
       const auto& pps = h265_->pps(sh.pps_id);
@@ -244,9 +245,9 @@ private:
         next_slot_ = 0;
       }
 
-      std::memcpy(bitstream_ptr_, parsed.bitstream.data(), parsed.bitstream.size());
+      std::memcpy(bitstream_ptr_, slice_data.bitstream.data(), slice_data.bitstream.size());
       const uint32_t current_slot = next_slot_;
-      HRESULT hr = recordDecodeH265(parsed, sps, pps, sh, poc, current_slot);
+      HRESULT hr = recordDecodeH265(parsed, slice_data, sps, pps, sh, poc, current_slot);
       if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
 
       auto picture = download(current_slot);
@@ -534,6 +535,7 @@ private:
   }
 
   auto recordDecodeH265(const dx_h265::ParsedFrame& parsed,
+                        const dx_h265::SliceData& slice_data,
                         const dx_h265::Sps& sps,
                         const dx_h265::Pps& pps,
                         const dx_h265::SliceHeader& sh,
@@ -591,18 +593,16 @@ private:
     input.ReferenceFrames.pSubresources = reference_subresources;
     input.CompressedBitstream.pBuffer = bitstream_buffer_.Get();
     input.CompressedBitstream.Offset = 0;
-    input.CompressedBitstream.Size = parsed.bitstream.size();
+    input.CompressedBitstream.Size = slice_data.bitstream.size();
     input.pHeap = decoder_heap_.Get();
 
     DXVA_PicParams_HEVC pic = {};
     dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb_, feedback_++, pic);
     DXVA_Qmatrix_HEVC qmatrix = {};
     dx_h265::fillQMatrix(sps, pps, qmatrix);
-    std::vector<DXVA_Slice_HEVC_Short> slices;
-    dx_h265::fillSlices(parsed, slices);
     input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS, sizeof(pic), &pic};
     input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_INVERSE_QUANTIZATION_MATRIX, sizeof(qmatrix), &qmatrix};
-    input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_SLICE_CONTROL, static_cast<UINT>(slices.size() * sizeof(DXVA_Slice_HEVC_Short)), slices.data()};
+    input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_SLICE_CONTROL, static_cast<UINT>(slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short)), const_cast<DXVA_Slice_HEVC_Short*>(slice_data.slices.data())};
 
     video_cmd_->DecodeFrame(decoder_.Get(), &output, &input);
 

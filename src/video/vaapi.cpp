@@ -931,7 +931,7 @@ public:
                 for (int k = 0; k < l0_count; k++) if (slice_param.RefPicList[0][k] == j) already_in = true;
                 if (!already_in) slice_param.RefPicList[0][l0_count++] = (uint8_t)j;
               }
-              if (sh.slice_type == 1 /* B */ && l1_count <= sh.num_ref_idx_l1_active_minus1) {
+              if (sh.slice_type == 0 /* B */ && l1_count <= sh.num_ref_idx_l1_active_minus1) {
                 bool already_in = false;
                 for (int k = 0; k < l1_count; k++) if (slice_param.RefPicList[1][k] == j) already_in = true;
                 if (!already_in) slice_param.RefPicList[1][l1_count++] = (uint8_t)j;

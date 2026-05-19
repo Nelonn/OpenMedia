@@ -635,8 +635,8 @@ private:
       dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb, feedback_++, pic_params);
       DXVA_Qmatrix_HEVC qmatrix = {};
       dx_h265::fillQMatrix(sps, pps, qmatrix);
-      std::vector<DXVA_Slice_HEVC_Short> slices;
-      dx_h265::fillSlices(parsed, slices);
+      const auto slice_data = dx_h265::buildSliceData(parsed);
+      if (slice_data.bitstream.empty() || slice_data.slices.empty()) return Err(OM_CODEC_DECODE_FAILED);
 
       HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
       if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
@@ -644,8 +644,8 @@ private:
       UINT buffer_size = 0;
       void* buffer = nullptr;
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-      if (FAILED(hr) || parsed.bitstream.size() > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-      std::memcpy(buffer, parsed.bitstream.data(), parsed.bitstream.size());
+      if (FAILED(hr) || slice_data.bitstream.size() > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+      std::memcpy(buffer, slice_data.bitstream.data(), slice_data.bitstream.size());
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
@@ -659,19 +659,19 @@ private:
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX);
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
-      if (FAILED(hr) || slices.size() * sizeof(DXVA_Slice_HEVC_Short) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-      std::memcpy(buffer, slices.data(), slices.size() * sizeof(DXVA_Slice_HEVC_Short));
+      if (FAILED(hr) || slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+      std::memcpy(buffer, slice_data.slices.data(), slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
 
       D3D11_VIDEO_DECODER_BUFFER_DESC descs[4] = {};
       descs[0].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
-      descs[0].DataSize = static_cast<UINT>(parsed.bitstream.size());
+      descs[0].DataSize = static_cast<UINT>(slice_data.bitstream.size());
       descs[1].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
       descs[1].DataSize = sizeof(pic_params);
       descs[2].BufferType = D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX;
       descs[2].DataSize = sizeof(qmatrix);
       descs[3].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
-      descs[3].DataSize = static_cast<UINT>(slices.size() * sizeof(DXVA_Slice_HEVC_Short));
+      descs[3].DataSize = static_cast<UINT>(slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short));
       hr = video_context_->SubmitDecoderBuffers(decoder_.Get(), 4, descs);
       if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
       hr = video_context_->DecoderEndFrame(decoder_.Get());

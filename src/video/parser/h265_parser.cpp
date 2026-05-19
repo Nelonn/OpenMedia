@@ -265,7 +265,7 @@ auto H265AccessUnitParser::parsePredWeightTable(BitReader& br, const Sps& sps, H
       }
     }
   }
-  if (sh.slice_type == 1 /* B */) {
+  if (sh.slice_type == 0 /* B */) {
     for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) {
       if (br.readBit()) {
         sh.pred_weight_table.delta_luma_weight_l1[i] = br.readSE();
@@ -713,11 +713,11 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
       sh.slice_sao_luma_flag = br.readBit() != 0;
       sh.slice_sao_chroma_flag = br.readBit() != 0;
     }
-    if (sh.slice_type == 0 /* P */ || sh.slice_type == 1 /* B */) {
+    if (sh.slice_type == 0 /* B */ || sh.slice_type == 1 /* P */) {
       bool num_ref_idx_active_override_flag = br.readBit() != 0;
       if (num_ref_idx_active_override_flag) {
         sh.num_ref_idx_l0_active_minus1 = static_cast<int>(br.readUE());
-        if (sh.slice_type == 1 /* B */) sh.num_ref_idx_l1_active_minus1 = static_cast<int>(br.readUE());
+        if (sh.slice_type == 0 /* B */) sh.num_ref_idx_l1_active_minus1 = static_cast<int>(br.readUE());
       } else {
         sh.num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
         sh.num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
@@ -727,23 +727,23 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
         if (br.readBit()) { // ref_pic_list_modification_flag_l0
             for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) br.readBits(static_cast<uint32_t>(ceilLog2(15))); // list_entry_l0
         }
-        if (sh.slice_type == 1 /* B */) {
+        if (sh.slice_type == 0 /* B */) {
             if (br.readBit()) { // ref_pic_list_modification_flag_l1
                 for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) br.readBits(static_cast<uint32_t>(ceilLog2(15))); // list_entry_l1
             }
         }
       }
-      if (sh.slice_type == 1 /* B */) sh.mvd_l1_zero_flag = br.readBit() != 0;
+      if (sh.slice_type == 0 /* B */) sh.mvd_l1_zero_flag = br.readBit() != 0;
       if (pps.cabac_init_present_flag) sh.cabac_init_flag = br.readBit() != 0;
       if (sh.slice_temporal_mvp_enabled_flag) {
-        if (sh.slice_type == 1 /* B */) sh.collocated_from_l0_flag = br.readBit() != 0;
+        if (sh.slice_type == 0 /* B */) sh.collocated_from_l0_flag = br.readBit() != 0;
         if ((sh.collocated_from_l0_flag && sh.num_ref_idx_l0_active_minus1 > 0) ||
             (!sh.collocated_from_l0_flag && sh.num_ref_idx_l1_active_minus1 > 0)) {
           sh.collocated_ref_idx = static_cast<int>(br.readUE());
         }
       }
-      if ((pps.weighted_pred_flag && sh.slice_type == 0 /* P */) ||
-          (pps.weighted_bipred_flag && sh.slice_type == 1 /* B */)) {
+      if ((pps.weighted_pred_flag && sh.slice_type == 1 /* P */) ||
+          (pps.weighted_bipred_flag && sh.slice_type == 0 /* B */)) {
         parsePredWeightTable(br, sps, sh);
       }
       sh.five_minus_max_num_merge_cand = static_cast<int>(br.readUE());
