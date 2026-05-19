@@ -599,9 +599,11 @@ private:
     DXVA_PicParams_HEVC pic = {};
     dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb_, feedback_++, pic);
     DXVA_Qmatrix_HEVC qmatrix = {};
-    dx_h265::fillQMatrix(sps, pps, qmatrix);
+    if (sps.scaling_list_enabled_flag) dx_h265::fillQMatrix(sps, pps, qmatrix);
     input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS, sizeof(pic), &pic};
-    input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_INVERSE_QUANTIZATION_MATRIX, sizeof(qmatrix), &qmatrix};
+    if (sps.scaling_list_enabled_flag) {
+      input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_INVERSE_QUANTIZATION_MATRIX, sizeof(qmatrix), &qmatrix};
+    }
     input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_SLICE_CONTROL, static_cast<UINT>(slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short)), const_cast<DXVA_Slice_HEVC_Short*>(slice_data.slices.data())};
 
     video_cmd_->DecodeFrame(decoder_.Get(), &output, &input);

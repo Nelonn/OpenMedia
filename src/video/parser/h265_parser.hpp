@@ -47,6 +47,7 @@ struct H265StRefPicSet {
   int abs_delta_rps_minus1 = 0;
   int num_negative_pics = 0;
   int num_positive_pics = 0;
+  int num_delta_pocs = 0;
   int delta_poc_s0[16] = {};
   bool used_by_curr_pic_s0_flag[16] = {};
   int delta_poc_s1[16] = {};
@@ -98,6 +99,7 @@ struct H265SliceHeader {
   int num_ref_idx_l0_active_minus1 = 0;
   int num_ref_idx_l1_active_minus1 = 0;
   H265PredWeightTable pred_weight_table = {};
+  int num_pic_total_curr = 0;
   int slice_qp_delta = 0;
   int slice_cb_qp_offset = 0;
   int slice_cr_qp_offset = 0;
@@ -111,6 +113,7 @@ struct H265SliceHeader {
 struct H265ParsedFrame {
   std::vector<uint8_t> bitstream;
   std::vector<uint32_t> slice_offsets;
+  std::vector<std::vector<uint8_t>> slice_nalus;
   std::vector<H265SliceHeader> slice_headers;
   int nal_unit_type = 0;
   int poc = 0;

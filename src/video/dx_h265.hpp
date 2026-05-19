@@ -88,8 +88,25 @@ static auto findNextStartCode(const std::vector<uint8_t>& data, size_t offset) n
 
 static auto buildSliceData(const ParsedFrame& frame) -> SliceData {
   SliceData out;
-  out.slices.reserve(frame.slice_offsets.size());
+  out.slices.reserve(frame.slice_nalus.empty() ? frame.slice_offsets.size() : frame.slice_nalus.size());
   out.bitstream.reserve(frame.bitstream.size());
+
+  if (!frame.slice_nalus.empty()) {
+    static constexpr uint8_t start_code[] = {0, 0, 1};
+    for (const auto& nalu : frame.slice_nalus) {
+      if (nalu.empty()) continue;
+      const uint32_t location = static_cast<uint32_t>(out.bitstream.size());
+      out.bitstream.insert(out.bitstream.end(), start_code, start_code + sizeof(start_code));
+      out.bitstream.insert(out.bitstream.end(), nalu.begin(), nalu.end());
+
+      DXVA_Slice_HEVC_Short slice = {};
+      slice.BSNALunitDataLocation = location;
+      slice.SliceBytesInBuffer = static_cast<UINT>(sizeof(start_code) + nalu.size());
+      slice.wBadSliceChopping = 0;
+      out.slices.push_back(slice);
+    }
+    return out;
+  }
 
   for (const uint32_t offset : frame.slice_offsets) {
     if (offset >= frame.bitstream.size()) continue;
@@ -133,6 +150,36 @@ static auto findRefIndex(uint32_t slot, const DXVA_PicParams_HEVC& pic) -> uint8
   return 0xff;
 }
 
+static void fillRefSet(const video_parser::H265StRefPicSet& st,
+                       const std::vector<dx_h264::DpbEntry>& dpb,
+                       int32_t poc,
+                       const DXVA_PicParams_HEVC& pic,
+                       DXVA_PicParams_HEVC& out) {
+  uint8_t before = 0;
+  for (int i = 0; i < st.num_negative_pics && before < 8; ++i) {
+    if (!st.used_by_curr_pic_s0_flag[i]) continue;
+    const int target_poc = poc + st.delta_poc_s0[i];
+    for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
+      if (dpb[slot].is_reference && dpb[slot].poc == target_poc) {
+        out.RefPicSetStCurrBefore[before++] = findRefIndex(slot, pic);
+        break;
+      }
+    }
+  }
+
+  uint8_t after = 0;
+  for (int i = 0; i < st.num_positive_pics && after < 8; ++i) {
+    if (!st.used_by_curr_pic_s1_flag[i]) continue;
+    const int target_poc = poc + st.delta_poc_s1[i];
+    for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
+      if (dpb[slot].is_reference && dpb[slot].poc == target_poc) {
+        out.RefPicSetStCurrAfter[after++] = findRefIndex(slot, pic);
+        break;
+      }
+    }
+  }
+}
+
 static void fillPicParams(const Sps& sps,
                           const Pps& pps,
                           const SliceHeader& sh,
@@ -168,10 +215,10 @@ static void fillPicParams(const Sps& sps,
     pic.RefPicSetLtCurr[i] = 0xff;
   }
 
+  (void) reference_usage;
   uint8_t ref_count = 0;
-  for (size_t i = 0; i < reference_usage.size() && ref_count < 15; ++i) {
-    const uint32_t ref_slot = reference_usage[i];
-    if (ref_slot >= dpb.size() || ref_slot == current_slot || !dpb[ref_slot].is_reference) continue;
+  for (uint32_t ref_slot = 0; ref_slot < dpb.size() && ref_count < 15; ++ref_slot) {
+    if (ref_slot == current_slot || !dpb[ref_slot].is_reference) continue;
     pic.RefPicList[ref_count].Index7Bits = static_cast<UCHAR>(ref_slot);
     pic.RefPicList[ref_count].AssociatedFlag = 0;
     pic.PicOrderCntValList[ref_count] = dpb[ref_slot].poc;
@@ -179,26 +226,7 @@ static void fillPicParams(const Sps& sps,
   }
 
   const auto& st = sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set;
-  uint8_t before = 0;
-  for (int i = 0; i < st.num_negative_pics && before < 8; ++i) {
-    const int target_poc = poc + st.delta_poc_s0[i];
-    for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
-      if (dpb[slot].is_reference && dpb[slot].poc == target_poc) {
-        pic.RefPicSetStCurrBefore[before++] = findRefIndex(slot, pic);
-        break;
-      }
-    }
-  }
-  uint8_t after = 0;
-  for (int i = 0; i < st.num_positive_pics && after < 8; ++i) {
-    const int target_poc = poc + st.delta_poc_s1[i];
-    for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
-      if (dpb[slot].is_reference && dpb[slot].poc == target_poc) {
-        pic.RefPicSetStCurrAfter[after++] = findRefIndex(slot, pic);
-        break;
-      }
-    }
-  }
+  fillRefSet(st, dpb, poc, pic, pic);
 
   pic.sps_max_dec_pic_buffering_minus1 = static_cast<UCHAR>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1]);
   pic.log2_min_luma_coding_block_size_minus3 = static_cast<UCHAR>(sps.log2_min_luma_coding_block_size_minus3);
@@ -259,7 +287,7 @@ static void fillPicParams(const Sps& sps,
     for (int i = 0; i <= pps.num_tile_rows_minus1 && i < 22; ++i) pic.row_height_minus1[i] = static_cast<USHORT>(pps.row_height_minus1[i]);
   }
 
-  pic.ucNumDeltaPocsOfRefRpsIdx = sh.short_term_ref_pic_set_sps_flag ? 0 : static_cast<UCHAR>(st.num_negative_pics + st.num_positive_pics);
+  pic.ucNumDeltaPocsOfRefRpsIdx = sh.short_term_ref_pic_set_sps_flag ? 0 : static_cast<UCHAR>(st.num_delta_pocs);
   pic.wNumBitsForShortTermRPSInSlice = sh.short_term_ref_pic_set_sps_flag ? 0 : static_cast<USHORT>(sh.st_rps_bits);
   pic.IrapPicFlag = isIrap(frame.nal_unit_type) ? 1 : 0;
   pic.IdrPicFlag = isIdr(frame.nal_unit_type) ? 1 : 0;

@@ -142,6 +142,7 @@ auto H265AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
       current_parameter_sets_changed_ = true;
     } else if (is_vcl && has_sps_ && has_pps_) {
       current_.slice_offsets.push_back(output_offset);
+      current_.slice_nalus.emplace_back(nal_data.begin(), nal_data.end());
       current_.nal_unit_type = nal_type;
       current_.poc = slice_pic_order_cnt_lsb_;
       current_.is_irap = isIrapNal(nal_type);
@@ -302,7 +303,7 @@ auto H265AccessUnitParser::parseStRefPicSet(openmedia::BitReader& br, H265StRefP
     st.abs_delta_rps_minus1 = static_cast<int>(br.readUE());
     int delta_rps = (1 - 2 * st.delta_rps_sign) * (st.abs_delta_rps_minus1 + 1);
 
-    int num_delta_pocs = ref.num_negative_pics + ref.num_positive_pics;
+    int num_delta_pocs = ref.num_delta_pocs;
     for (int j = 0; j <= num_delta_pocs; ++j) {
       st.used_by_curr_pic_flag[j] = br.readBit() != 0;
       if (!st.used_by_curr_pic_flag[j]) {
@@ -354,6 +355,7 @@ auto H265AccessUnitParser::parseStRefPicSet(openmedia::BitReader& br, H265StRefP
       }
     }
     st.num_positive_pics = i;
+    st.num_delta_pocs = st.num_negative_pics + st.num_positive_pics;
   } else {
     st.num_negative_pics = static_cast<int>(br.readUE());
     st.num_positive_pics = static_cast<int>(br.readUE());
@@ -371,6 +373,7 @@ auto H265AccessUnitParser::parseStRefPicSet(openmedia::BitReader& br, H265StRefP
       st.delta_poc_s1[i] = prev;
       st.used_by_curr_pic_s1_flag[i] = br.readBit() != 0;
     }
+    st.num_delta_pocs = st.num_negative_pics + st.num_positive_pics;
   }
   return br.ok();
 }
@@ -707,6 +710,13 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
           br.readBit();
         }
       }
+      const auto& st = sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set;
+      for (int i = 0; i < st.num_negative_pics; ++i) {
+        if (st.used_by_curr_pic_s0_flag[i]) ++sh.num_pic_total_curr;
+      }
+      for (int i = 0; i < st.num_positive_pics; ++i) {
+        if (st.used_by_curr_pic_s1_flag[i]) ++sh.num_pic_total_curr;
+      }
       if (sps.sps_temporal_mvp_enabled_flag) sh.slice_temporal_mvp_enabled_flag = br.readBit() != 0;
     }
     if (sps.sample_adaptive_offset_enabled_flag) {
@@ -722,14 +732,14 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
         sh.num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
         sh.num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
       }
-      if (pps.lists_modification_present_flag && sh.num_ref_idx_l0_active_minus1 + sh.num_ref_idx_l1_active_minus1 > 0) {
+      if (pps.lists_modification_present_flag && sh.num_pic_total_curr > 1) {
         // skip ref_pic_lists_modification
         if (br.readBit()) { // ref_pic_list_modification_flag_l0
-            for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) br.readBits(static_cast<uint32_t>(ceilLog2(15))); // list_entry_l0
+            for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) br.readBits(static_cast<uint32_t>(ceilLog2(sh.num_pic_total_curr))); // list_entry_l0
         }
         if (sh.slice_type == 0 /* B */) {
             if (br.readBit()) { // ref_pic_list_modification_flag_l1
-                for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) br.readBits(static_cast<uint32_t>(ceilLog2(15))); // list_entry_l1
+                for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) br.readBits(static_cast<uint32_t>(ceilLog2(sh.num_pic_total_curr))); // list_entry_l1
             }
         }
       }
