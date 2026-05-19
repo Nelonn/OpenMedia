@@ -245,10 +245,6 @@ if (OPENMEDIA_VAAPI)
     target_sources(OpenMedia PRIVATE src/hw_vaapi_priv.hpp)
     target_sources(OpenMedia PRIVATE src/video/vaapi_loader.cpp src/video/vaapi_loader.hpp)
     target_sources(OpenMedia PRIVATE src/video/vaapi.cpp)
-    target_sources(OpenMedia PRIVATE 
-        third_party/h265bitstream/h265_stream.c
-        third_party/h265bitstream/h265_nal.c
-    )
     target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h265bitstream)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VAAPI)
 endif ()
