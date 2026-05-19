@@ -82,6 +82,7 @@ class VulkanDecoder final : public Decoder {
   VkFormat out_format_ = VK_FORMAT_UNDEFINED;
   VkImageTiling out_tiling_ = VK_IMAGE_TILING_OPTIMAL;
   uint32_t dpb_slot_count_ = 0;
+  uint32_t max_active_refs_ = 0;
   
   VkImage dpb_image_ = VK_NULL_HANDLE;
   VkDeviceMemory dpb_memory_ = VK_NULL_HANDLE;
@@ -231,6 +232,7 @@ public:
       }
     }
     dpb_slot_count_ = std::min(dpb_slot_count_, std::min(video_caps.maxDpbSlots, MAX_DPB_SLOTS + 1));
+    max_active_refs_ = std::min(video_caps.maxActiveReferencePictures, dpb_slot_count_ - 1);
 
     VkVideoSessionCreateInfoKHR session_info = {VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR};
     session_info.pVideoProfile = &video_profile_;
@@ -238,7 +240,7 @@ public:
     session_info.referencePictureFormat = dpb_format_;
     session_info.pictureFormat = out_format_;
     session_info.maxDpbSlots = dpb_slot_count_;
-    session_info.maxActiveReferencePictures = std::min(video_caps.maxActiveReferencePictures, MAX_DPB_SLOTS * 2u);
+    session_info.maxActiveReferencePictures = max_active_refs_;
     session_info.queueFamilyIndex = hw_context_->video_decode_queue_family_index;
     session_info.pStdHeaderVersion = &video_caps.stdHeaderVersion;
 
@@ -268,6 +270,9 @@ public:
       if (!session_params_) return OM_CODEC_HWACCEL_FAILED;
     }
 
+    uint32_t queue_families[] = { hw_context_->queue_family_index, hw_context_->video_decode_queue_family_index };
+    bool multi_queue = queue_families[0] != queue_families[1];
+
     VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &profile_list};
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = dpb_format_;
@@ -277,8 +282,10 @@ public:
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = dpb_tiling_;
     image_info.usage = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
-    if (coincide_supported_) image_info.usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (coincide_supported_) image_info.usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.sharingMode = multi_queue ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+    image_info.queueFamilyIndexCount = multi_queue ? 2 : 0;
+    image_info.pQueueFamilyIndices = multi_queue ? queue_families : nullptr;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VK(vkCreateImage)(hw_context_->vk_device, &image_info, hw_context_->allocator, &dpb_image_);
 
@@ -314,8 +321,11 @@ public:
       image_info.arrayLayers = 1;
       image_info.format = out_format_;
       image_info.tiling = out_tiling_;
-      image_info.usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+      image_info.usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
       image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      image_info.sharingMode = multi_queue ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+      image_info.queueFamilyIndexCount = multi_queue ? 2 : 0;
+      image_info.pQueueFamilyIndices = multi_queue ? queue_families : nullptr;
       VK(vkCreateImage)(hw_context_->vk_device, &image_info, hw_context_->allocator, &output_image_);
       VK(vkGetImageMemoryRequirements)(hw_context_->vk_device, output_image_, &img_reqs);
       img_alloc.allocationSize = img_reqs.size;
@@ -393,7 +403,7 @@ public:
         if (parsed.is_reference && dpb_slot_count_ > 1) {
           if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
           reference_usage_[next_ref_] = static_cast<uint8_t>(current_idx);
-          next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
+          next_ref_ = (next_ref_ + 1) % max_active_refs_;
           next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
         }
 
@@ -436,7 +446,7 @@ public:
         if (parsed.is_reference && dpb_slot_count_ > 1) {
           if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
           reference_usage_[next_ref_] = static_cast<uint8_t>(current_idx);
-          next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
+          next_ref_ = (next_ref_ + 1) % max_active_refs_;
           next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
         }
 
@@ -610,6 +620,8 @@ private:
       b[bc].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR | VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
       b[bc].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       b[bc].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+      b[bc].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b[bc].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       b[bc].image = dpb_image_;
       b[bc].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, dpb_slot_count_};
       ++bc;
@@ -622,18 +634,33 @@ private:
       b[bc].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR | VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
       b[bc].oldLayout = slot->picture.layout;
       b[bc].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
+      b[bc].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b[bc].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       b[bc].image = dpb_image_;
       b[bc].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, slot_idx, 1};
       ++bc;
       slot->picture.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR;
     }
     if (!coincide_supported_) {
-      b[bc] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR, VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR, output_pic_proxy_.layout, VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, output_image_, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+      b[bc] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+      b[bc].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      b[bc].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+      b[bc].dstStageMask = VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR;
+      b[bc].dstAccessMask = VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR;
+      b[bc].oldLayout = output_pic_proxy_.layout;
+      b[bc].newLayout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR;
+      b[bc].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b[bc].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b[bc].image = output_image_;
+      b[bc].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
       ++bc;
       output_pic_proxy_.layout = VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR;
     }
     if (bc > 0) {
-      VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, bc, b.data()};
+      VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+      dep.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+      dep.imageMemoryBarrierCount = bc;
+      dep.pImageMemoryBarriers = b.data();
       VK(vkCmdPipelineBarrier2KHR)(cb, &dep);
     }
 

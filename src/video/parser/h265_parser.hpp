@@ -36,6 +36,21 @@ enum NalUnitType {
   NAL_SUFFIX_SEI = 40,
 };
 
+struct H265StRefPicSet {
+  bool inter_ref_pic_set_prediction_flag = false;
+  int delta_idx_minus1 = 0;
+  int delta_rps_sign = 0;
+  int abs_delta_rps_minus1 = 0;
+  int num_negative_pics = 0;
+  int num_positive_pics = 0;
+  int delta_poc_s0[16] = {};
+  bool used_by_curr_pic_s0_flag[16] = {};
+  int delta_poc_s1[16] = {};
+  bool used_by_curr_pic_s1_flag[16] = {};
+  bool used_by_curr_pic_flag[32] = {};
+  bool use_delta_flag[32] = {};
+};
+
 struct H265SliceHeader {
   int pps_id = 0;
   int slice_segment_address = 0;
@@ -43,6 +58,9 @@ struct H265SliceHeader {
   int slice_type = 0;
   int colour_plane_id = 0;
   int slice_pic_order_cnt_lsb = 0;
+  bool short_term_ref_pic_set_sps_flag = false;
+  int short_term_ref_pic_set_idx = 0;
+  H265StRefPicSet st_ref_pic_set = {};
   bool slice_temporal_mvp_enabled_flag = false;
   bool slice_sao_luma_flag = false;
   bool slice_sao_chroma_flag = false;
@@ -130,11 +148,53 @@ public:
     int log2_diff_max_min_pcm_luma_coding_block_size = 0;
     bool pcm_loop_filter_disabled_flag = false;
     int num_short_term_ref_pic_sets = 0;
+    H265StRefPicSet st_ref_pic_set[64] = {};
     bool long_term_ref_pics_present_flag = false;
     int num_long_term_ref_pics_sps = 0;
     bool sps_temporal_mvp_enabled_flag = false;
     bool strong_intra_smoothing_enabled_flag = false;
     bool vui_parameters_present_flag = false;
+    struct Vui {
+      bool aspect_ratio_info_present_flag = false;
+      int aspect_ratio_idc = 0;
+      int sar_width = 0;
+      int sar_height = 0;
+      bool overscan_info_present_flag = false;
+      bool overscan_appropriate_flag = false;
+      bool video_signal_type_present_flag = false;
+      int video_format = 5;
+      bool video_full_range_flag = false;
+      bool colour_description_present_flag = false;
+      int colour_primaries = 2;
+      int transfer_characteristics = 2;
+      int matrix_coeffs = 2;
+      bool chroma_loc_info_present_flag = false;
+      int chroma_sample_loc_type_top_field = 0;
+      int chroma_sample_loc_type_bottom_field = 0;
+      bool neutral_chroma_indication_flag = false;
+      bool field_seq_flag = false;
+      bool frame_field_info_present_flag = false;
+      bool default_display_window_flag = false;
+      int def_disp_win_left_offset = 0;
+      int def_disp_win_right_offset = 0;
+      int def_disp_win_top_offset = 0;
+      int def_disp_win_bottom_offset = 0;
+      bool vui_timing_info_present_flag = false;
+      uint32_t vui_num_units_in_tick = 0;
+      uint32_t vui_time_scale = 0;
+      bool vui_poc_proportional_to_timing_flag = false;
+      int vui_num_ticks_poc_diff_one_minus1 = 0;
+      bool vui_hrd_parameters_present_flag = false;
+      bool bitstream_restriction_flag = false;
+      bool tiles_fixed_structure_flag = false;
+      bool motion_vectors_over_pic_boundaries_flag = true;
+      bool restricted_ref_pic_lists_flag = false;
+      int min_spatial_segmentation_idc = 0;
+      int max_bytes_per_pic_denom = 2;
+      int max_bits_per_min_cu_denom = 1;
+      int log2_max_mv_length_horizontal = 15;
+      int log2_max_mv_length_vertical = 15;
+    } vui = {};
   };
 
   struct Pps {
@@ -214,6 +274,11 @@ private:
   auto parseNal(std::span<const uint8_t> nal_data) -> bool;
   auto startsNewAccessUnit(int nal_type) const -> bool;
   auto finishCurrentFrame() -> H265ParsedFrame;
+
+  auto parseVui(openmedia::BitReader& br, Sps& sps) -> bool;
+  auto parseStRefPicSet(openmedia::BitReader& br, H265StRefPicSet& st, int idx, int num_sets, const H265StRefPicSet* sets) -> bool;
+  auto skipScalingListData(openmedia::BitReader& br) -> bool;
+  auto skipHrdParameters(openmedia::BitReader& br, bool common_inf_present_flag, int max_num_sub_layers_minus1) -> bool;
 };
 
 } // namespace openmedia::video_parser
