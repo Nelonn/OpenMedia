@@ -733,6 +733,7 @@ private:
 
     // Video state
     bool has_video_ = false;
+    bool video_drain_sent_ = false;
 
     // Image state
     SDL_Texture*       image_texture_ = nullptr;
@@ -991,6 +992,7 @@ private:
         video_packet_queue_.reset();
         video_frame_queue_.reset();
         stop_requested_ = false;
+        video_drain_sent_ = false;
 
         // Demux thread feeds the per-stream packet queues.
         demux_thread_ = std::thread([this] { demuxLoop(); });
@@ -1058,6 +1060,11 @@ private:
             // ---- read one packet ----
             auto res = demuxer_->readPacket();
             if (res.isErr()) {
+                if (has_video_ && !video_drain_sent_) {
+                    video_drain_sent_ = true;
+                    video_packet_queue_.blockingPush(Packet {});
+                }
+
                 // EOF — wait; a seek may restart things.
                 std::unique_lock<std::mutex> lock(seek_mutex_);
                 seek_cv_.wait_for(lock, 200ms, [&] {
@@ -1083,10 +1090,19 @@ private:
             auto maybe_pkt = audio_packet_queue_.blockingPop();
             if (!maybe_pkt) break; // aborted
 
-            auto result = audio_decoder_->decode(*maybe_pkt);
-            if (result.isErr()) continue;
+            const OMError send_err = maybe_pkt->bytes.empty()
+                ? audio_decoder_->sendEndOfStream()
+                : audio_decoder_->sendPacket(*maybe_pkt);
+            if (send_err != OM_SUCCESS) continue;
 
-            for (auto& frame : result.unwrap()) {
+            while (!stop_requested_) {
+                auto result = audio_decoder_->receiveFrame();
+                if (result.isErr()) break;
+                auto received = std::move(result).unwrap();
+                if (received.status == ReceivedFrame::Status::NeedInput) break;
+                if (received.status == ReceivedFrame::Status::EndOfStream) return;
+
+                auto& frame = received.frame;
                 if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
                 const AudioSamples& s = std::get<AudioSamples>(frame.data);
                 if (s.nb_samples == 0) continue;
@@ -1147,10 +1163,19 @@ private:
             auto maybe_pkt = video_packet_queue_.blockingPop();
             if (!maybe_pkt) break; // aborted
 
-            auto result = video_decoder_->decode(*maybe_pkt);
-            if (result.isErr()) continue;
+            const OMError send_err = maybe_pkt->bytes.empty()
+                ? video_decoder_->sendEndOfStream()
+                : video_decoder_->sendPacket(*maybe_pkt);
+            if (send_err != OM_SUCCESS) continue;
 
-            for (auto& frame : result.unwrap()) {
+            while (!stop_requested_) {
+                auto result = video_decoder_->receiveFrame();
+                if (result.isErr()) break;
+                auto received = std::move(result).unwrap();
+                if (received.status == ReceivedFrame::Status::NeedInput) break;
+                if (received.status == ReceivedFrame::Status::EndOfStream) return;
+
+                auto& frame = received.frame;
                 if (!std::holds_alternative<Picture>(frame.data)) continue;
                 const Picture& pic = std::get<Picture>(frame.data);
                 if (pic.width == 0 || pic.height == 0) continue;
@@ -1244,7 +1269,7 @@ private:
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
-                if (!video_frame_queue_.blockingPush(std::move(vf))) break;
+                if (!video_frame_queue_.blockingPush(std::move(vf))) return;
             }
             
             // For hardware decoders like VideoToolbox, we might need to flush 
@@ -1275,6 +1300,7 @@ private:
         audio_packet_queue_.reset();
         video_packet_queue_.reset();
         video_frame_queue_.reset();
+        video_drain_sent_ = false;
 
         // 4. Seek the demuxer.
         const double target_secs = static_cast<double>(progress) * total_duration_secs_;
@@ -1318,10 +1344,13 @@ private:
         auto res = demuxer_->readPacket();
         if (res.isErr()) return;
 
-        auto result = video_decoder_->decode(res.unwrap());
-        if (result.isErr() || result.unwrap().empty()) return;
+        if (video_decoder_->sendPacket(res.unwrap()) != OM_SUCCESS) return;
+        auto result = video_decoder_->receiveFrame();
+        if (result.isErr()) return;
+        auto received = std::move(result).unwrap();
+        if (received.status != ReceivedFrame::Status::Frame) return;
 
-        Frame& f = result.unwrap()[0];
+        Frame& f = received.frame;
         if (!std::holds_alternative<Picture>(f.data)) return;
 
         const Picture& pic = std::get<Picture>(f.data);
