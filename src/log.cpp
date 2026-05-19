@@ -31,6 +31,8 @@ constexpr auto categoryToString(OMLogCategory category) -> std::string_view {
       return "ENCODER";
     case OM_CATEGORY_DECODER:
       return "DECODER";
+    case OM_CATEGORY_HARDWARE:
+      return "HARDWARE";
     default:
       return "UNKNOWN";
   }

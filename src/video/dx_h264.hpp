@@ -12,7 +12,7 @@
 #include <dxva.h>
 #endif
 
-#include <h264.h>
+#include <video/parser/h264_types.hpp>
 
 namespace openmedia::dx_h264 {
 
@@ -61,10 +61,10 @@ struct State {
     h264::Bitstream bs;
     bs.init(nal_data.data(), nal_data.size());
     h264::NALHeader nal;
-    if (!h264::read_nal_header(&nal, &bs)) return;
+    if (!h264::read_nal_header(nal, bs)) return;
     if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
       h264::SPS parsed = {};
-      h264::read_sps(&parsed, &bs);
+      h264::read_sps(parsed, bs);
       if (parsed.seq_parameter_set_id >= 0 && parsed.seq_parameter_set_id < 32) {
         sps[parsed.seq_parameter_set_id] = parsed;
         sps_valid[parsed.seq_parameter_set_id] = true;
@@ -72,7 +72,7 @@ struct State {
       }
     } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
       h264::PPS parsed = {};
-      h264::read_pps(&parsed, &bs);
+      h264::read_pps(parsed, bs);
       if (parsed.pic_parameter_set_id >= 0 && parsed.pic_parameter_set_id < 256) {
         pps[parsed.pic_parameter_set_id] = parsed;
         pps_valid[parsed.pic_parameter_set_id] = true;
@@ -162,16 +162,16 @@ struct State {
 
     h264::Bitstream bs;
     bs.init(frame.bitstream.data(), frame.bitstream.size());
-    while (h264::find_next_nal(&bs)) {
+    while (h264::find_next_nal(bs)) {
       const uint32_t nal_offset = static_cast<uint32_t>(bs.byte_offset()) - 3;
       h264::NALHeader nal;
-      if (!h264::read_nal_header(&nal, &bs)) continue;
+      if (!h264::read_nal_header(nal, bs)) continue;
       if (nal.type == h264::NAL_UNIT_TYPE_SPS || nal.type == h264::NAL_UNIT_TYPE_PPS) {
         const size_t start = static_cast<size_t>(bs.byte_offset()) - 1;
         storeNal(frame.bitstream.subspan(start));
       } else if (nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) {
         if (!has_sps || !has_pps) continue;
-        h264::read_slice_header(&frame.slice, &nal, pps, sps, &bs);
+        h264::read_slice_header(frame.slice, nal, pps, sps, bs);
         frame.slice_offsets.push_back(nal_offset);
         frame.nal = nal;
       }

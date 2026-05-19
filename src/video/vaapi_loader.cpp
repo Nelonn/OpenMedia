@@ -50,8 +50,8 @@ auto LibVA::load() -> bool {
   vaQueryConfigEntrypoints = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAProfile, VAEntrypoint*, int*)>>("vaQueryConfigEntrypoints");
   vaGetConfigAttributes = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAProfile, VAEntrypoint, VAConfigAttrib*, int)>>("vaGetConfigAttributes");
   vaQuerySurfaceStatus = libva_.getProcAddress<PFN<VAStatus(VADisplay, VASurfaceID, VAStatus*)>>("vaQuerySurfaceStatus");
-  vaMaxNumConfigProfiles = libva_.getProcAddress<PFN<int(VADisplay)>>("vaMaxNumConfigProfiles");
-  vaMaxNumConfigEntrypoints = libva_.getProcAddress<PFN<int(VADisplay)>>("vaMaxNumConfigEntrypoints");
+  vaMaxNumConfigProfiles = libva_.getProcAddress<PFN<int(VADisplay)>>("vaMaxNumProfiles");
+  vaMaxNumConfigEntrypoints = libva_.getProcAddress<PFN<int(VADisplay)>>("vaMaxNumEntrypoints");
   vaQueryImageFormats = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAImageFormat*, int*)>>("vaQueryImageFormats");
   vaCreateImage = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAImageFormat*, int, int, VAImage*)>>("vaCreateImage");
   vaDestroyImage = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAImageID)>>("vaDestroyImage");
