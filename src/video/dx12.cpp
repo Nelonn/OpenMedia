@@ -38,6 +38,11 @@ namespace openmedia {
 class DX12Decoder final : public Decoder {
   static constexpr uint64_t BITSTREAM_SIZE = 8ull * 1024ull * 1024ull;
 
+  struct ReorderEntry {
+    int32_t poc = 0;
+    Frame frame = {};
+  };
+
   bool initialized_ = false;
   VideoFormat output_format_ = {};
 
@@ -79,6 +84,7 @@ class DX12Decoder final : public Decoder {
   uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
   std::vector<uint8_t> reference_usage_;
+  std::vector<ReorderEntry> h264_reorder_queue_;
 
 public:
   ~DX12Decoder() override { release(); }
@@ -175,6 +181,7 @@ public:
   void flush() override {
     for (auto& entry : dpb_) entry = {};
     reference_usage_.clear();
+    h264_reorder_queue_.clear();
     next_slot_ = 0;
     next_ref_ = 0;
     h264_.resetPoc();
@@ -182,6 +189,28 @@ public:
   }
 
 private:
+  static auto h264ReorderDepth(const h264::SPS& sps) -> size_t {
+    if (sps.vui_parameters_present_flag && sps.vui.bitstream_restriction_flag) {
+      return static_cast<size_t>(std::clamp(sps.vui.num_reorder_frames, 0, 16));
+    }
+    return 0;
+  }
+
+  auto pushH264Reordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
+    if (reorder_depth == 0) return {std::move(frame)};
+
+    h264_reorder_queue_.push_back({poc, std::move(frame)});
+    if (h264_reorder_queue_.size() <= reorder_depth) return {};
+
+    auto it = std::min_element(h264_reorder_queue_.begin(), h264_reorder_queue_.end(), [](const auto& a, const auto& b) {
+      return a.poc < b.poc;
+    });
+    std::vector<Frame> output;
+    output.push_back(std::move(it->frame));
+    h264_reorder_queue_.erase(it);
+    return output;
+  }
+
   auto decodeH264(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
 
     auto parsed = h264_.parseFrame(packet.bytes);
@@ -196,6 +225,7 @@ private:
     if (parsed.is_intra) {
       for (auto& entry : dpb_) entry.is_reference = false;
       reference_usage_.clear();
+      h264_reorder_queue_.clear();
       next_ref_ = 0;
       next_slot_ = 0;
       h264_.resetPoc();
@@ -225,7 +255,7 @@ private:
     frame.pts = packet.pts;
     frame.dts = packet.dts;
     frame.data = std::move(*picture);
-    return Ok(std::vector<Frame> {std::move(frame)});
+    return Ok(pushH264Reordered(std::move(frame), parsed.poc, h264ReorderDepth(sps)));
   }
 
   auto decodeH265(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
