@@ -241,6 +241,22 @@ private:
       const auto& sps = h265_->sps(pps.sps_id);
       if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return Err(OM_CODEC_NOT_SUPPORTED);
 
+      const uint8_t bit_depth = static_cast<uint8_t>(sps.bit_depth_luma_minus8 + 8);
+      const OMPixelFormat expected_format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+      if (output_format_.format != expected_format) {
+        padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
+        padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
+        dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1] + 1), 2, 17);
+        for (auto& entry : dpb_) entry = {};
+        reference_usage_.clear();
+        next_ref_ = 0;
+        next_slot_ = 0;
+        h265_poc_.reset();
+        if (FAILED(createDecoder())) return Err(OM_CODEC_HWACCEL_FAILED);
+        if (FAILED(createResources())) return Err(OM_CODEC_HWACCEL_FAILED);
+        output_format_.format = expected_format;
+      }
+
       const int32_t poc = h265_poc_.compute(sps, parsed, sh);
       if (dx_h265::isIrap(parsed.nal_unit_type)) {
         for (auto& entry : dpb_) entry.is_reference = false;
@@ -324,6 +340,9 @@ private:
   }
 
   auto createDecoder() -> HRESULT {
+    decoder_.Reset();
+    decoder_heap_.Reset();
+
     D3D12_VIDEO_DECODE_CONFIGURATION config = {};
     config.DecodeProfile = (codec_id_ == OM_CODEC_H264) ? D3D12_VIDEO_DECODE_PROFILE_H264 : D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN;
     config.InterlaceType = D3D12_VIDEO_FRAME_CODED_INTERLACE_TYPE_NONE;
@@ -378,6 +397,12 @@ private:
   }
 
   auto createResources() -> HRESULT {
+    if (bitstream_buffer_ && bitstream_ptr_) bitstream_buffer_->Unmap(0, nullptr);
+    bitstream_ptr_ = nullptr;
+    output_texture_.Reset();
+    dpb_texture_.Reset();
+    bitstream_buffer_.Reset();
+
     D3D12_HEAP_PROPERTIES upload_heap = {};
     upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC buffer_desc = {};
