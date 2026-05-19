@@ -178,20 +178,27 @@ auto H265AccessUnitParser::normalizePacket(std::span<const uint8_t> packet) cons
 }
 
 auto H265AccessUnitParser::findNalUnits(std::span<const uint8_t> packet) -> std::vector<NalUnit> {
-  std::vector<size_t> starts;
-  scanner_.reset();
-  size_t offset = 0;
-  while (offset < packet.size()) {
-    bool found = false;
-    offset += scanner_.next(packet.data() + offset, packet.size() - offset, found);
-    if (found && offset >= 3) starts.push_back(offset - 3);
+  struct StartCode { size_t start; size_t size; };
+  std::vector<StartCode> starts;
+  for (size_t i = 0; i + 3 <= packet.size();) {
+    if (packet[i] == 0 && packet[i + 1] == 0 && packet[i + 2] == 1) {
+      starts.push_back({i, 3});
+      i += 3;
+      continue;
+    }
+    if (i + 4 <= packet.size() && packet[i] == 0 && packet[i + 1] == 0 && packet[i + 2] == 0 && packet[i + 3] == 1) {
+      starts.push_back({i, 4});
+      i += 4;
+      continue;
+    }
+    ++i;
   }
 
   std::vector<NalUnit> nals;
   for (size_t i = 0; i < starts.size(); ++i) {
-    const size_t start = starts[i];
-    const size_t header = start + 3;
-    const size_t end = (i + 1 < starts.size()) ? starts[i + 1] : packet.size();
+    const size_t start = starts[i].start;
+    const size_t header = start + starts[i].size;
+    const size_t end = (i + 1 < starts.size()) ? starts[i + 1].start : packet.size();
     if (header + 2 <= end) nals.push_back({start, header, end});
   }
   return nals;
@@ -252,32 +259,48 @@ auto H265AccessUnitParser::parsePredWeightTable(BitReader& br, const Sps& sps, H
   if (sps.chroma_format_idc != 0) {
     sh.pred_weight_table.delta_chroma_log2_weight_denom = br.readSE();
   }
+  bool luma_weight_l0_flag[15] = {};
+  bool chroma_weight_l0_flag[15] = {};
   for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) {
-    if (br.readBit()) {
+    luma_weight_l0_flag[i] = br.readBit() != 0;
+  }
+  if (sps.chroma_format_idc != 0) {
+    for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) {
+      chroma_weight_l0_flag[i] = br.readBit() != 0;
+    }
+  }
+  for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) {
+    if (luma_weight_l0_flag[i]) {
       sh.pred_weight_table.delta_luma_weight_l0[i] = br.readSE();
       sh.pred_weight_table.luma_offset_l0[i] = br.readSE();
     }
-    if (sps.chroma_format_idc != 0) {
-      if (br.readBit()) {
-        for (int j = 0; j < 2; ++j) {
-          sh.pred_weight_table.delta_chroma_weight_l0[i][j] = br.readSE();
-          sh.pred_weight_table.delta_chroma_offset_l0[i][j] = br.readSE();
-        }
+    if (chroma_weight_l0_flag[i]) {
+      for (int j = 0; j < 2; ++j) {
+        sh.pred_weight_table.delta_chroma_weight_l0[i][j] = br.readSE();
+        sh.pred_weight_table.delta_chroma_offset_l0[i][j] = br.readSE();
       }
     }
   }
   if (sh.slice_type == 0 /* B */) {
+    bool luma_weight_l1_flag[15] = {};
+    bool chroma_weight_l1_flag[15] = {};
     for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) {
-      if (br.readBit()) {
+      luma_weight_l1_flag[i] = br.readBit() != 0;
+    }
+    if (sps.chroma_format_idc != 0) {
+      for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) {
+        chroma_weight_l1_flag[i] = br.readBit() != 0;
+      }
+    }
+    for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) {
+      if (luma_weight_l1_flag[i]) {
         sh.pred_weight_table.delta_luma_weight_l1[i] = br.readSE();
         sh.pred_weight_table.luma_offset_l1[i] = br.readSE();
       }
-      if (sps.chroma_format_idc != 0) {
-        if (br.readBit()) {
-          for (int j = 0; j < 2; ++j) {
-            sh.pred_weight_table.delta_chroma_weight_l1[i][j] = br.readSE();
-            sh.pred_weight_table.delta_chroma_offset_l1[i][j] = br.readSE();
-          }
+      if (chroma_weight_l1_flag[i]) {
+        for (int j = 0; j < 2; ++j) {
+          sh.pred_weight_table.delta_chroma_weight_l1[i][j] = br.readSE();
+          sh.pred_weight_table.delta_chroma_offset_l1[i][j] = br.readSE();
         }
       }
     }
@@ -682,6 +705,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
   }
 
   if (!sh.dependent_slice_segment_flag) {
+    for (int i = 0; i < pps.num_extra_slice_header_bits; ++i) br.readBit();
     sh.slice_type = static_cast<int>(br.readUE());
     if (pps.output_flag_present_flag) br.readBit();
     if (sps.separate_colour_plane_flag) sh.colour_plane_id = static_cast<int>(br.readBits(2));
@@ -707,7 +731,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
             br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4));
             br.readBit();
           }
-          br.readBit();
+          if (br.readBit()) br.readUE();
         }
       }
       const auto& st = sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set;
@@ -746,6 +770,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
       if (sh.slice_type == 0 /* B */) sh.mvd_l1_zero_flag = br.readBit() != 0;
       if (pps.cabac_init_present_flag) sh.cabac_init_flag = br.readBit() != 0;
       if (sh.slice_temporal_mvp_enabled_flag) {
+        sh.collocated_from_l0_flag = true;
         if (sh.slice_type == 0 /* B */) sh.collocated_from_l0_flag = br.readBit() != 0;
         if ((sh.collocated_from_l0_flag && sh.num_ref_idx_l0_active_minus1 > 0) ||
             (!sh.collocated_from_l0_flag && sh.num_ref_idx_l1_active_minus1 > 0)) {

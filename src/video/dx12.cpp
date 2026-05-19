@@ -112,11 +112,15 @@ public:
       padded_width_ = dx_h264::alignUp(width_, 32u);
       padded_height_ = dx_h264::alignUp(height_, 32u);
       if (h265_->hasSps()) {
-        const auto& s = h265_->sps(0);
-        padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_width_in_luma_samples), 32u);
-        padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
-        dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(s.sps_max_dec_pic_buffering_minus1[s.max_sub_layers_minus1] + 1), 2, 17);
-        bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
+        for (int i = 0; i < 16; ++i) {
+          const auto& s = h265_->sps(i);
+          if (!s.valid) continue;
+          padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_width_in_luma_samples), 32u);
+          padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
+          dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(s.sps_max_dec_pic_buffering_minus1[s.max_sub_layers_minus1] + 1), 2, 17);
+          bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
+          break;
+        }
       }
     }
 
@@ -228,7 +232,7 @@ private:
     output.reserve(frames.size());
     for (auto& parsed : frames) {
       if (parsed.slice_offsets.empty() || parsed.slice_headers.empty()) continue;
-      const auto slice_data = dx_h265::buildSliceData(parsed);
+      const auto slice_data = dx_h265::appendBitstreamAndSliceDataWithStartCode(parsed);
       if (slice_data.bitstream.empty() || slice_data.slices.empty() || slice_data.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_DECODE_FAILED);
       const auto& sh = parsed.slice_headers.front();
       if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
@@ -336,8 +340,13 @@ private:
       }
     } else {
       if (h265_ && h265_->hasSps()) {
-        bit_depth = static_cast<uint8_t>(h265_->sps(0).bit_depth_luma_minus8 + 8);
-        if (bit_depth > 8) config.DecodeProfile = D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10;
+        for (int i = 0; i < 16; ++i) {
+          const auto& s = h265_->sps(i);
+          if (!s.valid) continue;
+          bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
+          if (bit_depth > 8) config.DecodeProfile = D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10;
+          break;
+        }
       }
     }
     support.Configuration = config;

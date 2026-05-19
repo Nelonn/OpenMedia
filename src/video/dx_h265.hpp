@@ -128,9 +128,14 @@ static auto buildSliceData(const ParsedFrame& frame) -> SliceData {
   return out;
 }
 
+static auto appendBitstreamAndSliceDataWithStartCode(const ParsedFrame& frame) -> SliceData {
+  return buildSliceData(frame);
+}
+
 static void fillQMatrix(const Sps& sps, const Pps& pps, DXVA_Qmatrix_HEVC& qmatrix) {
   std::memset(&qmatrix, 16, sizeof(qmatrix));
   if (!sps.scaling_list_enabled_flag) return;
+  if (!pps.pps_scaling_list_data_present_flag && !sps.sps_scaling_list_data_present_flag) return;
 
   const auto& sl = pps.pps_scaling_list_data_present_flag ? pps.scaling_list_data : sps.scaling_list_data;
   std::memcpy(qmatrix.ucScalingLists0, sl.scaling_list_4x4, sizeof(qmatrix.ucScalingLists0));
@@ -192,8 +197,8 @@ static void fillPicParams(const Sps& sps,
                           DXVA_PicParams_HEVC& pic) {
   pic = {};
   const int min_cb_log2_size_y = sps.log2_min_luma_coding_block_size_minus3 + 3;
-  pic.PicWidthInMinCbsY = static_cast<USHORT>((sps.pic_width_in_luma_samples + (1 << min_cb_log2_size_y) - 1) >> min_cb_log2_size_y);
-  pic.PicHeightInMinCbsY = static_cast<USHORT>((sps.pic_height_in_luma_samples + (1 << min_cb_log2_size_y) - 1) >> min_cb_log2_size_y);
+  pic.PicWidthInMinCbsY = static_cast<USHORT>(sps.pic_width_in_luma_samples >> min_cb_log2_size_y);
+  pic.PicHeightInMinCbsY = static_cast<USHORT>(sps.pic_height_in_luma_samples >> min_cb_log2_size_y);
   pic.chroma_format_idc = static_cast<USHORT>(sps.chroma_format_idc);
   pic.separate_colour_plane_flag = static_cast<USHORT>(sps.separate_colour_plane_flag);
   pic.bit_depth_luma_minus8 = static_cast<USHORT>(sps.bit_depth_luma_minus8);

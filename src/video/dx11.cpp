@@ -17,6 +17,7 @@
 #include <mfidl.h>
 #include <mfobjects.h>
 #include <mftransform.h>
+#include <cstdio>
 
 #include <util/wmf.hpp>
 #include "dx_h264.hpp"
@@ -328,6 +329,7 @@ class DX11Decoder final : public Decoder {
   uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
   std::vector<uint8_t> reference_usage_;
+  bool h265_logged_ = false;
 
 public:
   ~DX11Decoder() override { release(); }
@@ -361,11 +363,15 @@ public:
       padded_width_ = dx_h264::alignUp(width_, 32u);
       padded_height_ = dx_h264::alignUp(height_, 32u);
       if (h265_->hasSps()) {
-        const auto& s = h265_->sps(0); // Use first SPS
-        padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_width_in_luma_samples), 32u);
-        padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
-        dpb_slot_count_ = 16; // HEVC usually needs up to 16
-        bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
+        for (int i = 0; i < 16; ++i) {
+          const auto& s = h265_->sps(i);
+          if (!s.valid) continue;
+          padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_width_in_luma_samples), 32u);
+          padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
+          dpb_slot_count_ = 16; // HEVC usually needs up to 16
+          bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
+          break;
+        }
       }
     }
 
@@ -387,79 +393,10 @@ public:
     device_->GetImmediateContext(&context_);
     if (!context_) return OM_CODEC_HWACCEL_FAILED;
 
-    GUID target_profile = (codec_id_ == OM_CODEC_H264) ? D3D11_DECODER_PROFILE_H264_VLD_NOFGT :
-                          (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10 : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
-    bool profile_supported = false;
-    const UINT profile_count = video_device_->GetVideoDecoderProfileCount();
-    for (UINT i = 0; i < profile_count; ++i) {
-      GUID profile = {};
-      if (SUCCEEDED(video_device_->GetVideoDecoderProfile(i, &profile)) && profile == target_profile) {
-        profile_supported = true;
-        break;
-      }
-    }
-    if (!profile_supported && codec_id_ == OM_CODEC_H265) {
-      target_profile = D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10;
-      for (UINT i = 0; i < profile_count; ++i) {
-        GUID profile = {};
-        if (SUCCEEDED(video_device_->GetVideoDecoderProfile(i, &profile)) && profile == target_profile) {
-          profile_supported = true;
-          break;
-        }
-      }
-    }
-    if (!profile_supported) return OM_CODEC_NOT_SUPPORTED;
+    if (!createDecoderResources(bit_depth)) return OM_CODEC_HWACCEL_FAILED;
 
-    D3D11_VIDEO_DECODER_DESC decoder_desc = {};
-    decoder_desc.Guid = target_profile;
-    decoder_desc.SampleWidth = padded_width_;
-    decoder_desc.SampleHeight = padded_height_;
-    decoder_desc.OutputFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
-
-    UINT config_count = 0;
-    if (FAILED(video_device_->GetVideoDecoderConfigCount(&decoder_desc, &config_count)) || config_count == 0) return OM_CODEC_HWACCEL_FAILED;
-    bool found_config = false;
-    for (UINT i = 0; i < config_count; ++i) {
-      D3D11_VIDEO_DECODER_CONFIG config = {};
-      if (FAILED(video_device_->GetVideoDecoderConfig(&decoder_desc, i, &config))) continue;
-      const UINT expected_raw = (codec_id_ == OM_CODEC_H264) ? 2u : 1u;
-      if (config.guidConfigBitstreamEncryption == DXVA_NO_ENCRYPT &&
-          config.guidConfigMBcontrolEncryption == DXVA_NO_ENCRYPT &&
-          config.guidConfigResidDiffEncryption == DXVA_NO_ENCRYPT &&
-          config.ConfigBitstreamRaw == expected_raw) {
-        decoder_config_ = config;
-        found_config = true;
-        break;
-      }
-      if (!found_config) {
-        decoder_config_ = config;
-        found_config = true;
-      }
-    }
-    if (!found_config) return OM_CODEC_HWACCEL_FAILED;
-    if (FAILED(video_device_->CreateVideoDecoder(&decoder_desc, &decoder_config_, &decoder_))) return OM_CODEC_HWACCEL_FAILED;
-
-    D3D11_TEXTURE2D_DESC texture_desc = {};
-    texture_desc.Width = padded_width_;
-    texture_desc.Height = padded_height_;
-    texture_desc.MipLevels = 1;
-    texture_desc.ArraySize = dpb_slot_count_;
-    texture_desc.Format = decoder_desc.OutputFormat;
-    texture_desc.SampleDesc.Count = 1;
-    texture_desc.Usage = D3D11_USAGE_DEFAULT;
-    texture_desc.BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device_->CreateTexture2D(&texture_desc, nullptr, &dpb_texture_))) return OM_CODEC_HWACCEL_FAILED;
-
-    slots_.resize(dpb_slot_count_);
-    for (uint32_t i = 0; i < dpb_slot_count_; ++i) {
-      D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC view_desc = {};
-      view_desc.DecodeProfile = target_profile;
-      view_desc.ViewDimension = D3D11_VDOV_DIMENSION_TEXTURE2D;
-      view_desc.Texture2D.ArraySlice = i;
-      if (FAILED(video_device_->CreateVideoDecoderOutputView(dpb_texture_.Get(), &view_desc, &slots_[i].view))) return OM_CODEC_HWACCEL_FAILED;
-    }
-
-    output_format_ = {static_cast<OMPixelFormat>(texture_desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12), width_, height_};
+    output_format_.width = width_;
+    output_format_.height = height_;
     if (h264_.has_sps) {
       for (uint32_t i = 0; i < 32; ++i) {
         if (!h264_.sps_valid[i]) continue;
@@ -602,6 +539,73 @@ public:
   }
 
 private:
+  auto createDecoderResources(uint8_t bit_depth) -> bool {
+    decoder_.Reset();
+    dpb_texture_.Reset();
+    slots_.clear();
+
+    GUID target_profile = (codec_id_ == OM_CODEC_H264) ? D3D11_DECODER_PROFILE_H264_VLD_NOFGT :
+                          (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10 : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
+    bool profile_supported = false;
+    const UINT profile_count = video_device_->GetVideoDecoderProfileCount();
+    for (UINT i = 0; i < profile_count; ++i) {
+      GUID profile = {};
+      if (SUCCEEDED(video_device_->GetVideoDecoderProfile(i, &profile)) && profile == target_profile) {
+        profile_supported = true;
+        break;
+      }
+    }
+    if (!profile_supported) return false;
+
+    D3D11_VIDEO_DECODER_DESC decoder_desc = {};
+    decoder_desc.Guid = target_profile;
+    decoder_desc.SampleWidth = padded_width_;
+    decoder_desc.SampleHeight = padded_height_;
+    decoder_desc.OutputFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+
+    UINT config_count = 0;
+    if (FAILED(video_device_->GetVideoDecoderConfigCount(&decoder_desc, &config_count)) || config_count == 0) return false;
+    bool found_config = false;
+    for (UINT i = 0; i < config_count; ++i) {
+      D3D11_VIDEO_DECODER_CONFIG config = {};
+      if (FAILED(video_device_->GetVideoDecoderConfig(&decoder_desc, i, &config))) continue;
+      const UINT expected_raw = (codec_id_ == OM_CODEC_H264) ? 2u : 1u;
+      if (config.guidConfigBitstreamEncryption == DXVA_NO_ENCRYPT &&
+          config.guidConfigMBcontrolEncryption == DXVA_NO_ENCRYPT &&
+          config.guidConfigResidDiffEncryption == DXVA_NO_ENCRYPT &&
+          config.ConfigBitstreamRaw == expected_raw) {
+        decoder_config_ = config;
+        found_config = true;
+        break;
+      }
+    }
+    if (!found_config) return false;
+    if (FAILED(video_device_->CreateVideoDecoder(&decoder_desc, &decoder_config_, &decoder_))) return false;
+
+    D3D11_TEXTURE2D_DESC texture_desc = {};
+    texture_desc.Width = padded_width_;
+    texture_desc.Height = padded_height_;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = dpb_slot_count_;
+    texture_desc.Format = decoder_desc.OutputFormat;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.Usage = D3D11_USAGE_DEFAULT;
+    texture_desc.BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&texture_desc, nullptr, &dpb_texture_))) return false;
+
+    slots_.resize(dpb_slot_count_);
+    for (uint32_t i = 0; i < dpb_slot_count_; ++i) {
+      D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC view_desc = {};
+      view_desc.DecodeProfile = target_profile;
+      view_desc.ViewDimension = D3D11_VDOV_DIMENSION_TEXTURE2D;
+      view_desc.Texture2D.ArraySlice = i;
+      if (FAILED(video_device_->CreateVideoDecoderOutputView(dpb_texture_.Get(), &view_desc, &slots_[i].view))) return false;
+    }
+
+    output_format_.format = static_cast<OMPixelFormat>(texture_desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
+    return true;
+  }
+
   auto decodeH265(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
     if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
     auto frames = h265_->parse(packet.bytes, true);
@@ -618,6 +622,19 @@ private:
       const auto& sps = h265_->sps(pps.sps_id);
       if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return Err(OM_CODEC_NOT_SUPPORTED);
 
+      const uint8_t bit_depth = static_cast<uint8_t>(sps.bit_depth_luma_minus8 + 8);
+      const OMPixelFormat expected_format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+      if (output_format_.format != expected_format) {
+        padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
+        padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
+        dpb_slot_count_ = 16;
+        reference_usage_.clear();
+        next_ref_ = 0;
+        next_slot_ = 0;
+        h265_poc_.reset();
+        if (!createDecoderResources(bit_depth)) return Err(OM_CODEC_HWACCEL_FAILED);
+      }
+
       const int32_t poc = h265_poc_.compute(sps, parsed, sh);
       if (dx_h265::isIrap(parsed.nal_unit_type)) {
         for (auto& slot : slots_) slot.dpb.is_reference = false;
@@ -633,11 +650,44 @@ private:
 
       DXVA_PicParams_HEVC pic_params = {};
       dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb, feedback_++, pic_params);
-      const auto slice_data = dx_h265::buildSliceData(parsed);
+      const auto slice_data = dx_h265::appendBitstreamAndSliceDataWithStartCode(parsed);
       if (slice_data.bitstream.empty() || slice_data.slices.empty()) return Err(OM_CODEC_DECODE_FAILED);
       DXVA_Qmatrix_HEVC qmatrix = {};
       const bool submit_qmatrix = sps.scaling_list_enabled_flag;
       if (submit_qmatrix) dx_h265::fillQMatrix(sps, pps, qmatrix);
+
+      if (!h265_logged_) {
+        std::fprintf(stderr,
+                     "[dx11_h265] nal=%d ref=%d poc=%d slot=%u size=%dx%d chroma=%d bitdepth=%d/%d mincb=%u/%u slice_type=%d first_pps=%d rps_sps=%d rps_idx=%d st=%d/%d st_bits=%d num_pic_total=%d slices=%zu slice_bytes=%zu qmatrix=%d first=%02x %02x %02x %02x %02x %02x\n",
+                     parsed.nal_unit_type,
+                     parsed.is_reference ? 1 : 0,
+                     poc,
+                     current_slot,
+                     sps.pic_width_in_luma_samples,
+                     sps.pic_height_in_luma_samples,
+                     sps.chroma_format_idc,
+                     sps.bit_depth_luma_minus8 + 8,
+                     sps.bit_depth_chroma_minus8 + 8,
+                     pic_params.PicWidthInMinCbsY,
+                     pic_params.PicHeightInMinCbsY,
+                     sh.slice_type,
+                     sh.pps_id,
+                     sh.short_term_ref_pic_set_sps_flag ? 1 : 0,
+                     sh.short_term_ref_pic_set_idx,
+                     (sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set).num_negative_pics,
+                     (sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set).num_positive_pics,
+                     sh.st_rps_bits,
+                     sh.num_pic_total_curr,
+                     slice_data.slices.size(),
+                     slice_data.bitstream.size(),
+                     submit_qmatrix ? 1 : 0,
+                     slice_data.bitstream.size() > 0 ? slice_data.bitstream[0] : 0,
+                     slice_data.bitstream.size() > 1 ? slice_data.bitstream[1] : 0,
+                     slice_data.bitstream.size() > 2 ? slice_data.bitstream[2] : 0,
+                     slice_data.bitstream.size() > 3 ? slice_data.bitstream[3] : 0,
+                     slice_data.bitstream.size() > 4 ? slice_data.bitstream[4] : 0,
+                     slice_data.bitstream.size() > 5 ? slice_data.bitstream[5] : 0);
+      }
 
       HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
       if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
@@ -685,6 +735,19 @@ private:
 
       auto picture = download(current_slot);
       if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+
+      if (!h265_logged_) {
+        const auto& pic = *picture;
+        const uint8_t* y = pic.planes.getData(0);
+        const uint8_t* uv = pic.planes.getData(1);
+        std::fprintf(stderr,
+                     "[dx11_h265] output fmt=%u wh=%ux%u stride=%u/%u y=%02x %02x %02x %02x uv=%02x %02x %02x %02x\n",
+                     static_cast<unsigned>(pic.format), pic.width, pic.height,
+                     pic.planes.getLinesize(0), pic.planes.getLinesize(1),
+                     y ? y[0] : 0, y ? y[1] : 0, y ? y[2] : 0, y ? y[3] : 0,
+                     uv ? uv[0] : 0, uv ? uv[1] : 0, uv ? uv[2] : 0, uv ? uv[3] : 0);
+        h265_logged_ = true;
+      }
 
       slots_[current_slot].dpb.poc = poc;
       slots_[current_slot].dpb.frame_num = static_cast<uint32_t>(poc);
