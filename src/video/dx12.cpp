@@ -12,6 +12,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <video/parser/h265_parser.hpp>
 
 #include <mfapi.h>
 #include <mferror.h>
@@ -63,8 +64,10 @@ class DX12Decoder final : public Decoder {
   bool reference_only_ = false;
 
   dx_h264::State h264_;
+  std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
   std::vector<dx_h264::DpbEntry> dpb_;
   D3D12_RESOURCE_STATES dpb_states_[17] = {};
+  OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t padded_width_ = 0;
@@ -80,21 +83,38 @@ public:
 
   auto configure(const DecoderOptions& options) -> OMError override {
     release();
-    if (options.format.codec_id != OM_CODEC_H264) return OM_CODEC_NOT_SUPPORTED;
+    codec_id_ = options.format.codec_id;
+    if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
     if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
 
-    h264_.parseExtradata(options.extradata);
-    padded_width_ = dx_h264::alignUp(width_, 16u);
-    padded_height_ = dx_h264::alignUp(height_, 16u);
-    if (h264_.has_sps) {
-      for (uint32_t i = 0; i < 32; ++i) {
-        if (!h264_.sps_valid[i]) continue;
-        padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
-        padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-        dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 1, 2, 17);
-        break;
+    uint8_t bit_depth = 8;
+    if (codec_id_ == OM_CODEC_H264) {
+      h264_.parseExtradata(options.extradata);
+      padded_width_ = dx_h264::alignUp(width_, 16u);
+      padded_height_ = dx_h264::alignUp(height_, 16u);
+      if (h264_.has_sps) {
+        for (uint32_t i = 0; i < 32; ++i) {
+          if (!h264_.sps_valid[i]) continue;
+          padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
+          padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
+          dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 1, 2, 17);
+          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+          break;
+        }
+      }
+    } else {
+      h265_ = std::make_unique<video_parser::H265AccessUnitParser>();
+      h265_->parseExtradata(options.extradata);
+      padded_width_ = dx_h264::alignUp(width_, 32u);
+      padded_height_ = dx_h264::alignUp(height_, 32u);
+      if (h265_->hasSps()) {
+        const auto& s = h265_->sps(0);
+        padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_width_in_luma_samples), 32u);
+        padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
+        dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(s.sps_max_dec_pic_buffering_minus1[s.max_sub_layers_minus1] + 1), 2, 17);
+        bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
       }
     }
 
@@ -111,14 +131,6 @@ public:
     if (FAILED(createDecoder())) return OM_CODEC_HWACCEL_FAILED;
     if (FAILED(createResources())) return OM_CODEC_HWACCEL_FAILED;
 
-    uint8_t bit_depth = 8;
-    if (h264_.has_sps) {
-      for (uint32_t i = 0; i < 32; ++i) {
-        if (!h264_.sps_valid[i]) continue;
-        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-        break;
-      }
-    }
     output_format_ = {static_cast<OMPixelFormat>(bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12), width_, height_};
     if (h264_.has_sps) {
       for (uint32_t i = 0; i < 32; ++i) {
@@ -251,17 +263,24 @@ private:
 
   auto createDecoder() -> HRESULT {
     D3D12_VIDEO_DECODE_CONFIGURATION config = {};
-    config.DecodeProfile = D3D12_VIDEO_DECODE_PROFILE_H264;
+    config.DecodeProfile = (codec_id_ == OM_CODEC_H264) ? D3D12_VIDEO_DECODE_PROFILE_H264 : D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN;
     config.InterlaceType = D3D12_VIDEO_FRAME_CODED_INTERLACE_TYPE_NONE;
 
     D3D12_FEATURE_DATA_VIDEO_DECODE_SUPPORT support = {};
     support.Configuration = config;
     uint8_t bit_depth = 8;
-    if (h264_.has_sps) {
-      for (uint32_t i = 0; i < 32; ++i) {
-        if (!h264_.sps_valid[i]) continue;
-        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-        break;
+    if (codec_id_ == OM_CODEC_H264) {
+      if (h264_.has_sps) {
+        for (uint32_t i = 0; i < 32; ++i) {
+          if (!h264_.sps_valid[i]) continue;
+          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+          break;
+        }
+      }
+    } else {
+      if (h265_ && h265_->hasSps()) {
+        bit_depth = static_cast<uint8_t>(h265_->sps(0).bit_depth_luma_minus8 + 8);
+        if (bit_depth > 8) config.DecodeProfile = D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10;
       }
     }
     support.DecodeFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
@@ -308,11 +327,21 @@ private:
     if (FAILED(hr)) return hr;
 
     uint8_t bit_depth = 8;
-    if (h264_.has_sps) {
-      for (uint32_t i = 0; i < 32; ++i) {
-        if (!h264_.sps_valid[i]) continue;
-        bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-        break;
+    if (codec_id_ == OM_CODEC_H264) {
+      if (h264_.has_sps) {
+        for (uint32_t i = 0; i < 32; ++i) {
+          if (!h264_.sps_valid[i]) continue;
+          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+          break;
+        }
+      }
+    } else {
+      if (h265_ && h265_->hasSps()) {
+        for (int i = 0; i < 16; ++i) {
+          if (!h265_->sps(i).valid) continue;
+          bit_depth = static_cast<uint8_t>(h265_->sps(i).bit_depth_luma_minus8 + 8);
+          break;
+        }
       }
     }
     const DXGI_FORMAT fmt = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
