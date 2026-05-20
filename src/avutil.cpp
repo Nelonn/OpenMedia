@@ -116,6 +116,10 @@ auto avPixelFormatToOmPixelFormat(AVPixelFormat av_fmt) -> OMPixelFormat {
     case AV_PIX_FMT_GRAY16BE: return OM_FORMAT_GRAY16;
     case AV_PIX_FMT_P010LE:
     case AV_PIX_FMT_P010BE: return OM_FORMAT_P010;
+    case AV_PIX_FMT_P012LE:
+    case AV_PIX_FMT_P012BE: return OM_FORMAT_P012;
+    case AV_PIX_FMT_P016LE:
+    case AV_PIX_FMT_P016BE: return OM_FORMAT_P016;
     case AV_PIX_FMT_YUV420P10LE:
     case AV_PIX_FMT_YUV420P10BE: return OM_FORMAT_YUV420P10;
     case AV_PIX_FMT_YUV420P12LE:
@@ -234,6 +238,8 @@ auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat {
     case OM_FORMAT_GRAY8: return AV_PIX_FMT_GRAY8;
     case OM_FORMAT_GRAY16: return AV_PIX_FMT_GRAY16LE;
     case OM_FORMAT_P010: return AV_PIX_FMT_P010LE;
+    case OM_FORMAT_P012: return AV_PIX_FMT_P012LE;
+    case OM_FORMAT_P016: return AV_PIX_FMT_P016LE;
     case OM_FORMAT_YUV420P10: return AV_PIX_FMT_YUV420P10LE;
     case OM_FORMAT_YUV420P12: return AV_PIX_FMT_YUV420P12LE;
     case OM_FORMAT_YUV420P16: return AV_PIX_FMT_YUV420P16LE;
