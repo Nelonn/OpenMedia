@@ -11,6 +11,7 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
+#include <libavutil/mastering_display_metadata.h>
 }
 
 struct AVFrame;
@@ -49,6 +50,8 @@ public:
   PFN<void(AVDictionary**)> av_dict_free = nullptr;
   PFN<const char*(AVMediaType)> av_get_media_type_string = nullptr;
   PFN<void(void (*)(void*, int, const char*, va_list))> av_log_set_callback = nullptr;
+  PFN<AVFrameSideData*(const AVFrame*, AVFrameSideDataType)> av_frame_get_side_data = nullptr;
+  PFN<AVFrameSideData*(AVFrame*, AVFrameSideDataType, size_t)> av_frame_new_side_data = nullptr;
 
 private:
   LibAVUtil() = default;
@@ -68,7 +71,12 @@ auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries;
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat;
 
 auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat;
+auto omColorSpaceToAvColorSpace(OMColorSpace om_cs) -> AVColorSpace;
+auto omColorTransferToAvTransfer(OMTransferCharacteristic om_trc) -> AVColorTransferCharacteristic;
+auto omColorPrimariesToAvPrimaries(OMColorPrimaries om_pri) -> AVColorPrimaries;
 auto omSampleFormatToAvSampleFormat(OMSampleFormat om_fmt) -> AVSampleFormat;
+
+auto av_make_q(int num, int den) -> AVRational;
 
 template <typename T>
 struct AVDeleter {

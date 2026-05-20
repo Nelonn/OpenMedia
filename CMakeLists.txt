@@ -494,6 +494,18 @@ if (OPENMEDIA_DAV1D)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DAV1D)
 endif ()
 
+if (OPENMEDIA_VPX)
+    if (AUI_BOOT)
+        auib_import(vpx https://github.com/Nelonn/libvpx-cmake
+                VERSION 7fea06869aaf111ce3885dbe66694d9363cdd2c4)
+    elseif (NOT TARGET vpx::vpx)
+        add_subdirectory(third_party/external/vpx)
+    endif ()
+    target_link_libraries(OpenMedia PRIVATE vpx::vpx)
+    target_sources(OpenMedia PRIVATE src/video/vpx.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VPX)
+endif ()
+
 if (OPENMEDIA_OPENH264)
     target_sources(OpenMedia PRIVATE src/video/openh264.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPENH264)

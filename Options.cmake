@@ -38,7 +38,8 @@ option(OPENMEDIA_TGA "TGA" ON)
 
 # Software Video (royalty)
 option(OPENMEDIA_DAV1D "dav1d (AV1 decoder)" ON) # royalty-free
-option(OPENMEDIA_OPENH264 "OpenH264 (H264 decoder / encoder)" ON) # royalty-free if using prebuilt dll
+option(OPENMEDIA_VPX "libvpx (VP8 / VP9)" ON) # royalty-free
+option(OPENMEDIA_OPENH264 "OpenH264 (H264 Baseline)" ON) # royalty-free if using prebuilt dll
 option(OPENMEDIA_VVDEC "VVDEC (VVC decoder)" OFF)
 option(OPENMEDIA_VVENC "VVENC (VVC encoder)" OFF)
 option(OPENMEDIA_XEVD "XEVD (EVC decoder)" OFF)

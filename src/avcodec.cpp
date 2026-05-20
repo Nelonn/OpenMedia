@@ -253,7 +253,7 @@ public:
         return Err(avErrorToOmError(ret));
       }
 
-      auto frame = convertAVFrameToFrame(frame_.get());
+      auto frame = convertAVFrameToFrame(codec_ctx_->codec_type, frame_.get());
       if (frame.has_value()) {
         frames.push_back(std::move(*frame));
       }
@@ -274,7 +274,7 @@ public:
   }
 
 private:
-  auto convertAVFrameToFrame(AVFrame* av_frame) -> std::optional<Frame> {
+  static auto convertAVFrameToFrame(AVMediaType media_type, AVFrame* av_frame) -> std::optional<Frame> {
     if (!av_frame) return std::nullopt;
 
     auto& util = LibAVUtil::getInstance();
@@ -283,7 +283,7 @@ private:
     frame.pts = (av_frame->pts != AV_NOPTS_VALUE) ? static_cast<uint64_t>(av_frame->pts) : 0;
     frame.dts = (av_frame->pkt_dts != AV_NOPTS_VALUE) ? static_cast<uint64_t>(av_frame->pkt_dts) : 0;
 
-    if (codec_ctx_->codec_type == AVMEDIA_TYPE_VIDEO) {
+    if (media_type == AVMEDIA_TYPE_VIDEO) {
       // Video frame conversion
       Picture picture;
       picture.format = avPixelFormatToOmPixelFormat(static_cast<AVPixelFormat>(av_frame->format));
@@ -291,7 +291,32 @@ private:
       picture.height = static_cast<uint32_t>(av_frame->height);
       picture.color_space = avColorSpaceToOmColorSpace(av_frame->colorspace);
       picture.transfer_char = avColorTransferToOmTransfer(av_frame->color_trc);
+      picture.color_primaries = avColorPrimariesToOmPrimaries(av_frame->color_primaries);
       picture.is_keyframe = (av_frame->flags & AV_FRAME_FLAG_KEY) != 0;
+
+      // HDR metadata
+      if (auto* sd = util.av_frame_get_side_data(av_frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA)) {
+        auto* md = reinterpret_cast<AVMasteringDisplayMetadata*>(sd->data);
+        picture.mastering_display.has_value = md->has_primaries && md->has_luminance;
+        if (picture.mastering_display.has_value) {
+          for (int i = 0; i < 3; ++i) {
+            picture.mastering_display.display_primaries[i][0] = static_cast<uint16_t>(md->display_primaries[i][0].num * 50000 / md->display_primaries[i][0].den);
+            picture.mastering_display.display_primaries[i][1] = static_cast<uint16_t>(md->display_primaries[i][1].num * 50000 / md->display_primaries[i][1].den);
+          }
+          picture.mastering_display.white_point[0] = static_cast<uint16_t>(md->white_point[0].num * 50000 / md->white_point[0].den);
+          picture.mastering_display.white_point[1] = static_cast<uint16_t>(md->white_point[1].num * 50000 / md->white_point[1].den);
+          picture.mastering_display.max_display_mastering_luminance = static_cast<uint32_t>(md->max_luminance.num * 10000 / md->max_luminance.den);
+          picture.mastering_display.min_display_mastering_luminance = static_cast<uint32_t>(md->min_luminance.num * 10000 / md->min_luminance.den);
+        }
+      }
+
+      if (auto* sd = util.av_frame_get_side_data(av_frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL)) {
+        auto* cll = reinterpret_cast<AVContentLightMetadata*>(sd->data);
+        picture.content_light_level.has_value = true;
+        picture.content_light_level.max_content_light_level = static_cast<uint16_t>(cll->MaxCLL);
+        picture.content_light_level.max_pic_average_light_level = static_cast<uint16_t>(cll->MaxFALL);
+      }
+
       picture.allocate();
 
       int buffer_size = util.av_image_get_buffer_size(
@@ -318,7 +343,7 @@ private:
 
       frame.data = std::move(picture);
 
-    } else if (codec_ctx_->codec_type == AVMEDIA_TYPE_AUDIO) {
+    } else if (media_type == AVMEDIA_TYPE_AUDIO) {
       AudioSamples samples;
       samples.format.sample_format = avSampleFormatToOmSampleFormat(static_cast<AVSampleFormat>(av_frame->format));
       samples.format.sample_rate = static_cast<uint32_t>(av_frame->sample_rate);
@@ -427,6 +452,9 @@ public:
         codec_ctx_->framerate.den = options.format.video.framerate.den;
       }
       codec_ctx_->pix_fmt = omPixelFormatToAvPixelFormat(options.video_format.format);
+      codec_ctx_->colorspace = omColorSpaceToAvColorSpace(options.video_format.color_space);
+      codec_ctx_->color_trc = omColorTransferToAvTransfer(options.video_format.transfer_char);
+      codec_ctx_->color_primaries = omColorPrimariesToAvPrimaries(options.video_format.color_primaries);
     } else if (options.format.type == OM_MEDIA_AUDIO) {
       codec_ctx_->sample_rate = static_cast<int>(options.audio_format.sample_rate);
       codec_ctx_->sample_fmt = omSampleFormatToAvSampleFormat(options.audio_format.sample_format);
@@ -511,6 +539,34 @@ public:
         av_frame->width = static_cast<int>(pic.width);
         av_frame->height = static_cast<int>(pic.height);
         av_frame->pts = static_cast<int64_t>(frame.pts);
+        av_frame->colorspace = omColorSpaceToAvColorSpace(pic.color_space);
+        av_frame->color_trc = omColorTransferToAvTransfer(pic.transfer_char);
+        av_frame->color_primaries = omColorPrimariesToAvPrimaries(pic.color_primaries);
+
+        if (pic.mastering_display.has_value) {
+          if (auto* sd = util_loader.av_frame_new_side_data(av_frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA, sizeof(AVMasteringDisplayMetadata))) {
+            auto* md = reinterpret_cast<AVMasteringDisplayMetadata*>(sd->data);
+            for (int i = 0; i < 3; ++i) {
+              md->display_primaries[i][0] = av_make_q(pic.mastering_display.display_primaries[i][0], 50000);
+              md->display_primaries[i][1] = av_make_q(pic.mastering_display.display_primaries[i][1], 50000);
+            }
+            md->white_point[0] = av_make_q(pic.mastering_display.white_point[0], 50000);
+            md->white_point[1] = av_make_q(pic.mastering_display.white_point[1], 50000);
+            md->max_luminance = av_make_q(pic.mastering_display.max_display_mastering_luminance, 10000);
+            md->min_luminance = av_make_q(pic.mastering_display.min_display_mastering_luminance, 10000);
+            md->has_primaries = 1;
+            md->has_luminance = 1;
+          }
+        }
+
+        if (pic.content_light_level.has_value) {
+          if (auto* sd = util_loader.av_frame_new_side_data(av_frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL, sizeof(AVContentLightMetadata))) {
+            auto* cll = reinterpret_cast<AVContentLightMetadata*>(sd->data);
+            cll->MaxCLL = pic.content_light_level.max_content_light_level;
+            cll->MaxFALL = pic.content_light_level.max_pic_average_light_level;
+
+          }
+        }
 
         int num_planes = getNumPlanes(pic.format);
         for (int i = 0; i < num_planes && i < 4; ++i) {
