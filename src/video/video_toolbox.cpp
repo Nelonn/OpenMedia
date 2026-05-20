@@ -392,13 +392,17 @@ auto createFormatDescription(OMCodecId codec_id,
 auto makeOutputAttributes() -> CFPtr<CFDictionaryRef> {
   int32_t formats[] = {
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
   };
-  CFPtr<CFNumberRef> f8(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[0]));
-  CFPtr<CFNumberRef> f10(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[1]));
+  CFPtr<CFNumberRef> f8v(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[0]));
+  CFPtr<CFNumberRef> f8f(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[1]));
+  CFPtr<CFNumberRef> f10v(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[2]));
+  CFPtr<CFNumberRef> f10f(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[3]));
   
-  const void* values[] = { f8.get(), f10.get() };
-  CFPtr<CFArrayRef> formats_array(CFArrayCreate(kCFAllocatorDefault, values, 2, &kCFTypeArrayCallBacks));
+  const void* values[] = { f8v.get(), f8f.get(), f10v.get(), f10f.get() };
+  CFPtr<CFArrayRef> formats_array(CFArrayCreate(kCFAllocatorDefault, values, 4, &kCFTypeArrayCallBacks));
   if (!formats_array) {
     return {};
   }
@@ -639,6 +643,11 @@ public:
     Picture picture(om_format, width, height);
     picture.color_space = color_space_;
     picture.transfer_char = transfer_char_;
+    picture.color_range = OM_COLOR_RANGE_MPEG;
+    if (cv_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+        cv_format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange) {
+        picture.color_range = OM_COLOR_RANGE_JPEG;
+    }
     picture.is_keyframe = timing_ptr ? timing_ptr->is_keyframe : false;
 
     if (CVPixelBufferIsPlanar(pixel_buffer)) {
@@ -651,7 +660,7 @@ public:
         size_t bpp = getBytesPerPixel(om_format, static_cast<uint8_t>(i));
         if (i == 1) {
             if (om_format == OM_FORMAT_NV12) bpp = 2;
-            else if (om_format == OM_FORMAT_P010) bpp = 4;
+            else if (om_format == OM_FORMAT_P010 || om_format == OM_FORMAT_P012 || om_format == OM_FORMAT_P016) bpp = 4;
         }
         copyPlaneWithStride(picture.planes.data[i], picture.planes.linesize[i], src, src_stride, plane_width * bpp, plane_height);
       }
@@ -1040,8 +1049,10 @@ public:
     }
 
     OSType cv_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-    if (picture->format == OM_FORMAT_P010) {
-        cv_format = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+    if (picture->format == OM_FORMAT_NV12) {
+        cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    } else if (picture->format == OM_FORMAT_P010 || picture->format == OM_FORMAT_P012 || picture->format == OM_FORMAT_P016) {
+        cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
     }
 
     CVPixelBufferRef pixel_buffer = nullptr;
@@ -1063,7 +1074,7 @@ public:
         size_t bpp = getBytesPerPixel(picture->format, i);
         if (i == 1) {
             if (picture->format == OM_FORMAT_NV12) bpp = 2;
-            else if (picture->format == OM_FORMAT_P010) bpp = 4;
+            else if (picture->format == OM_FORMAT_P010 || picture->format == OM_FORMAT_P012 || picture->format == OM_FORMAT_P016) bpp = 4;
         }
         copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * bpp, dims.second);
     }
@@ -1222,7 +1233,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H265 = {
                      OM_PROFILE_H265_MAIN_10,
                      OM_PROFILE_H265_MAIN_STILL_PICTURE,
                      OM_PROFILE_H265_REXT},
-        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_P010}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_P010, OM_FORMAT_P012, OM_FORMAT_P016}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H265); },
     .encoder_factory = [] { return createVideoToolboxEncoder(OM_CODEC_H265); },
@@ -1259,7 +1270,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_AV1 = {
     .flags = HARDWARE,
     .caps = CodecCaps {
         .profiles = {OM_PROFILE_AV1_MAIN, OM_PROFILE_AV1_HIGH, OM_PROFILE_AV1_PROFESSIONAL},
-        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_P010}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_P010, OM_FORMAT_P012, OM_FORMAT_P016}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_AV1); },
 };

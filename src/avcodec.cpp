@@ -201,6 +201,10 @@ public:
           .format = avPixelFormatToOmPixelFormat(codec_ctx_->pix_fmt),
           .width = static_cast<uint32_t>(codec_ctx_->width),
           .height = static_cast<uint32_t>(codec_ctx_->height),
+          .color_space = avColorSpaceToOmColorSpace(codec_ctx_->colorspace),
+          .transfer_char = avColorTransferToOmTransfer(codec_ctx_->color_trc),
+          .color_primaries = avColorPrimariesToOmPrimaries(codec_ctx_->color_primaries),
+          .color_range = avColorRangeToOmRange(codec_ctx_->color_range),
       };
     } else if (info.media_type == OM_MEDIA_AUDIO) {
       auto& util = LibAVUtil::getInstance();
@@ -291,6 +295,8 @@ private:
       picture.height = static_cast<uint32_t>(av_frame->height);
       picture.color_space = avColorSpaceToOmColorSpace(av_frame->colorspace);
       picture.transfer_char = avColorTransferToOmTransfer(av_frame->color_trc);
+      picture.color_primaries = avColorPrimariesToOmPrimaries(av_frame->color_primaries);
+      picture.color_range = avColorRangeToOmRange(av_frame->color_range);
       picture.is_keyframe = (av_frame->flags & AV_FRAME_FLAG_KEY) != 0;
       picture.allocate();
 
@@ -511,6 +517,7 @@ public:
         av_frame->width = static_cast<int>(pic.width);
         av_frame->height = static_cast<int>(pic.height);
         av_frame->pts = static_cast<int64_t>(frame.pts);
+        av_frame->color_range = omColorRangeToAvRange(pic.color_range);
 
         int num_planes = getNumPlanes(pic.format);
         for (int i = 0; i < num_planes && i < 4; ++i) {

@@ -64,6 +64,8 @@ auto avPixelFormatToOmPixelFormat(AVPixelFormat av_fmt) -> OMPixelFormat;
 auto avColorSpaceToOmColorSpace(AVColorSpace av_cs) -> OMColorSpace;
 auto avColorTransferToOmTransfer(AVColorTransferCharacteristic av_trc) -> OMTransferCharacteristic;
 auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries;
+auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange;
+auto omColorRangeToAvRange(OMColorRange om_range) -> AVColorRange;
 
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat;
 

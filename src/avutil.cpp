@@ -188,7 +188,7 @@ auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries 
   }
 }
 
-/*auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange {
+auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange {
   switch (av_range) {
     case AVCOL_RANGE_MPEG: return OM_COLOR_RANGE_MPEG;
     case AVCOL_RANGE_JPEG: return OM_COLOR_RANGE_JPEG;
@@ -196,17 +196,13 @@ auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries 
   }
 }
 
-auto avChromaLocationToOmChroma(AVChromaLocation av_loc) -> OMChromaLocation {
-  switch (av_loc) {
-    case AVCHROMA_LOC_LEFT: return OM_CHROMA_LOC_LEFT;
-    case AVCHROMA_LOC_CENTER: return OM_CHROMA_LOC_CENTER;
-    case AVCHROMA_LOC_TOPLEFT: return OM_CHROMA_LOC_TOPLEFT;
-    case AVCHROMA_LOC_TOP: return OM_CHROMA_LOC_TOP;
-    case AVCHROMA_LOC_BOTTOMLEFT: return OM_CHROMA_LOC_BOTTOMLEFT;
-    case AVCHROMA_LOC_BOTTOM: return OM_CHROMA_LOC_BOTTOM;
-    default: return OM_CHROMA_LOC_UNSPECIFIED;
+auto omColorRangeToAvRange(OMColorRange om_range) -> AVColorRange {
+  switch (om_range) {
+    case OM_COLOR_RANGE_MPEG: return AVCOL_RANGE_MPEG;
+    case OM_COLOR_RANGE_JPEG: return AVCOL_RANGE_JPEG;
+    default: return AVCOL_RANGE_UNSPECIFIED;
   }
-}*/
+}
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   switch (av_fmt) {
     case AV_SAMPLE_FMT_U8:

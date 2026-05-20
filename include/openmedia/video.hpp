@@ -61,6 +61,12 @@ OM_ENUM(OMColorSpace, uint8_t) {
     OM_COLOR_SPACE_RGB = 13,
 };
 
+OM_ENUM(OMColorRange, uint8_t) {
+    OM_COLOR_RANGE_UNSPECIFIED = 0,
+    OM_COLOR_RANGE_MPEG = 1, // Limited range
+    OM_COLOR_RANGE_JPEG = 2, // Full range
+};
+
 OM_ENUM(OMTransferCharacteristic, uint8_t) {
     OM_TRANSFER_UNKNOWN = 0,
     OM_TRANSFER_BT709 = 1,
@@ -335,6 +341,7 @@ struct OPENMEDIA_ABI VideoFormat {
   OMColorSpace color_space;
   OMTransferCharacteristic transfer_char;
   OMColorPrimaries color_primaries;
+  OMColorRange color_range;
 };
 
 struct OPENMEDIA_ABI Picture {
@@ -348,6 +355,7 @@ struct OPENMEDIA_ABI Picture {
   OMColorSpace color_space;
   OMTransferCharacteristic transfer_char;
   OMColorPrimaries color_primaries;
+  OMColorRange color_range;
   
   OMMasteringDisplayMetadata mastering_display;
   OMContentLightLevel content_light_level;
@@ -355,10 +363,10 @@ struct OPENMEDIA_ABI Picture {
   PlaneSpan<4> planes;
 
   Picture() noexcept
-      : format(OM_FORMAT_NV12), width(0), height(0), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709), color_primaries(OM_PRIMARIES_BT709) {}
+      : format(OM_FORMAT_NV12), width(0), height(0), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709), color_primaries(OM_PRIMARIES_BT709), color_range(OM_COLOR_RANGE_UNSPECIFIED) {}
 
   Picture(OMPixelFormat fmt, uint32_t w, uint32_t h)
-      : format(fmt), width(w), height(h), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709), color_primaries(OM_PRIMARIES_BT709) {
+      : format(fmt), width(w), height(h), color_space(OM_COLOR_SPACE_BT709), transfer_char(OM_TRANSFER_BT709), color_primaries(OM_PRIMARIES_BT709), color_range(OM_COLOR_RANGE_UNSPECIFIED) {
     allocate();
   }
 
