@@ -394,15 +394,29 @@ auto makeOutputAttributes() -> CFPtr<CFDictionaryRef> {
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+    kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
+    kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange
   };
-  CFPtr<CFNumberRef> f8v(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[0]));
-  CFPtr<CFNumberRef> f8f(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[1]));
-  CFPtr<CFNumberRef> f10v(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[2]));
-  CFPtr<CFNumberRef> f10f(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[3]));
-  
-  const void* values[] = { f8v.get(), f8f.get(), f10v.get(), f10f.get() };
-  CFPtr<CFArrayRef> formats_array(CFArrayCreate(kCFAllocatorDefault, values, 4, &kCFTypeArrayCallBacks));
+  constexpr size_t num_formats = sizeof(formats) / sizeof(formats[0]);
+  std::vector<CFNumberRef> numbers;
+  numbers.reserve(num_formats);
+  std::vector<const void*> values;
+  values.reserve(num_formats);
+
+  for (size_t i = 0; i < num_formats; ++i) {
+    CFNumberRef num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[i]);
+    if (num) {
+      numbers.push_back(num);
+      values.push_back(num);
+    }
+  }
+
+  CFPtr<CFArrayRef> formats_array(CFArrayCreate(kCFAllocatorDefault, values.data(), values.size(), &kCFTypeArrayCallBacks));
+  for (CFNumberRef num : numbers) {
+    CFRelease(num);
+  }
+
   if (!formats_array) {
     return {};
   }
@@ -453,6 +467,10 @@ auto cvPixelFormatToOpenMedia(OSType pixel_format) noexcept -> OMPixelFormat {
     case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
     case kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
       return OM_FORMAT_P010;
+    case kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange:
+      return OM_FORMAT_YUV422P16;
+    case kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange:
+      return OM_FORMAT_YUV444P16;
     case kCVPixelFormatType_32BGRA:
       return OM_FORMAT_B8G8R8A8;
     default:
@@ -502,21 +520,6 @@ public:
                       profile_ == OM_PROFILE_H265_MAIN_4_2_2_12 ||
                       profile_ == OM_PROFILE_H265_MAIN_4_4_4_12);
     bool is_16_bit = (profile_ == OM_PROFILE_H265_REXT);
-
-    if (const auto* val = options.extra.get("pixel_format")) {
-      if (val->isString()) {
-        auto str = val->getString().value();
-        if (str == "P010" || str == "p010") { is_10_bit = true; is_12_bit = false; is_16_bit = false; }
-        else if (str == "P012" || str == "p012") { is_12_bit = true; is_10_bit = false; is_16_bit = false; }
-        else if (str == "P016" || str == "p016") { is_16_bit = true; is_10_bit = false; is_12_bit = false; }
-      } else if (val->isInt32()) {
-        auto fmt = static_cast<OMPixelFormat>(val->getInt32().value());
-        if (fmt == OM_FORMAT_P010) { is_10_bit = true; is_12_bit = false; is_16_bit = false; }
-        else if (fmt == OM_FORMAT_P012) { is_12_bit = true; is_10_bit = false; is_16_bit = false; }
-        else if (fmt == OM_FORMAT_P016) { is_16_bit = true; is_10_bit = false; is_12_bit = false; }
-      }
-    }
-
     if (is_16_bit) {
       output_format_.format = OM_FORMAT_P016;
     } else if (is_12_bit) {
@@ -687,18 +690,43 @@ public:
     picture.is_keyframe = timing_ptr ? timing_ptr->is_keyframe : false;
 
     if (CVPixelBufferIsPlanar(pixel_buffer)) {
-      const size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
-      for (size_t i = 0; i < plane_count && i < 2; ++i) {
-        const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
-        const size_t src_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
-        const size_t plane_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, i);
-        const size_t plane_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, i);
-        size_t bpp = getBytesPerPixel(om_format, static_cast<uint8_t>(i));
-        if (i == 1) {
-            if (om_format == OM_FORMAT_NV12) bpp = 2;
-            else if (om_format == OM_FORMAT_P010 || om_format == OM_FORMAT_P012 || om_format == OM_FORMAT_P016) bpp = 4;
+      if (om_format == OM_FORMAT_YUV422P16 || om_format == OM_FORMAT_YUV444P16) {
+        // Plane 0: Y
+        const auto* src_y = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
+        const size_t stride_y = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+        const size_t height_y = CVPixelBufferGetHeightOfPlane(pixel_buffer, 0);
+        const size_t width_y = CVPixelBufferGetWidthOfPlane(pixel_buffer, 0);
+        copyPlaneWithStride(picture.planes.data[0], picture.planes.linesize[0], src_y, stride_y, width_y * 2, height_y);
+
+        // Plane 1: Interleaved CbCr -> deinterleave to U (plane 1) and V (plane 2)
+        const auto* src_uv = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
+        const size_t stride_uv = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+        const size_t height_uv = CVPixelBufferGetHeightOfPlane(pixel_buffer, 1);
+        const size_t width_uv = CVPixelBufferGetWidthOfPlane(pixel_buffer, 1); // width in terms of Cb-Cr pairs
+
+        for (size_t y = 0; y < height_uv; ++y) {
+          const uint16_t* src_row = reinterpret_cast<const uint16_t*>(src_uv + y * stride_uv);
+          uint16_t* dst_u_row = reinterpret_cast<uint16_t*>(picture.planes.data[1] + y * picture.planes.linesize[1]);
+          uint16_t* dst_v_row = reinterpret_cast<uint16_t*>(picture.planes.data[2] + y * picture.planes.linesize[2]);
+          for (size_t x = 0; x < width_uv; ++x) {
+            dst_u_row[x] = src_row[2 * x];
+            dst_v_row[x] = src_row[2 * x + 1];
+          }
         }
-        copyPlaneWithStride(picture.planes.data[i], picture.planes.linesize[i], src, src_stride, plane_width * bpp, plane_height);
+      } else {
+        const size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
+        for (size_t i = 0; i < plane_count && i < 2; ++i) {
+          const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
+          const size_t src_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
+          const size_t plane_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, i);
+          const size_t plane_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, i);
+          size_t bpp = getBytesPerPixel(om_format, static_cast<uint8_t>(i));
+          if (i == 1) {
+              if (om_format == OM_FORMAT_NV12) bpp = 2;
+              else if (om_format == OM_FORMAT_P010 || om_format == OM_FORMAT_P012 || om_format == OM_FORMAT_P016) bpp = 4;
+          }
+          copyPlaneWithStride(picture.planes.data[i], picture.planes.linesize[i], src, src_stride, plane_width * bpp, plane_height);
+        }
       }
     } else {
       const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(pixel_buffer));
@@ -1043,18 +1071,12 @@ public:
                                 options.format.profile == OM_PROFILE_H265_MAIN_4_2_2_12 ||
                                 options.format.profile == OM_PROFILE_H265_MAIN_4_4_4_12 ||
                                 options.format.profile == OM_PROFILE_H265_REXT);
-      if (const auto* val = options.extra.get("pixel_format")) {
-        if (val->isString()) {
-          auto str = val->getString().value();
-          if (str == "P010" || str == "p010" || str == "P012" || str == "p012" || str == "P016" || str == "p016") {
-            is_high_bit_depth = true;
-          }
-        } else if (val->isInt32()) {
-          auto fmt = static_cast<OMPixelFormat>(val->getInt32().value());
-          if (fmt == OM_FORMAT_P010 || fmt == OM_FORMAT_P012 || fmt == OM_FORMAT_P016) {
-            is_high_bit_depth = true;
-          }
-        }
+      if (options.video_format.format == OM_FORMAT_P010 ||
+          options.video_format.format == OM_FORMAT_P012 ||
+          options.video_format.format == OM_FORMAT_P016 ||
+          options.video_format.format == OM_FORMAT_YUV422P16 ||
+          options.video_format.format == OM_FORMAT_YUV444P16) {
+        is_high_bit_depth = true;
       }
       if (is_high_bit_depth) {
         OSStatus err = VTSessionSetProperty(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel);
@@ -1118,6 +1140,10 @@ public:
         cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     } else if (picture->format == OM_FORMAT_P010 || picture->format == OM_FORMAT_P012 || picture->format == OM_FORMAT_P016) {
         cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+    } else if (picture->format == OM_FORMAT_YUV422P16) {
+        cv_format = kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange;
+    } else if (picture->format == OM_FORMAT_YUV444P16) {
+        cv_format = kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange;
     }
 
     CVPixelBufferRef pixel_buffer = nullptr;
@@ -1132,12 +1158,35 @@ public:
     }
 
     CVPixelBufferLockBaseAddress(pixel_buffer, 0);
-    for (uint32_t i = 0; i < picture->planes.count && i < 2; ++i) {
-        uint8_t* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
-        size_t dst_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
-        auto dims = picture->getPlaneDimensions(i);
-        size_t bpp = getBytesPerPixel(picture->format, i);
-        copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * bpp, dims.second);
+    if (picture->format == OM_FORMAT_YUV422P16 || picture->format == OM_FORMAT_YUV444P16) {
+        // Plane 0: Y
+        uint8_t* dst_y = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
+        size_t dst_stride_y = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+        auto dims_y = picture->getPlaneDimensions(0);
+        copyPlaneWithStride(dst_y, dst_stride_y, picture->planes.data[0], picture->planes.linesize[0], dims_y.first * 2, dims_y.second);
+
+        // Plane 1: Interleaved CbCr
+        uint8_t* dst_uv = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
+        size_t dst_stride_uv = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+        auto dims_uv = picture->getPlaneDimensions(1); // width/height of chroma plane
+
+        for (size_t y = 0; y < dims_uv.second; ++y) {
+            uint16_t* dst_row = reinterpret_cast<uint16_t*>(dst_uv + y * dst_stride_uv);
+            const uint16_t* src_u_row = reinterpret_cast<const uint16_t*>(picture->planes.data[1] + y * picture->planes.linesize[1]);
+            const uint16_t* src_v_row = reinterpret_cast<const uint16_t*>(picture->planes.data[2] + y * picture->planes.linesize[2]);
+            for (size_t x = 0; x < dims_uv.first; ++x) {
+                dst_row[2 * x] = src_u_row[x];
+                dst_row[2 * x + 1] = src_v_row[x];
+            }
+        }
+    } else {
+        for (uint32_t i = 0; i < picture->planes.count && i < 2; ++i) {
+            uint8_t* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
+            size_t dst_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
+            auto dims = picture->getPlaneDimensions(i);
+            size_t bpp = getBytesPerPixel(picture->format, i);
+            copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * bpp, dims.second);
+        }
     }
     CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
 
