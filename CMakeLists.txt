@@ -46,6 +46,8 @@ target_sources(OpenMedia PRIVATE
         include/openmedia/result.hpp
         include/openmedia/track.hpp
         include/openmedia/video.hpp
+        src/util/bit_reader.cpp
+        src/util/bit_reader.hpp
         src/util/cpp.hpp
         src/util/demuxer_base.hpp
         src/util/dynamic_loader.hpp
@@ -93,12 +95,62 @@ if (OPENMEDIA_VULKAN_VIDEO)
     target_sources(OpenMedia PRIVATE include/openmedia/hw_vulkan.h)
     target_sources(OpenMedia PRIVATE src/hw_vulkan.cpp)
     target_sources(OpenMedia PRIVATE src/hw_vulkan_priv.hpp)
-    target_sources(OpenMedia PRIVATE src/video/vulkan_video.cpp)
-    target_sources(OpenMedia PRIVATE 
-        third_party/h265bitstream/h265_stream.c
-        third_party/h265bitstream/h265_nal.c
+    target_sources(OpenMedia PRIVATE
+        src/video/vulkan_video.cpp
+        src/video/parser/h264_parser.cpp
+        src/video/parser/h264_parser.hpp
+        src/video/parser/h264_internal.hpp
+        src/video/parser/h264_nal.cpp
+        src/video/parser/h264_pps.cpp
+        src/video/parser/h264_scaling.cpp
+        src/video/parser/h264_slice.cpp
+        src/video/parser/h264_sps.cpp
+        src/video/parser/h264_types.hpp
+        src/video/parser/h264_vui.cpp
+        src/video/parser/h265_parser.cpp
+        src/video/parser/h265_parser.hpp
+        src/video/parser/vp9_parser.cpp
+        src/video/parser/vp9_parser.hpp
+        src/video/parser/av1_parser.cpp
+        src/video/parser/av1_parser.hpp
+        src/video/parser/start_code.cpp
+        src/video/parser/start_code.hpp
+        src/video/parser/start_code_ssse3.cpp
+        src/video/parser/start_code_avx2.cpp
+        src/video/parser/start_code_avx512.cpp
+        src/video/parser/start_code_neon.cpp
+        src/video/parser/start_code_sve.cpp
     )
-    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h265bitstream)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" OPENMEDIA_SYSTEM_PROCESSOR)
+    if (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(x86_64|amd64|i[3-6]86)")
+        if (MSVC)
+            set_source_files_properties(src/video/parser/start_code_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+        else ()
+            set_source_files_properties(src/video/parser/start_code_ssse3.cpp PROPERTIES COMPILE_OPTIONS "-mssse3")
+            set_source_files_properties(src/video/parser/start_code_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
+            include(CheckCXXCompilerFlag)
+            check_cxx_compiler_flag("-mavx512f -mavx512bw" OPENMEDIA_COMPILER_SUPPORTS_AVX512)
+            if (OPENMEDIA_COMPILER_SUPPORTS_AVX512)
+                set_source_files_properties(src/video/parser/start_code_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw")
+                set_source_files_properties(src/video/parser/start_code_avx512.cpp PROPERTIES COMPILE_DEFINITIONS OPENMEDIA_ENABLE_AVX512_START_CODE)
+                target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_ENABLE_AVX512_START_CODE)
+            endif ()
+        endif ()
+    elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(aarch64|arm64)")
+        if (NOT MSVC)
+            include(CheckCXXCompilerFlag)
+            check_cxx_compiler_flag("-march=armv8-a+sve" OPENMEDIA_COMPILER_SUPPORTS_SVE)
+            if (OPENMEDIA_COMPILER_SUPPORTS_SVE)
+                set_source_files_properties(src/video/parser/start_code_sve.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+sve")
+                set_source_files_properties(src/video/parser/start_code_sve.cpp PROPERTIES COMPILE_DEFINITIONS OPENMEDIA_ENABLE_SVE_START_CODE)
+                target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_ENABLE_SVE_START_CODE)
+            endif ()
+        endif ()
+    elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(^arm|armv7)")
+        if (NOT MSVC)
+            set_source_files_properties(src/video/parser/start_code_neon.cpp PROPERTIES COMPILE_OPTIONS "-mfpu=neon")
+        endif ()
+    endif ()
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VULKAN)
 endif ()
 
@@ -193,10 +245,6 @@ if (OPENMEDIA_VAAPI)
     target_sources(OpenMedia PRIVATE src/hw_vaapi_priv.hpp)
     target_sources(OpenMedia PRIVATE src/video/vaapi_loader.cpp src/video/vaapi_loader.hpp)
     target_sources(OpenMedia PRIVATE src/video/vaapi.cpp)
-    target_sources(OpenMedia PRIVATE 
-        third_party/h265bitstream/h265_stream.c
-        third_party/h265bitstream/h265_nal.c
-    )
     target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h265bitstream)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VAAPI)
 endif ()

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <functional>
 #include <openmedia/audio.hpp>
 #include <openmedia/codec_defs.h>
@@ -10,6 +11,7 @@
 #include <openmedia/result.hpp>
 #include <openmedia/track.hpp>
 #include <openmedia/video.hpp>
+#include <vector>
 #include <variant>
 
 namespace openmedia {
@@ -43,7 +45,31 @@ struct OPENMEDIA_ABI DecodingInfo {
   };
 };
 
+struct OPENMEDIA_ABI ReceivedFrame {
+  enum class Status {
+    Frame,
+    NeedInput,
+    EndOfStream,
+  };
+
+  Status status = Status::NeedInput;
+  Frame frame = {};
+
+  static auto needInput() -> ReceivedFrame { return {.status = Status::NeedInput}; }
+  static auto endOfStream() -> ReceivedFrame { return {.status = Status::EndOfStream}; }
+  static auto frameReady(Frame frame) -> ReceivedFrame { return {.status = Status::Frame, .frame = std::move(frame)}; }
+};
+
 class OPENMEDIA_ABI Decoder {
+  std::deque<Frame> pending_frames_;
+  bool end_of_stream_sent_ = false;
+
+protected:
+  void resetReceiveState() {
+    pending_frames_.clear();
+    end_of_stream_sent_ = false;
+  }
+
 public:
   virtual ~Decoder() = default;
 
@@ -51,6 +77,36 @@ public:
 
   virtual auto getInfo() -> std::optional<DecodingInfo> = 0;
 
+  virtual auto sendPacket(const Packet& packet) -> OMError {
+    if (!pending_frames_.empty()) return OM_CODEC_NEED_MORE_DATA;
+    end_of_stream_sent_ = false;
+    auto result = decode(packet);
+    if (result.isErr()) return result.unwrapErr();
+    for (auto& frame : result.unwrap()) pending_frames_.push_back(std::move(frame));
+    return OM_SUCCESS;
+  }
+
+  virtual auto sendEndOfStream() -> OMError {
+    if (!pending_frames_.empty()) return OM_CODEC_NEED_MORE_DATA;
+    end_of_stream_sent_ = true;
+    auto result = decode(Packet {});
+    if (result.isErr()) return result.unwrapErr();
+    for (auto& frame : result.unwrap()) pending_frames_.push_back(std::move(frame));
+    return OM_SUCCESS;
+  }
+
+  virtual auto receiveFrame() -> Result<ReceivedFrame, OMError> {
+    if (!pending_frames_.empty()) {
+      auto frame = std::move(pending_frames_.front());
+      pending_frames_.pop_front();
+      return Ok(ReceivedFrame::frameReady(std::move(frame)));
+    }
+    if (end_of_stream_sent_) return Ok(ReceivedFrame::endOfStream());
+    return Ok(ReceivedFrame::needInput());
+  }
+
+  // Compatibility wrapper for old one-shot decoders. New callers should use
+  // sendPacket/sendEndOfStream/receiveFrame.
   virtual auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> = 0;
 
   virtual void flush() = 0;

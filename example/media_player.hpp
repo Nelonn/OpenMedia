@@ -30,6 +30,9 @@
 #ifndef __APPLE__
 #include <openmedia/hw_vulkan.h>
 #endif
+#ifdef OPENMEDIA_VAAPI
+#include <openmedia/hw_vaapi.h>
+#endif
 #include <openmedia/io.hpp>
 #include <openmedia/video.hpp>
 #include <queue>
@@ -489,6 +492,8 @@ public:
         hw_device_ = HWDevice{HWDeviceType::DX11, ctx};
         SDL_Log("[DX11] Video acceleration enabled.");
         return true;
+#else
+        return false;
 #endif
     }
 
@@ -505,6 +510,25 @@ public:
         hw_device_ = HWDevice{HWDeviceType::DX12, ctx};
         SDL_Log("[DX12] Video acceleration enabled.");
         return true;
+#else
+        return false;
+#endif
+    }
+
+    auto enableVAAPI() -> bool {
+#ifdef OPENMEDIA_VAAPI
+        releaseHardwareDevice();
+        OMVAAPIInit init = {};
+        auto* ctx = HWVAAPIContext_create(init);
+        if (!ctx) {
+            SDL_Log("[VAAPI] HWVAAPIContext_create failed");
+            return false;
+        }
+        hw_device_ = HWDevice{HWDeviceType::VAAPI, ctx};
+        SDL_Log("[VAAPI] Video acceleration enabled.");
+        return true;
+#else
+        return false;
 #endif
     }
 
@@ -709,6 +733,7 @@ private:
 
     // Video state
     bool has_video_ = false;
+    bool video_drain_sent_ = false;
 
     // Image state
     SDL_Texture*       image_texture_ = nullptr;
@@ -745,6 +770,7 @@ private:
                     return name.starts_with("nvdec_");
             case HWDeviceType::DX11:
             case HWDeviceType::DX12:   return name.starts_with("dx12_");
+            case HWDeviceType::VAAPI:  return name.starts_with("vaapi_");
             default:                   return false;
         }
     }
@@ -755,6 +781,11 @@ private:
 #ifndef __APPLE__
                 case HWDeviceType::VULKAN:
                     HWVulkanContext_delete(static_cast<OMVulkanContext*>(hw_device_->context));
+                    break;
+#endif
+#ifdef OPENMEDIA_VAAPI
+                case HWDeviceType::VAAPI:
+                    HWVAAPIContext_delete(static_cast<OMVAAPIContext*>(hw_device_->context));
                     break;
 #endif
 #ifdef _WIN32
@@ -961,6 +992,7 @@ private:
         video_packet_queue_.reset();
         video_frame_queue_.reset();
         stop_requested_ = false;
+        video_drain_sent_ = false;
 
         // Demux thread feeds the per-stream packet queues.
         demux_thread_ = std::thread([this] { demuxLoop(); });
@@ -1028,6 +1060,11 @@ private:
             // ---- read one packet ----
             auto res = demuxer_->readPacket();
             if (res.isErr()) {
+                if (has_video_ && !video_drain_sent_) {
+                    video_drain_sent_ = true;
+                    video_packet_queue_.blockingPush(Packet {});
+                }
+
                 // EOF — wait; a seek may restart things.
                 std::unique_lock<std::mutex> lock(seek_mutex_);
                 seek_cv_.wait_for(lock, 200ms, [&] {
@@ -1053,10 +1090,19 @@ private:
             auto maybe_pkt = audio_packet_queue_.blockingPop();
             if (!maybe_pkt) break; // aborted
 
-            auto result = audio_decoder_->decode(*maybe_pkt);
-            if (result.isErr()) continue;
+            const OMError send_err = maybe_pkt->bytes.empty()
+                ? audio_decoder_->sendEndOfStream()
+                : audio_decoder_->sendPacket(*maybe_pkt);
+            if (send_err != OM_SUCCESS) continue;
 
-            for (auto& frame : result.unwrap()) {
+            while (!stop_requested_) {
+                auto result = audio_decoder_->receiveFrame();
+                if (result.isErr()) break;
+                auto received = std::move(result).unwrap();
+                if (received.status == ReceivedFrame::Status::NeedInput) break;
+                if (received.status == ReceivedFrame::Status::EndOfStream) return;
+
+                auto& frame = received.frame;
                 if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
                 const AudioSamples& s = std::get<AudioSamples>(frame.data);
                 if (s.nb_samples == 0) continue;
@@ -1117,10 +1163,19 @@ private:
             auto maybe_pkt = video_packet_queue_.blockingPop();
             if (!maybe_pkt) break; // aborted
 
-            auto result = video_decoder_->decode(*maybe_pkt);
-            if (result.isErr()) continue;
+            const OMError send_err = maybe_pkt->bytes.empty()
+                ? video_decoder_->sendEndOfStream()
+                : video_decoder_->sendPacket(*maybe_pkt);
+            if (send_err != OM_SUCCESS) continue;
 
-            for (auto& frame : result.unwrap()) {
+            while (!stop_requested_) {
+                auto result = video_decoder_->receiveFrame();
+                if (result.isErr()) break;
+                auto received = std::move(result).unwrap();
+                if (received.status == ReceivedFrame::Status::NeedInput) break;
+                if (received.status == ReceivedFrame::Status::EndOfStream) return;
+
+                auto& frame = received.frame;
                 if (!std::holds_alternative<Picture>(frame.data)) continue;
                 const Picture& pic = std::get<Picture>(frame.data);
                 if (pic.width == 0 || pic.height == 0) continue;
@@ -1173,6 +1228,26 @@ private:
                                              vf.u_plane.data(), vf.u_stride,
                                              pic.width, pic.height);
 #endif
+                  } else if (hw && hw->getType() == HWDeviceType::VAAPI) {
+#ifdef OPENMEDIA_VAAPI
+                    const auto vaapi_pic = std::static_pointer_cast<openmedia::VAAPIHardwarePicture>(hw);
+                    int bpp = (vf.bits_per_component > 8 ? 2 : 1);
+                    vf.y_stride = (pic.width * bpp + 31) & ~31;
+                    vf.u_stride = (pic.width * bpp + 31) & ~31;
+                    vf.v_stride = 0;
+                    vf.y_plane.resize(size_t(vf.y_stride) * pic.height);
+                    vf.u_plane.resize(size_t(vf.u_stride) * ((pic.height + 1) / 2));
+
+                    if (!hw_device_ || hw_device_->type != HWDeviceType::VAAPI)
+                        continue;
+
+                    if (!HWVAAPIContext_copyToHost(static_cast<OMVAAPIContext*>(hw_device_->context),
+                                                   vaapi_pic->surface(),
+                                                   vf.y_plane.data(), vf.y_stride,
+                                                   vf.u_plane.data(), vf.u_stride,
+                                                   pic.width, pic.height))
+                        continue;
+#endif
                   }
                 } else {
                   vf.y_stride = pic.planes.getLinesize(0);
@@ -1194,7 +1269,14 @@ private:
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
-                if (!video_frame_queue_.blockingPush(std::move(vf))) break;
+                if (!video_frame_queue_.blockingPush(std::move(vf))) return;
+            }
+            
+            // For hardware decoders like VideoToolbox, we might need to flush 
+            // periodically or ensure asynchronous frames are pushed out.
+            if (video_decoder_->getInfo() && video_decoder_->getInfo()->media_type == OM_MEDIA_VIDEO) {
+                // Potential flush here if needed, but blockingPop/decode should be enough 
+                // if the decoder doesn't have internal delay beyond one frame.
             }
             
             // For hardware decoders like VideoToolbox, we might need to flush 
@@ -1225,6 +1307,7 @@ private:
         audio_packet_queue_.reset();
         video_packet_queue_.reset();
         video_frame_queue_.reset();
+        video_drain_sent_ = false;
 
         // 4. Seek the demuxer.
         const double target_secs = static_cast<double>(progress) * total_duration_secs_;
@@ -1268,10 +1351,13 @@ private:
         auto res = demuxer_->readPacket();
         if (res.isErr()) return;
 
-        auto result = video_decoder_->decode(res.unwrap());
-        if (result.isErr() || result.unwrap().empty()) return;
+        if (video_decoder_->sendPacket(res.unwrap()) != OM_SUCCESS) return;
+        auto result = video_decoder_->receiveFrame();
+        if (result.isErr()) return;
+        auto received = std::move(result).unwrap();
+        if (received.status != ReceivedFrame::Status::Frame) return;
 
-        Frame& f = result.unwrap()[0];
+        Frame& f = received.frame;
         if (!std::holds_alternative<Picture>(f.data)) return;
 
         const Picture& pic = std::get<Picture>(f.data);
