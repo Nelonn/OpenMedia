@@ -243,13 +243,16 @@ public:
     }
 
     const uint32_t channels = std::max<uint32_t>(output_format_.channels, 1);
-    std::vector<int16_t> decode_buffer(static_cast<size_t>(output_frame_capacity_) * channels);
+    const size_t required_size = static_cast<size_t>(output_frame_capacity_) * channels;
+    if (decode_buffer_.size() < required_size) {
+      decode_buffer_.resize(required_size);
+    }
 
     AudioBufferList output_buffers = {};
     output_buffers.mNumberBuffers = 1;
     output_buffers.mBuffers[0].mNumberChannels = channels;
-    output_buffers.mBuffers[0].mDataByteSize = static_cast<UInt32>(decode_buffer.size() * sizeof(int16_t));
-    output_buffers.mBuffers[0].mData = decode_buffer.data();
+    output_buffers.mBuffers[0].mDataByteSize = static_cast<UInt32>(required_size * sizeof(int16_t));
+    output_buffers.mBuffers[0].mData = decode_buffer_.data();
 
     UInt32 packet_count = output_frame_capacity_;
     DecodeContext context;
@@ -273,7 +276,7 @@ public:
     AudioSamples samples(output_format_, packet_count);
     samples.bits_per_sample = output_format_.bits_per_sample;
     std::memcpy(samples.planes.data[0],
-                decode_buffer.data(),
+                decode_buffer_.data(),
                 static_cast<size_t>(packet_count) * output_format_.channels * sizeof(int16_t));
 
     Frame frame = {};
@@ -303,6 +306,7 @@ private:
     input_format_ = {};
     output_stream_description_ = {};
     magic_cookie_.clear();
+    decode_buffer_.clear();
     if (converter_) {
       AudioConverterDispose(converter_);
       converter_ = nullptr;
@@ -362,6 +366,7 @@ private:
   AudioStreamBasicDescription output_stream_description_ = {};
   AudioFormat output_format_ = {};
   std::vector<uint8_t> magic_cookie_;
+  std::vector<int16_t> decode_buffer_;
   UInt32 output_frame_capacity_ = kDefaultOutputFrames;
   bool initialized_ = false;
 };
