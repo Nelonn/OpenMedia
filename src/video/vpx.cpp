@@ -116,7 +116,10 @@ public:
 
       for (int i = 0; i < 3; ++i) {
         auto dims = pic.getPlaneDimensions(i);
-        copyPlane(pic.planes.data[i], img->planes[i], dims.first, dims.second, img->stride[i]);
+        const uint32_t row_bytes = dims.first * getBytesPerPixel(fmt, i);
+        copyPlane(pic.planes.data[i], pic.planes.linesize[i],
+                  img->planes[i], img->stride[i],
+                  row_bytes, dims.second);
       }
 
       Frame frame = {};
