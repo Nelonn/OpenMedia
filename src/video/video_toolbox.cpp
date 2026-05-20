@@ -493,7 +493,39 @@ public:
     transfer_char_ = options.format.video.transfer_char;
     output_format_.width = options.format.video.width;
     output_format_.height = options.format.video.height;
-    output_format_.format = OM_FORMAT_NV12;
+    bool is_10_bit = (profile_ == OM_PROFILE_H265_MAIN_10 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_2_2_10 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_4_4_10 ||
+                      profile_ == OM_PROFILE_AV1_HIGH ||
+                      profile_ == OM_PROFILE_AV1_PROFESSIONAL);
+    bool is_12_bit = (profile_ == OM_PROFILE_H265_MAIN_12 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_2_2_12 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_4_4_12);
+    bool is_16_bit = (profile_ == OM_PROFILE_H265_REXT);
+
+    if (const auto* val = options.extra.get("pixel_format")) {
+      if (val->isString()) {
+        auto str = val->getString().value();
+        if (str == "P010" || str == "p010") { is_10_bit = true; is_12_bit = false; is_16_bit = false; }
+        else if (str == "P012" || str == "p012") { is_12_bit = true; is_10_bit = false; is_16_bit = false; }
+        else if (str == "P016" || str == "p016") { is_16_bit = true; is_10_bit = false; is_12_bit = false; }
+      } else if (val->isInt32()) {
+        auto fmt = static_cast<OMPixelFormat>(val->getInt32().value());
+        if (fmt == OM_FORMAT_P010) { is_10_bit = true; is_12_bit = false; is_16_bit = false; }
+        else if (fmt == OM_FORMAT_P012) { is_12_bit = true; is_10_bit = false; is_16_bit = false; }
+        else if (fmt == OM_FORMAT_P016) { is_16_bit = true; is_10_bit = false; is_12_bit = false; }
+      }
+    }
+
+    if (is_16_bit) {
+      output_format_.format = OM_FORMAT_P016;
+    } else if (is_12_bit) {
+      output_format_.format = OM_FORMAT_P012;
+    } else if (is_10_bit) {
+      output_format_.format = OM_FORMAT_P010;
+    } else {
+      output_format_.format = OM_FORMAT_NV12;
+    }
     timescale_ = (options.time_base.num > 0 && options.time_base.den > 0)
                      ? options.time_base.den
                      : kDefaultTimeScale;
@@ -629,8 +661,8 @@ public:
 
     auto pixel_buffer = static_cast<CVPixelBufferRef>(image_buffer);
     const OSType cv_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
-    const OMPixelFormat om_format = cvPixelFormatToOpenMedia(cv_format);
-    if (om_format == OM_FORMAT_UNKNOWN) {
+    const OMPixelFormat cv_om_format = cvPixelFormatToOpenMedia(cv_format);
+    if (cv_om_format == OM_FORMAT_UNKNOWN) {
       return;
     }
 
@@ -638,6 +670,10 @@ public:
     const auto width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
     const auto height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
     
+    OMPixelFormat om_format = cv_om_format;
+    if (cv_om_format == OM_FORMAT_P010 && (output_format_.format == OM_FORMAT_P012 || output_format_.format == OM_FORMAT_P016)) {
+      om_format = output_format_.format;
+    }
     output_format_.format = om_format;
 
     Picture picture(om_format, width, height);
@@ -999,6 +1035,35 @@ public:
         return OM_CODEC_OPEN_FAILED;
     }
 
+    if (codec_id_ == OM_CODEC_H265) {
+      bool is_high_bit_depth = (options.format.profile == OM_PROFILE_H265_MAIN_10 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_2_2_10 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_4_4_10 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_12 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_2_2_12 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_4_4_12 ||
+                                options.format.profile == OM_PROFILE_H265_REXT);
+      if (const auto* val = options.extra.get("pixel_format")) {
+        if (val->isString()) {
+          auto str = val->getString().value();
+          if (str == "P010" || str == "p010" || str == "P012" || str == "p012" || str == "P016" || str == "p016") {
+            is_high_bit_depth = true;
+          }
+        } else if (val->isInt32()) {
+          auto fmt = static_cast<OMPixelFormat>(val->getInt32().value());
+          if (fmt == OM_FORMAT_P010 || fmt == OM_FORMAT_P012 || fmt == OM_FORMAT_P016) {
+            is_high_bit_depth = true;
+          }
+        }
+      }
+      if (is_high_bit_depth) {
+        OSStatus err = VTSessionSetProperty(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel);
+        if (err != noErr) {
+          log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, std::format("Failed to set HEVC Main 10 profile: {}", static_cast<int32_t>(err)));
+        }
+      }
+    }
+
     callback_context_.codec_id = codec_id_;
     callback_context_.timescale = timescale_;
 
@@ -1072,10 +1137,6 @@ public:
         size_t dst_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
         auto dims = picture->getPlaneDimensions(i);
         size_t bpp = getBytesPerPixel(picture->format, i);
-        if (i == 1) {
-            if (picture->format == OM_FORMAT_NV12) bpp = 2;
-            else if (picture->format == OM_FORMAT_P010 || picture->format == OM_FORMAT_P012 || picture->format == OM_FORMAT_P016) bpp = 4;
-        }
         copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * bpp, dims.second);
     }
     CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
