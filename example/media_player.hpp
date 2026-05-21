@@ -1278,6 +1278,13 @@ private:
                 // Potential flush here if needed, but blockingPop/decode should be enough 
                 // if the decoder doesn't have internal delay beyond one frame.
             }
+            
+            // For hardware decoders like VideoToolbox, we might need to flush 
+            // periodically or ensure asynchronous frames are pushed out.
+            if (video_decoder_->getInfo() && video_decoder_->getInfo()->media_type == OM_MEDIA_VIDEO) {
+                // Potential flush here if needed, but blockingPop/decode should be enough 
+                // if the decoder doesn't have internal delay beyond one frame.
+            }
         }
     }
 

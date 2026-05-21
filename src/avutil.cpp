@@ -116,6 +116,10 @@ auto avPixelFormatToOmPixelFormat(AVPixelFormat av_fmt) -> OMPixelFormat {
     case AV_PIX_FMT_GRAY16BE: return OM_FORMAT_GRAY16;
     case AV_PIX_FMT_P010LE:
     case AV_PIX_FMT_P010BE: return OM_FORMAT_P010;
+    case AV_PIX_FMT_P012LE:
+    case AV_PIX_FMT_P012BE: return OM_FORMAT_P012;
+    case AV_PIX_FMT_P016LE:
+    case AV_PIX_FMT_P016BE: return OM_FORMAT_P016;
     case AV_PIX_FMT_YUV420P10LE:
     case AV_PIX_FMT_YUV420P10BE: return OM_FORMAT_YUV420P10;
     case AV_PIX_FMT_YUV420P12LE:
@@ -188,7 +192,7 @@ auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries 
   }
 }
 
-/*auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange {
+auto avColorRangeToOmRange(AVColorRange av_range) -> OMColorRange {
   switch (av_range) {
     case AVCOL_RANGE_MPEG: return OM_COLOR_RANGE_MPEG;
     case AVCOL_RANGE_JPEG: return OM_COLOR_RANGE_JPEG;
@@ -196,17 +200,13 @@ auto avColorPrimariesToOmPrimaries(AVColorPrimaries av_pri) -> OMColorPrimaries 
   }
 }
 
-auto avChromaLocationToOmChroma(AVChromaLocation av_loc) -> OMChromaLocation {
-  switch (av_loc) {
-    case AVCHROMA_LOC_LEFT: return OM_CHROMA_LOC_LEFT;
-    case AVCHROMA_LOC_CENTER: return OM_CHROMA_LOC_CENTER;
-    case AVCHROMA_LOC_TOPLEFT: return OM_CHROMA_LOC_TOPLEFT;
-    case AVCHROMA_LOC_TOP: return OM_CHROMA_LOC_TOP;
-    case AVCHROMA_LOC_BOTTOMLEFT: return OM_CHROMA_LOC_BOTTOMLEFT;
-    case AVCHROMA_LOC_BOTTOM: return OM_CHROMA_LOC_BOTTOM;
-    default: return OM_CHROMA_LOC_UNSPECIFIED;
+auto omColorRangeToAvRange(OMColorRange om_range) -> AVColorRange {
+  switch (om_range) {
+    case OM_COLOR_RANGE_MPEG: return AVCOL_RANGE_MPEG;
+    case OM_COLOR_RANGE_JPEG: return AVCOL_RANGE_JPEG;
+    default: return AVCOL_RANGE_UNSPECIFIED;
   }
-}*/
+}
 auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   switch (av_fmt) {
     case AV_SAMPLE_FMT_U8:
@@ -238,6 +238,8 @@ auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat {
     case OM_FORMAT_GRAY8: return AV_PIX_FMT_GRAY8;
     case OM_FORMAT_GRAY16: return AV_PIX_FMT_GRAY16LE;
     case OM_FORMAT_P010: return AV_PIX_FMT_P010LE;
+    case OM_FORMAT_P012: return AV_PIX_FMT_P012LE;
+    case OM_FORMAT_P016: return AV_PIX_FMT_P016LE;
     case OM_FORMAT_YUV420P10: return AV_PIX_FMT_YUV420P10LE;
     case OM_FORMAT_YUV420P12: return AV_PIX_FMT_YUV420P12LE;
     case OM_FORMAT_YUV420P16: return AV_PIX_FMT_YUV420P16LE;

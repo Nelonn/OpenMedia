@@ -390,19 +390,42 @@ auto createFormatDescription(OMCodecId codec_id,
 }
 
 auto makeOutputAttributes() -> CFPtr<CFDictionaryRef> {
-  int32_t pixel_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-  CFPtr<CFNumberRef> pixel_format_number(CFNumberCreate(kCFAllocatorDefault,
-                                                        kCFNumberSInt32Type,
-                                                        &pixel_format));
-  if (!pixel_format_number) {
+  int32_t formats[] = {
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+    kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
+    kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange
+  };
+  constexpr size_t num_formats = sizeof(formats) / sizeof(formats[0]);
+  std::vector<CFNumberRef> numbers;
+  numbers.reserve(num_formats);
+  std::vector<const void*> values;
+  values.reserve(num_formats);
+
+  for (size_t i = 0; i < num_formats; ++i) {
+    CFNumberRef num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &formats[i]);
+    if (num) {
+      numbers.push_back(num);
+      values.push_back(num);
+    }
+  }
+
+  CFPtr<CFArrayRef> formats_array(CFArrayCreate(kCFAllocatorDefault, values.data(), values.size(), &kCFTypeArrayCallBacks));
+  for (CFNumberRef num : numbers) {
+    CFRelease(num);
+  }
+
+  if (!formats_array) {
     return {};
   }
 
   CFTypeRef keys[] = {kCVPixelBufferPixelFormatTypeKey};
-  CFTypeRef values[] = {pixel_format_number.get()};
+  CFTypeRef array_val[] = {formats_array.get()};
   return CFPtr<CFDictionaryRef>(CFDictionaryCreate(kCFAllocatorDefault,
                                                    keys,
-                                                   values,
+                                                   array_val,
                                                    1,
                                                    &kCFTypeDictionaryKeyCallBacks,
                                                    &kCFTypeDictionaryValueCallBacks));
@@ -441,6 +464,13 @@ auto cvPixelFormatToOpenMedia(OSType pixel_format) noexcept -> OMPixelFormat {
     case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
     case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
       return OM_FORMAT_NV12;
+    case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
+    case kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
+      return OM_FORMAT_P010;
+    case kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange:
+      return OM_FORMAT_YUV422P16;
+    case kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange:
+      return OM_FORMAT_YUV444P16;
     case kCVPixelFormatType_32BGRA:
       return OM_FORMAT_B8G8R8A8;
     default:
@@ -481,7 +511,24 @@ public:
     transfer_char_ = options.format.video.transfer_char;
     output_format_.width = options.format.video.width;
     output_format_.height = options.format.video.height;
-    output_format_.format = OM_FORMAT_NV12;
+    bool is_10_bit = (profile_ == OM_PROFILE_H265_MAIN_10 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_2_2_10 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_4_4_10 ||
+                      profile_ == OM_PROFILE_AV1_HIGH ||
+                      profile_ == OM_PROFILE_AV1_PROFESSIONAL);
+    bool is_12_bit = (profile_ == OM_PROFILE_H265_MAIN_12 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_2_2_12 ||
+                      profile_ == OM_PROFILE_H265_MAIN_4_4_4_12);
+    bool is_16_bit = (profile_ == OM_PROFILE_H265_REXT);
+    if (is_16_bit) {
+      output_format_.format = OM_FORMAT_P016;
+    } else if (is_12_bit) {
+      output_format_.format = OM_FORMAT_P012;
+    } else if (is_10_bit) {
+      output_format_.format = OM_FORMAT_P010;
+    } else {
+      output_format_.format = OM_FORMAT_NV12;
+    }
     timescale_ = (options.time_base.num > 0 && options.time_base.den > 0)
                      ? options.time_base.den
                      : kDefaultTimeScale;
@@ -617,8 +664,8 @@ public:
 
     auto pixel_buffer = static_cast<CVPixelBufferRef>(image_buffer);
     const OSType cv_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
-    const OMPixelFormat om_format = cvPixelFormatToOpenMedia(cv_format);
-    if (om_format == OM_FORMAT_UNKNOWN) {
+    const OMPixelFormat cv_om_format = cvPixelFormatToOpenMedia(cv_format);
+    if (cv_om_format == OM_FORMAT_UNKNOWN) {
       return;
     }
 
@@ -626,20 +673,60 @@ public:
     const auto width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
     const auto height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
     
+    OMPixelFormat om_format = cv_om_format;
+    if (cv_om_format == OM_FORMAT_P010 && (output_format_.format == OM_FORMAT_P012 || output_format_.format == OM_FORMAT_P016)) {
+      om_format = output_format_.format;
+    }
+    output_format_.format = om_format;
+
     Picture picture(om_format, width, height);
     picture.color_space = color_space_;
     picture.transfer_char = transfer_char_;
+    picture.color_range = OM_COLOR_RANGE_MPEG;
+    if (cv_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+        cv_format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange) {
+        picture.color_range = OM_COLOR_RANGE_JPEG;
+    }
     picture.is_keyframe = timing_ptr ? timing_ptr->is_keyframe : false;
 
     if (CVPixelBufferIsPlanar(pixel_buffer)) {
-      const size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
-      for (size_t i = 0; i < plane_count && i < 2; ++i) {
-        const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
-        const size_t src_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
-        const size_t plane_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, i);
-        const size_t plane_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, i);
-        size_t bpp = (om_format == OM_FORMAT_NV12 && i == 1) ? 2 : getBytesPerPixel(om_format, static_cast<uint8_t>(i));
-        copyPlaneWithStride(picture.planes.data[i], picture.planes.linesize[i], src, src_stride, plane_width * bpp, plane_height);
+      if (om_format == OM_FORMAT_YUV422P16 || om_format == OM_FORMAT_YUV444P16) {
+        // Plane 0: Y
+        const auto* src_y = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
+        const size_t stride_y = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+        const size_t height_y = CVPixelBufferGetHeightOfPlane(pixel_buffer, 0);
+        const size_t width_y = CVPixelBufferGetWidthOfPlane(pixel_buffer, 0);
+        copyPlaneWithStride(picture.planes.data[0], picture.planes.linesize[0], src_y, stride_y, width_y * 2, height_y);
+
+        // Plane 1: Interleaved CbCr -> deinterleave to U (plane 1) and V (plane 2)
+        const auto* src_uv = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
+        const size_t stride_uv = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+        const size_t height_uv = CVPixelBufferGetHeightOfPlane(pixel_buffer, 1);
+        const size_t width_uv = CVPixelBufferGetWidthOfPlane(pixel_buffer, 1); // width in terms of Cb-Cr pairs
+
+        for (size_t y = 0; y < height_uv; ++y) {
+          const uint16_t* src_row = reinterpret_cast<const uint16_t*>(src_uv + y * stride_uv);
+          uint16_t* dst_u_row = reinterpret_cast<uint16_t*>(picture.planes.data[1] + y * picture.planes.linesize[1]);
+          uint16_t* dst_v_row = reinterpret_cast<uint16_t*>(picture.planes.data[2] + y * picture.planes.linesize[2]);
+          for (size_t x = 0; x < width_uv; ++x) {
+            dst_u_row[x] = src_row[2 * x];
+            dst_v_row[x] = src_row[2 * x + 1];
+          }
+        }
+      } else {
+        const size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
+        for (size_t i = 0; i < plane_count && i < 2; ++i) {
+          const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
+          const size_t src_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
+          const size_t plane_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, i);
+          const size_t plane_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, i);
+          size_t bpp = getBytesPerPixel(om_format, static_cast<uint8_t>(i));
+          if (i == 1) {
+              if (om_format == OM_FORMAT_NV12) bpp = 2;
+              else if (om_format == OM_FORMAT_P010 || om_format == OM_FORMAT_P012 || om_format == OM_FORMAT_P016) bpp = 4;
+          }
+          copyPlaneWithStride(picture.planes.data[i], picture.planes.linesize[i], src, src_stride, plane_width * bpp, plane_height);
+        }
       }
     } else {
       const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(pixel_buffer));
@@ -871,6 +958,7 @@ auto hevcCMSampleBufferToAnnexB(CMSampleBufferRef hvcc_sample_buffer, bool is_ke
 }
 
 struct EncoderCallbackContext {
+  std::mutex mutex;
   std::vector<Packet> packets;
   std::vector<uint8_t> extradata;
   OMCodecId codec_id;
@@ -887,16 +975,19 @@ void compressionCallback(void* compression_output_ref_con,
     return;
   }
 
-  if (context->extradata.empty()) {
-      CMVideoFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sample_buffer);
-      if (desc) {
-          CFDictionaryRef extensions = CMFormatDescriptionGetExtensions(desc);
-          if (extensions) {
-              CFDataRef atom = static_cast<CFDataRef>(CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms));
-              if (atom) {
-                  const uint8_t* data = CFDataGetBytePtr(atom);
-                  CFIndex size = CFDataGetLength(atom);
-                  context->extradata.assign(data, data + size);
+  {
+      std::lock_guard<std::mutex> lock(context->mutex);
+      if (context->extradata.empty()) {
+          CMVideoFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sample_buffer);
+          if (desc) {
+              CFDictionaryRef extensions = CMFormatDescriptionGetExtensions(desc);
+              if (extensions) {
+                  CFDataRef atom = static_cast<CFDataRef>(CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms));
+                  if (atom) {
+                      const uint8_t* data = CFDataGetBytePtr(atom);
+                      CFIndex size = CFDataGetLength(atom);
+                      context->extradata.assign(data, data + size);
+                  }
               }
           }
       }
@@ -933,6 +1024,7 @@ void compressionCallback(void* compression_output_ref_con,
     packet.pts = static_cast<int64_t>(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample_buffer)) * context->timescale);
     packet.dts = static_cast<int64_t>(CMTimeGetSeconds(CMSampleBufferGetDecodeTimeStamp(sample_buffer)) * context->timescale);
     packet.is_keyframe = is_keyframe;
+    std::lock_guard<std::mutex> lock(context->mutex);
     context->packets.push_back(std::move(packet));
   }
 }
@@ -971,6 +1063,29 @@ public:
         return OM_CODEC_OPEN_FAILED;
     }
 
+    if (codec_id_ == OM_CODEC_H265) {
+      bool is_high_bit_depth = (options.format.profile == OM_PROFILE_H265_MAIN_10 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_2_2_10 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_4_4_10 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_12 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_2_2_12 ||
+                                options.format.profile == OM_PROFILE_H265_MAIN_4_4_4_12 ||
+                                options.format.profile == OM_PROFILE_H265_REXT);
+      if (options.video_format.format == OM_FORMAT_P010 ||
+          options.video_format.format == OM_FORMAT_P012 ||
+          options.video_format.format == OM_FORMAT_P016 ||
+          options.video_format.format == OM_FORMAT_YUV422P16 ||
+          options.video_format.format == OM_FORMAT_YUV444P16) {
+        is_high_bit_depth = true;
+      }
+      if (is_high_bit_depth) {
+        OSStatus err = VTSessionSetProperty(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel);
+        if (err != noErr) {
+          log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, std::format("Failed to set HEVC Main 10 profile: {}", static_cast<int32_t>(err)));
+        }
+      }
+    }
+
     callback_context_.codec_id = codec_id_;
     callback_context_.timescale = timescale_;
 
@@ -984,6 +1099,14 @@ public:
 
   auto getInfo() -> EncodingInfo override {
     EncodingInfo info = {};
+    std::vector<uint8_t> extra;
+    {
+        std::lock_guard<std::mutex> lock(callback_context_.mutex);
+        extra = callback_context_.extradata;
+    }
+    if (extradata_.empty() && !extra.empty()) {
+        extradata_ = std::move(extra);
+    }
     info.extradata = extradata_;
     return info;
   }
@@ -993,16 +1116,41 @@ public:
       return Err(OM_COMMON_NOT_INITIALIZED);
     }
 
+    if (frame.data.valueless_by_exception()) {
+        OSStatus status = VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
+        if (status != noErr) {
+            return Err(OM_CODEC_ENCODE_FAILED);
+        }
+        std::vector<Packet> packets;
+        {
+            std::lock_guard<std::mutex> lock(callback_context_.mutex);
+            packets = std::move(callback_context_.packets);
+            callback_context_.packets.clear();
+        }
+        return Ok(std::move(packets));
+    }
+
     const auto* picture = std::get_if<Picture>(&frame.data);
     if (!picture) {
       return Err(OM_CODEC_INVALID_PARAMS);
+    }
+
+    OSType cv_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    if (picture->format == OM_FORMAT_NV12) {
+        cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    } else if (picture->format == OM_FORMAT_P010 || picture->format == OM_FORMAT_P012 || picture->format == OM_FORMAT_P016) {
+        cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+    } else if (picture->format == OM_FORMAT_YUV422P16) {
+        cv_format = kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange;
+    } else if (picture->format == OM_FORMAT_YUV444P16) {
+        cv_format = kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange;
     }
 
     CVPixelBufferRef pixel_buffer = nullptr;
     OSStatus status = CVPixelBufferCreate(kCFAllocatorDefault,
                                           picture->width,
                                           picture->height,
-                                          kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                          cv_format,
                                           nullptr,
                                           &pixel_buffer);
     if (status != noErr || !pixel_buffer) {
@@ -1010,17 +1158,46 @@ public:
     }
 
     CVPixelBufferLockBaseAddress(pixel_buffer, 0);
-    for (uint32_t i = 0; i < picture->planes.count && i < 2; ++i) {
-        uint8_t* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
-        size_t dst_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
-        auto dims = picture->getPlaneDimensions(i);
-        copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * getBytesPerPixel(picture->format, i), dims.second);
+    if (picture->format == OM_FORMAT_YUV422P16 || picture->format == OM_FORMAT_YUV444P16) {
+        // Plane 0: Y
+        uint8_t* dst_y = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0));
+        size_t dst_stride_y = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+        auto dims_y = picture->getPlaneDimensions(0);
+        copyPlaneWithStride(dst_y, dst_stride_y, picture->planes.data[0], picture->planes.linesize[0], dims_y.first * 2, dims_y.second);
+
+        // Plane 1: Interleaved CbCr
+        uint8_t* dst_uv = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1));
+        size_t dst_stride_uv = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+        auto dims_uv = picture->getPlaneDimensions(1); // width/height of chroma plane
+
+        for (size_t y = 0; y < dims_uv.second; ++y) {
+            uint16_t* dst_row = reinterpret_cast<uint16_t*>(dst_uv + y * dst_stride_uv);
+            const uint16_t* src_u_row = reinterpret_cast<const uint16_t*>(picture->planes.data[1] + y * picture->planes.linesize[1]);
+            const uint16_t* src_v_row = reinterpret_cast<const uint16_t*>(picture->planes.data[2] + y * picture->planes.linesize[2]);
+            for (size_t x = 0; x < dims_uv.first; ++x) {
+                dst_row[2 * x] = src_u_row[x];
+                dst_row[2 * x + 1] = src_v_row[x];
+            }
+        }
+    } else {
+        for (uint32_t i = 0; i < picture->planes.count && i < 2; ++i) {
+            uint8_t* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i));
+            size_t dst_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i);
+            auto dims = picture->getPlaneDimensions(i);
+            size_t bpp = getBytesPerPixel(picture->format, i);
+            copyPlaneWithStride(dst, dst_stride, picture->planes.data[i], picture->planes.linesize[i], dims.first * bpp, dims.second);
+        }
     }
     CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
 
     CMTime pts = CMTimeMake(frame.pts, timescale_);
     
-    callback_context_.packets.clear();
+    std::vector<Packet> packets;
+    {
+        std::lock_guard<std::mutex> lock(callback_context_.mutex);
+        callback_context_.packets.clear();
+    }
+    
     status = VTCompressionSessionEncodeFrame(session_, pixel_buffer, pts, kCMTimeInvalid, nullptr, nullptr, nullptr);
     CFRelease(pixel_buffer);
 
@@ -1028,13 +1205,22 @@ public:
         return Err(OM_CODEC_ENCODE_FAILED);
     }
 
-    VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
-
-    if (extradata_.empty() && !callback_context_.extradata.empty()) {
-        extradata_ = callback_context_.extradata;
+    {
+        std::lock_guard<std::mutex> lock(callback_context_.mutex);
+        packets = std::move(callback_context_.packets);
+        callback_context_.packets.clear();
     }
 
-    return Ok(std::move(callback_context_.packets));
+    std::vector<uint8_t> extra;
+    {
+        std::lock_guard<std::mutex> lock(callback_context_.mutex);
+        extra = callback_context_.extradata;
+    }
+    if (extradata_.empty() && !extra.empty()) {
+        extradata_ = std::move(extra);
+    }
+
+    return Ok(std::move(packets));
   }
 
   auto updateBitrate(const RateControlParams& rc) -> OMError override {
@@ -1090,7 +1276,9 @@ private:
       session_ = nullptr;
     }
     extradata_.clear();
+    std::lock_guard<std::mutex> lock(callback_context_.mutex);
     callback_context_.extradata.clear();
+    callback_context_.packets.clear();
   }
 
   OMCodecId codec_id_;
@@ -1155,7 +1343,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_H265 = {
                      OM_PROFILE_H265_MAIN_10,
                      OM_PROFILE_H265_MAIN_STILL_PICTURE,
                      OM_PROFILE_H265_REXT},
-        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_P010, OM_FORMAT_P012, OM_FORMAT_P016}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_H265); },
     .encoder_factory = [] { return createVideoToolboxEncoder(OM_CODEC_H265); },
@@ -1192,7 +1380,7 @@ const CodecDescriptor CODEC_VIDEOTOOLBOX_AV1 = {
     .flags = HARDWARE,
     .caps = CodecCaps {
         .profiles = {OM_PROFILE_AV1_MAIN, OM_PROFILE_AV1_HIGH, OM_PROFILE_AV1_PROFESSIONAL},
-        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12}},
+        .video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_P010, OM_FORMAT_P012, OM_FORMAT_P016}},
     },
     .decoder_factory = [] { return createVideoToolboxDecoder(OM_CODEC_AV1); },
 };
