@@ -201,6 +201,10 @@ public:
           .format = avPixelFormatToOmPixelFormat(codec_ctx_->pix_fmt),
           .width = static_cast<uint32_t>(codec_ctx_->width),
           .height = static_cast<uint32_t>(codec_ctx_->height),
+          .color_space = avColorSpaceToOmColorSpace(codec_ctx_->colorspace),
+          .transfer_char = avColorTransferToOmTransfer(codec_ctx_->color_trc),
+          .color_primaries = avColorPrimariesToOmPrimaries(codec_ctx_->color_primaries),
+          .color_range = avColorRangeToOmRange(codec_ctx_->color_range),
       };
     } else if (info.media_type == OM_MEDIA_AUDIO) {
       auto& util = LibAVUtil::getInstance();
@@ -292,6 +296,7 @@ private:
       picture.color_space = avColorSpaceToOmColorSpace(av_frame->colorspace);
       picture.transfer_char = avColorTransferToOmTransfer(av_frame->color_trc);
       picture.color_primaries = avColorPrimariesToOmPrimaries(av_frame->color_primaries);
+      picture.color_range = avColorRangeToOmRange(av_frame->color_range);
       picture.is_keyframe = (av_frame->flags & AV_FRAME_FLAG_KEY) != 0;
 
       // HDR metadata
@@ -542,6 +547,7 @@ public:
         av_frame->colorspace = omColorSpaceToAvColorSpace(pic.color_space);
         av_frame->color_trc = omColorTransferToAvTransfer(pic.transfer_char);
         av_frame->color_primaries = omColorPrimariesToAvPrimaries(pic.color_primaries);
+        av_frame->color_range = omColorRangeToAvRange(pic.color_range);
 
         if (pic.mastering_display.has_value) {
           if (auto* sd = util_loader.av_frame_new_side_data(av_frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA, sizeof(AVMasteringDisplayMetadata))) {
