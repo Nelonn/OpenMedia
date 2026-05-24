@@ -351,7 +351,7 @@ endif ()
 if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # TODO: fix opus
     if (AUI_BOOT)
         auib_import(Opus https://github.com/aui-framework/opus
-                VERSION df980346de0b5e14dbdb922951fae21f4ea6c1c0)
+                VERSION 9f719ec0eec5bbe3b8b9a86145e71bac6f45457c)
     elseif (NOT TARGET Opus::opus)
         add_subdirectory(third_party/external/opus)
     endif ()
