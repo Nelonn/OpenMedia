@@ -351,7 +351,7 @@ endif ()
 if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # TODO: fix opus
     if (AUI_BOOT)
         auib_import(Opus https://github.com/aui-framework/opus
-                VERSION df980346de0b5e14dbdb922951fae21f4ea6c1c0)
+                VERSION 9f719ec0eec5bbe3b8b9a86145e71bac6f45457c)
     elseif (NOT TARGET Opus::opus)
         add_subdirectory(third_party/external/opus)
     endif ()
@@ -492,6 +492,18 @@ if (OPENMEDIA_DAV1D)
     target_link_libraries(OpenMedia PRIVATE dav1d::dav1d)
     target_sources(OpenMedia PRIVATE src/video/dav1d.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DAV1D)
+endif ()
+
+if (OPENMEDIA_VPX)
+    if (AUI_BOOT)
+        auib_import(vpx https://github.com/Nelonn/libvpx-cmake
+                VERSION 2216dd6647a283b794543a8257009c1ba712ef65)
+    elseif (NOT TARGET vpx::vpx)
+        add_subdirectory(third_party/external/vpx)
+    endif ()
+    target_link_libraries(OpenMedia PRIVATE vpx::vpx)
+    target_sources(OpenMedia PRIVATE src/video/vpx.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VPX)
 endif ()
 
 if (OPENMEDIA_OPENH264)

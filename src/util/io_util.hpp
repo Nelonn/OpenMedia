@@ -96,6 +96,14 @@ static void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t
   }
 }
 
+static void copyPlane(uint8_t* dst, ptrdiff_t dst_stride, const uint8_t* src, ptrdiff_t src_stride, uint32_t row_bytes, uint32_t height) {
+  for (size_t y = 0; y < height; y++) {
+    memcpy(dst, src, row_bytes);
+    dst += dst_stride;
+    src += src_stride;
+  }
+}
+
 class MemoryBitReader {
   const uint8_t* data_ = nullptr;
   size_t size_ = 0;

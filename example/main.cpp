@@ -24,7 +24,7 @@ auto enableRequestedBackend(MediaPlayer& player, std::string_view decoder) -> bo
   if (decoder.starts_with("dx12_")) return player.enableDX12();
   if (decoder.starts_with("vaapi_")) return player.enableVAAPI();
   if (decoder.starts_with("vulkan_")) return player.enableVulkan();
-  return player.enableVulkan();
+  return false;
 }
 
 } // namespace
@@ -68,16 +68,14 @@ int main(int argc, char* argv[]) {
     initial_file = argv[path_arg];
   }
 
-  if (enableRequestedBackend(player, requested_decoder)) {
-    if (!requested_decoder.empty())
+  if (!requested_decoder.empty()) {
+    if (enableRequestedBackend(player, requested_decoder)) {
       SDL_Log("[Player] %s acceleration enabled.", requested_decoder.c_str());
-    else
-      SDL_Log("[Player] Vulkan Video acceleration enabled.");
-  } else {
-    if (!requested_decoder.empty())
+    } else {
       SDL_Log("[Player] %s acceleration NOT available.", requested_decoder.c_str());
-    else
-      SDL_Log("[Player] Vulkan Video acceleration NOT available.");
+    }
+  } else {
+    SDL_Log("[Player] Software decoding selected.");
   }
 
   PlayerUI ui(player);

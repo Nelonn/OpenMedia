@@ -49,6 +49,8 @@ auto LibAVUtil::load() -> bool {
   av_dict_free = library_.getProcAddress<PFN<void(AVDictionary**)>>("av_dict_free");
   av_get_media_type_string = library_.getProcAddress<PFN<const char*(AVMediaType)>>("av_get_media_type_string");
   av_log_set_callback = library_.getProcAddress<PFN<void(void (*)(void*, int, const char*, va_list))>>("av_log_set_callback");
+  av_frame_get_side_data = library_.getProcAddress<PFN<AVFrameSideData*(const AVFrame*, AVFrameSideDataType)>>("av_frame_get_side_data");
+  av_frame_new_side_data = library_.getProcAddress<PFN<AVFrameSideData*(AVFrame*, AVFrameSideDataType, size_t)>>("av_frame_new_side_data");
 
   if (!av_malloc || !av_free || !av_frame_alloc || !av_frame_free || !av_frame_unref) {
     return false;
@@ -223,6 +225,49 @@ auto avSampleFormatToOmSampleFormat(AVSampleFormat av_fmt) -> OMSampleFormat {
   }
 }
 
+auto omColorSpaceToAvColorSpace(OMColorSpace om_cs) -> AVColorSpace {
+  switch (om_cs) {
+    case OM_COLOR_SPACE_BT709: return AVCOL_SPC_BT709;
+    case OM_COLOR_SPACE_BT601: return AVCOL_SPC_SMPTE170M;
+    case OM_COLOR_SPACE_BT2020: return AVCOL_SPC_BT2020_NCL;
+    case OM_COLOR_SPACE_SMPTE240M: return AVCOL_SPC_SMPTE240M;
+    case OM_COLOR_SPACE_RGB: return AVCOL_SPC_RGB;
+    default: return AVCOL_SPC_UNSPECIFIED;
+  }
+}
+
+auto omColorTransferToAvTransfer(OMTransferCharacteristic om_trc) -> AVColorTransferCharacteristic {
+  switch (om_trc) {
+    case OM_TRANSFER_BT709: return AVCOL_TRC_BT709;
+    case OM_TRANSFER_GAMMA22: return AVCOL_TRC_GAMMA22;
+    case OM_TRANSFER_GAMMA28: return AVCOL_TRC_GAMMA28;
+    case OM_TRANSFER_BT601: return AVCOL_TRC_SMPTE170M;
+    case OM_TRANSFER_SMPTE240M: return AVCOL_TRC_SMPTE240M;
+    case OM_TRANSFER_LINEAR: return AVCOL_TRC_LINEAR;
+    case OM_TRANSFER_SMPTE2084: return AVCOL_TRC_SMPTE2084;
+    case OM_TRANSFER_HLG: return AVCOL_TRC_ARIB_STD_B67;
+    case OM_TRANSFER_SRGB: return AVCOL_TRC_IEC61966_2_1;
+    default: return AVCOL_TRC_UNSPECIFIED;
+  }
+}
+
+auto omColorPrimariesToAvPrimaries(OMColorPrimaries om_pri) -> AVColorPrimaries {
+  switch (om_pri) {
+    case OM_PRIMARIES_BT709: return AVCOL_PRI_BT709;
+    case OM_PRIMARIES_BT470M: return AVCOL_PRI_BT470M;
+    case OM_PRIMARIES_BT470BG: return AVCOL_PRI_BT470BG;
+    case OM_PRIMARIES_BT601: return AVCOL_PRI_SMPTE170M;
+    case OM_PRIMARIES_SMPTE240M: return AVCOL_PRI_SMPTE240M;
+    case OM_PRIMARIES_FILM: return AVCOL_PRI_FILM;
+    case OM_PRIMARIES_BT2020: return AVCOL_PRI_BT2020;
+    case OM_PRIMARIES_SMPTE428: return AVCOL_PRI_SMPTE428;
+    case OM_PRIMARIES_SMPTE431: return AVCOL_PRI_SMPTE431;
+    case OM_PRIMARIES_SMPTE432: return AVCOL_PRI_SMPTE432;
+    case OM_PRIMARIES_EBU3213: return AVCOL_PRI_EBU3213;
+    default: return AVCOL_PRI_UNSPECIFIED;
+  }
+}
+
 auto omPixelFormatToAvPixelFormat(OMPixelFormat om_fmt) -> AVPixelFormat {
   switch (om_fmt) {
     case OM_FORMAT_R8G8B8A8: return AV_PIX_FMT_RGBA;
@@ -262,6 +307,10 @@ auto omSampleFormatToAvSampleFormat(OMSampleFormat om_fmt) -> AVSampleFormat {
     case OM_SAMPLE_F64: return AV_SAMPLE_FMT_DBL;
     default: return AV_SAMPLE_FMT_NONE;
   }
+}
+
+auto av_make_q(int num, int den) -> AVRational {
+  return {num, den};
 }
 
 template <>

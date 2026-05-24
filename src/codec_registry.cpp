@@ -134,6 +134,10 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #if defined(OPENMEDIA_DAV1D)
   registry->registerCodec(&CODEC_DAV1D);
 #endif
+#if defined(OPENMEDIA_VPX)
+  registry->registerCodec(&CODEC_VP8);
+  registry->registerCodec(&CODEC_VP9);
+#endif
 #if defined(OPENMEDIA_OPENH264)
   registry->registerCodec(&CODEC_OPENH264);
 #endif
@@ -163,10 +167,6 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   // decompression session on macOS. Keep VP9 on software/FFmpeg backends.
   registry->registerCodec(&CODEC_VIDEOTOOLBOX_AV1);
   registry->registerCodec(&CODEC_VIDEOTOOLBOX_PRORES);
-#endif
-
-#if defined(OPENMEDIA_AVCODEC)
-  registerFFmpegCodecs(registry);
 #endif
 
   // Video - DirectX11
@@ -235,6 +235,10 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_TGA);
   registry->registerCodec(&CODEC_BMP);
   registry->registerCodec(&CODEC_TIFF);
+
+#if defined(OPENMEDIA_AVCODEC)
+  registerFFmpegCodecs(registry);
+#endif
 }
 
 } // namespace openmedia

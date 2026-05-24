@@ -81,6 +81,8 @@ jobs:
       - name: Setup MSVC (Windows)
         if: matrix.compiler == 'MSVC' && runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Setup MinGW (Windows)
         if: matrix.compiler == 'MinGW' && runner.os == 'Windows'
