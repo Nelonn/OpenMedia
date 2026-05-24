@@ -497,7 +497,7 @@ endif ()
 if (OPENMEDIA_VPX)
     if (AUI_BOOT)
         auib_import(vpx https://github.com/Nelonn/libvpx-cmake
-                VERSION db586dd00378518e4c8ae7c70fae3a4407e454eb)
+                VERSION 2216dd6647a283b794543a8257009c1ba712ef65)
     elseif (NOT TARGET vpx::vpx)
         add_subdirectory(third_party/external/vpx)
     endif ()
