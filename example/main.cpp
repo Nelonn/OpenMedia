@@ -80,7 +80,13 @@ int main(int argc, char* argv[]) {
 
   PlayerUI ui(player);
   if (!initial_file.empty()) {
-    player.play(initial_file);
+    if (!player.play(initial_file)) {
+      SDL_ShowSimpleMessageBox(
+          SDL_MESSAGEBOX_ERROR,
+          "OpenMedia Player",
+          player.getLastError().c_str(),
+          window);
+    }
   }
 
   bool running = true;

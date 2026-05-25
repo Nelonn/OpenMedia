@@ -4,6 +4,7 @@
 #include <cstring>
 #include <future>
 #include <numeric>
+#include <optional>
 #include <openmedia/audio.hpp>
 #include <openmedia/format_api.hpp>
 #include <openmedia/io.hpp>
@@ -298,6 +299,14 @@ struct ELSTEntry {
   int32_t media_rate = 1;
 };
 
+struct TREXEntry {
+  uint32_t track_id = 0;
+  uint32_t default_sample_description_index = 0;
+  uint32_t default_sample_duration = 0;
+  uint32_t default_sample_size = 0;
+  uint32_t default_sample_flags = 0;
+};
+
 struct Sample {
   int64_t offset = 0;
   uint32_t size = 0;
@@ -402,6 +411,13 @@ inline void applyEditList(BMFFTrack& track) {
       [](const ELSTEntry& e) { return e.media_time >= 0 && e.media_rate == 1; });
   if (it != track.elst_entries.end())
     track.start_dts = it->media_time;
+}
+
+inline auto getEditListStartDts(const BMFFTrack& track) -> int64_t {
+  const auto it = std::find_if(
+      track.elst_entries.begin(), track.elst_entries.end(),
+      [](const ELSTEntry& e) { return e.media_time >= 0 && e.media_rate == 1; });
+  return (it != track.elst_entries.end()) ? it->media_time : 0;
 }
 
 inline void parseColr(std::span<const uint8_t> body, BMFFTrack& track) {
@@ -922,6 +938,28 @@ inline void parseStss(std::span<const uint8_t> body, BMFFTrack& track) {
   std::sort(track.sync_samples.begin(), track.sync_samples.end());
 }
 
+inline void parseTrex(std::span<const uint8_t> body, std::vector<TREXEntry>& trex_entries) {
+  if (body.size() < 24) return;
+  BufReader r(body.data(), body.size());
+  r.skip(4);
+
+  TREXEntry entry;
+  entry.track_id = r.read_u32_be();
+  entry.default_sample_description_index = r.read_u32_be();
+  entry.default_sample_duration = r.read_u32_be();
+  entry.default_sample_size = r.read_u32_be();
+  entry.default_sample_flags = r.read_u32_be();
+
+  const auto it = std::find_if(
+      trex_entries.begin(), trex_entries.end(),
+      [&](const TREXEntry& existing) { return existing.track_id == entry.track_id; });
+  if (it != trex_entries.end()) {
+    *it = entry;
+  } else {
+    trex_entries.push_back(entry);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Sample-table construction - functional style
 //
@@ -1027,6 +1065,17 @@ inline void buildSampleTable(BMFFTrack& track) {
 }
 
 class BMFFDemuxer final : public BaseDemuxer {
+  struct FragmentContext {
+    uint32_t track_id = 0;
+    uint64_t moof_offset = 0;
+    uint64_t base_data_offset = 0;
+    uint32_t default_sample_duration = 0;
+    uint32_t default_sample_size = 0;
+    uint32_t default_sample_flags = 0;
+    int64_t decode_time = 0;
+    bool has_decode_time = false;
+  };
+
   int64_t mdat_pos_ = 0;
   int64_t mdat_size_ = 0;
   bool found_mdat_ = false;
@@ -1037,9 +1086,12 @@ class BMFFDemuxer final : public BaseDemuxer {
   bool fatal_ = false;
 
   std::vector<BMFFTrack> bmff_tracks_;
+  std::vector<TREXEntry> trex_entries_;
   BMFFTrack* current_track_ = nullptr;
   std::vector<Sample> samples_;
   size_t current_sample_index_ = 0;
+  uint64_t current_moof_offset_ = 0;
+  std::optional<FragmentContext> current_fragment_;
 
   RandomRead random_;
 
@@ -1058,7 +1110,9 @@ public:
 
     for (auto& t : bmff_tracks_) {
       applyEditList(t);
-      buildSampleTable(t);
+      if (t.samples.empty()) {
+        buildSampleTable(t);
+      }
     }
 
     size_t total_samples = 0;
@@ -1306,15 +1360,170 @@ private:
               ? (body_pos + body_size)
               : end;
 
-      handleBox(type, body_pos, box_end - body_pos);
+      handleBox(type, pos, body_pos, box_end - body_pos);
       pos = box_end;
     }
   }
 
-  void handleBox(uint32_t type, size_t pos, uint64_t size) {
+  auto findTrackById(uint32_t track_id) -> BMFFTrack* {
+    const auto it = std::find_if(
+        bmff_tracks_.begin(), bmff_tracks_.end(),
+        [&](const BMFFTrack& track) { return static_cast<uint32_t>(track.track.id) == track_id; });
+    return (it != bmff_tracks_.end()) ? &*it : nullptr;
+  }
+
+  auto findTrexByTrackId(uint32_t track_id) const -> const TREXEntry* {
+    const auto it = std::find_if(
+        trex_entries_.begin(), trex_entries_.end(),
+        [&](const TREXEntry& entry) { return entry.track_id == track_id; });
+    return (it != trex_entries_.end()) ? &*it : nullptr;
+  }
+
+  void parseTfhd(std::span<const uint8_t> body) {
+    if (!current_fragment_ || body.size() < 8) return;
+
+    BufReader r(body.data(), body.size());
+    r.skip(1);
+    const uint32_t flags = (static_cast<uint32_t>(r.read_u8()) << 16) |
+                           (static_cast<uint32_t>(r.read_u8()) << 8) |
+                           static_cast<uint32_t>(r.read_u8());
+
+    auto& fragment = *current_fragment_;
+    fragment.track_id = r.read_u32_be();
+    fragment.moof_offset = current_moof_offset_;
+    fragment.base_data_offset = current_moof_offset_;
+    fragment.default_sample_duration = 0;
+    fragment.default_sample_size = 0;
+    fragment.default_sample_flags = 0;
+
+    if (const auto* trex = findTrexByTrackId(fragment.track_id)) {
+      fragment.default_sample_duration = trex->default_sample_duration;
+      fragment.default_sample_size = trex->default_sample_size;
+      fragment.default_sample_flags = trex->default_sample_flags;
+    }
+
+    if (flags & 0x000001u) {
+      fragment.base_data_offset = r.read_u64_be();
+    }
+    if (flags & 0x000002u) {
+      r.read_u32_be();
+    }
+    if (flags & 0x000008u) {
+      fragment.default_sample_duration = r.read_u32_be();
+    }
+    if (flags & 0x000010u) {
+      fragment.default_sample_size = r.read_u32_be();
+    }
+    if (flags & 0x000020u) {
+      fragment.default_sample_flags = r.read_u32_be();
+    }
+    if ((flags & 0x020000u) != 0 && (flags & 0x000001u) == 0) {
+      fragment.base_data_offset = current_moof_offset_;
+    }
+  }
+
+  void parseTfdt(std::span<const uint8_t> body) {
+    if (!current_fragment_ || body.size() < 8) return;
+
+    BufReader r(body.data(), body.size());
+    const uint8_t version = r.read_u8();
+    r.skip(3);
+
+    current_fragment_->decode_time = (version == 1)
+        ? static_cast<int64_t>(r.read_u64_be())
+        : static_cast<int64_t>(r.read_u32_be());
+    current_fragment_->has_decode_time = true;
+  }
+
+  void parseTrun(std::span<const uint8_t> body) {
+    if (!current_fragment_ || body.size() < 8) return;
+
+    BMFFTrack* track = findTrackById(current_fragment_->track_id);
+    if (!track) return;
+
+    BufReader r(body.data(), body.size());
+    const uint8_t version = r.read_u8();
+    const uint32_t flags = (static_cast<uint32_t>(r.read_u8()) << 16) |
+                           (static_cast<uint32_t>(r.read_u8()) << 8) |
+                           static_cast<uint32_t>(r.read_u8());
+    const uint32_t sample_count = r.read_u32_be();
+
+    int32_t data_offset = 0;
+    if (flags & 0x000001u) {
+      data_offset = r.read_i32_be();
+    }
+
+    uint32_t first_sample_flags = current_fragment_->default_sample_flags;
+    if (flags & 0x000004u) {
+      first_sample_flags = r.read_u32_be();
+    }
+
+    int64_t sample_offset = static_cast<int64_t>(current_fragment_->base_data_offset) +
+                            static_cast<int64_t>(data_offset);
+    int64_t current_dts = current_fragment_->has_decode_time
+        ? (current_fragment_->decode_time - getEditListStartDts(*track))
+        : (track->samples.empty() ? 0 : (track->samples.back().dts + static_cast<int64_t>(track->samples.back().duration)));
+
+    for (uint32_t i = 0; i < sample_count; ++i) {
+      const uint32_t duration = (flags & 0x000100u)
+          ? r.read_u32_be()
+          : current_fragment_->default_sample_duration;
+      const uint32_t size = (flags & 0x000200u)
+          ? r.read_u32_be()
+          : current_fragment_->default_sample_size;
+
+      uint32_t sample_flags = current_fragment_->default_sample_flags;
+      if (flags & 0x000400u) {
+        sample_flags = r.read_u32_be();
+      } else if ((flags & 0x000004u) && i == 0) {
+        sample_flags = first_sample_flags;
+      }
+
+      const int32_t cts_offset = (flags & 0x000800u)
+          ? ((version == 1) ? r.read_i32_be() : static_cast<int32_t>(r.read_u32_be()))
+          : 0;
+
+      const bool is_keyframe = track->track.format.type != OM_MEDIA_VIDEO ||
+                               (sample_flags & 0x00010000u) == 0;
+
+      track->samples.push_back({
+          sample_offset,
+          size,
+          current_dts + static_cast<int64_t>(cts_offset),
+          current_dts,
+          duration,
+          0,
+          is_keyframe,
+      });
+
+      sample_offset += static_cast<int64_t>(size);
+      current_dts += duration;
+    }
+  }
+
+  void handleBox(uint32_t type, size_t box_start, size_t pos, uint64_t size) {
     if (fatal_) return;
 
     switch (type) {
+      case ATOM('m', 'v', 'e', 'x'):
+        parseBoxes(pos, pos + size);
+        return;
+      case ATOM('m', 'o', 'o', 'f'): {
+        const uint64_t saved_moof_offset = current_moof_offset_;
+        current_moof_offset_ = box_start;
+        parseBoxes(pos, pos + size);
+        current_moof_offset_ = saved_moof_offset;
+        return;
+      }
+      case ATOM('t', 'r', 'a', 'f'): {
+        const auto saved_fragment = current_fragment_;
+        current_fragment_.emplace();
+        current_fragment_->moof_offset = current_moof_offset_;
+        current_fragment_->base_data_offset = current_moof_offset_;
+        parseBoxes(pos, pos + size);
+        current_fragment_ = saved_fragment;
+        return;
+      }
       case ATOM('t', 'r', 'a', 'k'):
         bmff_tracks_.emplace_back();
         current_track_ = &bmff_tracks_.back();
@@ -1348,6 +1557,26 @@ private:
 
     if (type == ATOM('m', 'v', 'h', 'd')) {
       parseMvhd(body, movie_timescale_);
+      return;
+    }
+
+    if (type == ATOM('t', 'r', 'e', 'x')) {
+      parseTrex(body, trex_entries_);
+      return;
+    }
+
+    if (type == ATOM('t', 'f', 'h', 'd')) {
+      parseTfhd(body);
+      return;
+    }
+
+    if (type == ATOM('t', 'f', 'd', 't')) {
+      parseTfdt(body);
+      return;
+    }
+
+    if (type == ATOM('t', 'r', 'u', 'n')) {
+      parseTrun(body);
       return;
     }
 

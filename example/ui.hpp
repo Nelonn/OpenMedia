@@ -41,7 +41,13 @@ public:
         return false;
 
       case SDL_EVENT_DROP_FILE:
-        player_.play(e.drop.data);
+        if (!player_.play(e.drop.data)) {
+          SDL_ShowSimpleMessageBox(
+              SDL_MESSAGEBOX_ERROR,
+              "OpenMedia Player",
+              player_.getLastError().c_str(),
+              nullptr);
+        }
         break;
 
       case SDL_EVENT_MOUSE_WHEEL: {
