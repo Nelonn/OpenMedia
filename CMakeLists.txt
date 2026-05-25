@@ -66,37 +66,6 @@ target_sources(OpenMedia PRIVATE
         src/io.cpp
         src/log.cpp
         src/media.cpp
-)
-
-target_include_directories(OpenMedia PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
-
-target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/headeronly)
-
-get_target_property(OPENMEDIA_LIB_TYPE OpenMedia TYPE)
-if (OPENMEDIA_LIB_TYPE STREQUAL "SHARED_LIBRARY")
-    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DYNAMIC)
-    target_compile_definitions(OpenMedia INTERFACE OPENMEDIA_DYNAMIC_IMPORT)
-endif ()
-
-add_library(OpenMedia::OpenMedia ALIAS OpenMedia)
-
-if (OPENMEDIA_VULKAN_VIDEO)
-    if (AUI_BOOT)
-        auib_import(VulkanHeaders https://github.com/KhronosGroup/Vulkan-Headers
-                VERSION f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8)
-    elseif (NOT TARGET Vulkan::Headers)
-        add_subdirectory(third_party/external/Vulkan-Headers)
-    endif ()
-    target_link_libraries(OpenMedia PRIVATE Vulkan::Headers)
-    target_sources(OpenMedia PRIVATE include/openmedia/hw_vulkan.h)
-    target_sources(OpenMedia PRIVATE src/hw_vulkan.cpp)
-    target_sources(OpenMedia PRIVATE src/hw_vulkan_priv.hpp)
-    target_sources(OpenMedia PRIVATE
-        src/video/vulkan_video.cpp
         src/video/parser/h264_parser.cpp
         src/video/parser/h264_parser.hpp
         src/video/parser/h264_internal.hpp
@@ -120,37 +89,67 @@ if (OPENMEDIA_VULKAN_VIDEO)
         src/video/parser/start_code_avx512.cpp
         src/video/parser/start_code_neon.cpp
         src/video/parser/start_code_sve.cpp
-    )
-    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" OPENMEDIA_SYSTEM_PROCESSOR)
-    if (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(x86_64|amd64|i[3-6]86)")
-        if (MSVC)
-            set_source_files_properties(src/video/parser/start_code_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
-        else ()
-            set_source_files_properties(src/video/parser/start_code_ssse3.cpp PROPERTIES COMPILE_OPTIONS "-mssse3")
-            set_source_files_properties(src/video/parser/start_code_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
-            include(CheckCXXCompilerFlag)
-            check_cxx_compiler_flag("-mavx512f -mavx512bw" OPENMEDIA_COMPILER_SUPPORTS_AVX512)
-            if (OPENMEDIA_COMPILER_SUPPORTS_AVX512)
-                set_source_files_properties(src/video/parser/start_code_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw")
-                set_source_files_properties(src/video/parser/start_code_avx512.cpp PROPERTIES COMPILE_DEFINITIONS OPENMEDIA_ENABLE_AVX512_START_CODE)
-                target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_ENABLE_AVX512_START_CODE)
-            endif ()
-        endif ()
-    elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(aarch64|arm64)")
-        if (NOT MSVC)
-            include(CheckCXXCompilerFlag)
-            check_cxx_compiler_flag("-march=armv8-a+sve" OPENMEDIA_COMPILER_SUPPORTS_SVE)
-            if (OPENMEDIA_COMPILER_SUPPORTS_SVE)
-                set_source_files_properties(src/video/parser/start_code_sve.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+sve")
-                set_source_files_properties(src/video/parser/start_code_sve.cpp PROPERTIES COMPILE_DEFINITIONS OPENMEDIA_ENABLE_SVE_START_CODE)
-                target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_ENABLE_SVE_START_CODE)
-            endif ()
-        endif ()
-    elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(^arm|armv7)")
-        if (NOT MSVC)
-            set_source_files_properties(src/video/parser/start_code_neon.cpp PROPERTIES COMPILE_OPTIONS "-mfpu=neon")
+)
+
+target_include_directories(OpenMedia PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/headeronly)
+
+get_target_property(OPENMEDIA_LIB_TYPE OpenMedia TYPE)
+if (OPENMEDIA_LIB_TYPE STREQUAL "SHARED_LIBRARY")
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DYNAMIC)
+    target_compile_definitions(OpenMedia INTERFACE OPENMEDIA_DYNAMIC_IMPORT)
+endif ()
+
+add_library(OpenMedia::OpenMedia ALIAS OpenMedia)
+
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" OPENMEDIA_SYSTEM_PROCESSOR)
+if (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(x86_64|amd64|i[3-6]86)")
+    if (MSVC)
+        set_source_files_properties(src/video/parser/start_code_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else ()
+        set_source_files_properties(src/video/parser/start_code_ssse3.cpp PROPERTIES COMPILE_OPTIONS "-mssse3")
+        set_source_files_properties(src/video/parser/start_code_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag("-mavx512f -mavx512bw" OPENMEDIA_COMPILER_SUPPORTS_AVX512)
+        if (OPENMEDIA_COMPILER_SUPPORTS_AVX512)
+            set_source_files_properties(src/video/parser/start_code_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw")
+            set_source_files_properties(src/video/parser/start_code_avx512.cpp PROPERTIES COMPILE_DEFINITIONS OPENMEDIA_ENABLE_AVX512_START_CODE)
+            target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_ENABLE_AVX512_START_CODE)
         endif ()
     endif ()
+elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(aarch64|arm64)")
+    if (NOT MSVC)
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag("-march=armv8-a+sve" OPENMEDIA_COMPILER_SUPPORTS_SVE)
+        if (OPENMEDIA_COMPILER_SUPPORTS_SVE)
+            set_source_files_properties(src/video/parser/start_code_sve.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+sve")
+            set_source_files_properties(src/video/parser/start_code_sve.cpp PROPERTIES COMPILE_DEFINITIONS OPENMEDIA_ENABLE_SVE_START_CODE)
+            target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_ENABLE_SVE_START_CODE)
+        endif ()
+    endif ()
+elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(^arm|armv7)")
+    if (NOT MSVC)
+        set_source_files_properties(src/video/parser/start_code_neon.cpp PROPERTIES COMPILE_OPTIONS "-mfpu=neon")
+    endif ()
+endif ()
+
+if (OPENMEDIA_VULKAN_VIDEO)
+    if (AUI_BOOT)
+        auib_import(VulkanHeaders https://github.com/KhronosGroup/Vulkan-Headers
+                VERSION f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8)
+    elseif (NOT TARGET Vulkan::Headers)
+        add_subdirectory(third_party/external/Vulkan-Headers)
+    endif ()
+    target_link_libraries(OpenMedia PRIVATE Vulkan::Headers)
+    target_sources(OpenMedia PRIVATE include/openmedia/hw_vulkan.h)
+    target_sources(OpenMedia PRIVATE src/hw_vulkan.cpp)
+    target_sources(OpenMedia PRIVATE src/hw_vulkan_priv.hpp)
+    target_sources(OpenMedia PRIVATE src/video/vulkan_video.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VULKAN)
 endif ()
 
