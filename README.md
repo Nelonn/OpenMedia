@@ -32,13 +32,13 @@ integration while maintaining a simple, intuitive API.
 
 | Codec   | Decoding | Encoding | Backends                |
 |---------|:--------:|:--------:|-------------------------|
-| AAC     |    ✅     |    🔧    | libfdk-aac, WMF, FFmpeg |
-| ALAC    |    ✅     |    🔧    | libalac, FFmpeg         |
+| AAC     |    ✅     |    ✅     | libfdk-aac, WMF, FFmpeg |
+| ALAC    |    ✅     |    ✅     | libalac, FFmpeg         |
 | FLAC    |    ✅     |    🔧    | libFLAC, FFmpeg         |
 | Opus    |    ✅     |    ✅     | libopus, FFmpeg         |
-| Vorbis  |    ✅     |    🔧    | libvorbis, FFmpeg       |
+| Vorbis  |    ✅     |    ✅     | libvorbis, FFmpeg       |
 | MP3     |    ✅     |    🔧    | minimp3, WMF, FFmpeg    |
-| WAV/PCM |    ✅     |    🔧    | OpenMedia               |
+| WAV/PCM |    ✅     |    ✅     | OpenMedia               |
 
 ### Video Codecs
 
@@ -47,9 +47,9 @@ integration while maintaining a simple, intuitive API.
 | Codec        | Decoding | Encoding | Backends                        |
 |--------------|:--------:|:--------:|---------------------------------|
 | AV1          |    ✅     |    🔧    | Hardware, dav1d (decoding only) |
-| VP8/VP9      |    ✅     |    🔧    | Hardware, libvpx                |
+| VP8/VP9      |    ✅     |    ✅     | Hardware, libvpx                |
 | H264/AVC     |    ✅     |    ✅     | Hardware, OpenH264, FFmpeg      |
-| H265/HEVC    |    ✅     |    🔧    | Hardware, FFmpeg                |
+| H265/HEVC    |    ✅     |    ✅     | Hardware, FFmpeg                |
 | H266/VVC     |    ✅     |    🔧    | VVdeC (Broken), VVenC, FFmpeg   |
 | Apple ProRes |    ✅     |    🔧    | Apple Hardware + FFmpeg only    |
 | EVC          | Untested | Untested | xevd, xeve                      |
@@ -98,11 +98,11 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 | Format                  | Demuxing | Muxing      | Description                  |
 |-------------------------|:--------:|-------------|------------------------------|
-| Matroska (MKV/MKA/WebM) |    ✅     | Untested    | Matroska container (libwebm) |
+| Matroska (MKV/MKA/WebM) |    ✅     | ✅           | Matroska container (libwebm) |
 | MP4/MOV/M4A (BMFF)      |    ✅     | 🔧          | ISO Base Media File Format   |
 | MOV/QuickTime (BMFF)    |    ✅     | 🔧          | Apple QuickTime format       |
-| Ogg                     |    ✅     | 🔧          | Ogg container                |
-| WAV                     |    ✅     | 🔧          | WAV container                |
+| Ogg                     |    ✅     | ✅           | Ogg container                |
+| WAV                     |    ✅     | ✅           | WAV container                |
 | FLAC                    |    ✅     | 🔧          | FLAC container               |
 | MP3                     |    ✅     | 🔧          | MP3 container                |
 | AVI                     |    🔧    | Not planned | Audio Video Interleave       |

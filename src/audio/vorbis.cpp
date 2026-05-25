@@ -151,7 +151,7 @@ public:
     }
 
     vorbis_analysis_wrote(&vd_, static_cast<int>(samples->nb_samples));
-    return collectPackets(frame);
+    return collectPackets(frame, samples->nb_samples);
   }
 
   auto updateBitrate(const RateControlParams&) -> OMError override {
@@ -159,7 +159,7 @@ public:
   }
 
 private:
-  auto collectPackets(const Frame& frame) -> Result<std::vector<Packet>, OMError> {
+  auto collectPackets(const Frame& frame, uint32_t nb_samples) -> Result<std::vector<Packet>, OMError> {
     std::vector<Packet> packets;
     while (vorbis_analysis_blockout(&vd_, &vb_) == 1) {
       vorbis_analysis(&vb_, nullptr);
@@ -172,6 +172,7 @@ private:
         std::memcpy(out.bytes.data(), packet.packet, static_cast<size_t>(packet.bytes));
         out.pts = frame.pts;
         out.dts = frame.dts;
+        out.duration = nb_samples;
         packets.push_back(std::move(out));
       }
     }
