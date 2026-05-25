@@ -367,10 +367,6 @@ private:
   }
 };
 
-auto create_matroska_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<MatroskaDemuxer>();
-}
-
 class OutputStreamMkvWriter final : public mkvmuxer::IMkvWriter {
   std::unique_ptr<OutputStream> output_;
 
@@ -701,16 +697,12 @@ private:
   }
 };
 
-auto create_matroska_muxer() -> std::unique_ptr<Muxer> {
-  return std::make_unique<MatroskaMuxer>();
-}
-
 const FormatDescriptor FORMAT_MATROSKA = {
     .container_id = OM_CONTAINER_MKV,
     .name = "matroska",
     .long_name = "Matroska / WebM",
-    .demuxer_factory = [] { return create_matroska_demuxer(); },
-    .muxer_factory = [] { return create_matroska_muxer(); },
+    .demuxer_factory = [] { return std::make_unique<MatroskaDemuxer>(); },
+    .muxer_factory = [] { return std::make_unique<MatroskaMuxer>(); },
 };
 
 } // namespace openmedia

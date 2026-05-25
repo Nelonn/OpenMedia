@@ -469,7 +469,7 @@ if (OPENMEDIA_TGA)
 endif ()
 
 if (OPENMEDIA_WAV)
-    target_sources(OpenMedia PRIVATE src/audio/wav_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/audio/wav.cpp)
 endif ()
 
 if (OPENMEDIA_MP3 AND NOT APPLE)

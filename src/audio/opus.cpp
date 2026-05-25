@@ -397,14 +397,15 @@ public:
                                      packet_buffer.data(),
                                      static_cast<opus_int32>(packet_buffer.size()));
 
-      if (encoded_bytes > 0) {
-        Packet packet;
-        packet.allocate(static_cast<size_t>(encoded_bytes));
-        memcpy(packet.bytes.data(), packet_buffer.data(), static_cast<size_t>(encoded_bytes));
-        packet.pts = frame.pts;
-        packet.dts = frame.dts;
-        packets.push_back(std::move(packet));
-      } else {
+       if (encoded_bytes > 0) {
+         Packet packet;
+         packet.allocate(static_cast<size_t>(encoded_bytes));
+         memcpy(packet.bytes.data(), packet_buffer.data(), static_cast<size_t>(encoded_bytes));
+         packet.pts = frame.pts;
+         packet.dts = frame.dts;
+         packet.duration = to_encode;
+         packets.push_back(std::move(packet));
+       } else {
         return Err(OM_CODEC_ENCODE_FAILED);
       }
       offset += to_encode;

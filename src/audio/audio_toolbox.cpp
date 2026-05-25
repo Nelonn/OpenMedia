@@ -563,6 +563,7 @@ const CodecDescriptor CODEC_AUDIO_TOOLBOX_MP3 = {
   .vendor = "Apple",
   .flags = NONE,
   .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_MP3); },
+  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_MP3); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_AAC = {
@@ -584,6 +585,7 @@ const CodecDescriptor CODEC_AUDIO_TOOLBOX_AC3 = {
   .vendor = "Apple",
   .flags = NONE,
   .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_AC3); },
+  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_AC3); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3 = {
@@ -594,6 +596,7 @@ const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3 = {
   .vendor = "Apple",
   .flags = NONE,
   .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_EAC3); },
+  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_EAC3); },
 };
 
 } // namespace openmedia
