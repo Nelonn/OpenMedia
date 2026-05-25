@@ -11,6 +11,9 @@
 #include <span>
 #include <vector>
 
+#include <video/parser/h264_parser.hpp>
+#include <video/parser/h265_parser.hpp>
+
 namespace openmedia {
 
 namespace {
@@ -507,10 +510,51 @@ public:
     }
 
     profile_ = options.format.profile;
-    color_space_ = options.format.video.color_space;
-    transfer_char_ = options.format.video.transfer_char;
+    output_format_ = {};
     output_format_.width = options.format.video.width;
     output_format_.height = options.format.video.height;
+    output_format_.color_space = options.format.video.color_space;
+    output_format_.transfer_char = options.format.video.transfer_char;
+    output_format_.color_primaries = options.format.video.color_primaries;
+    output_format_.color_range = OM_COLOR_RANGE_UNSPECIFIED;
+    if (codec_id_ == OM_CODEC_H264 && !options.extradata.empty()) {
+      video_parser::H264AccessUnitParser parser;
+      parser.parseExtradata(options.extradata);
+      const auto& state = parser.state();
+      if (state.has_sps) {
+        for (uint32_t i = 0; i < 32; ++i) {
+          if (!state.sps_valid[i]) continue;
+          const auto& s = state.sps[i];
+          if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+            output_format_.color_primaries = static_cast<OMColorPrimaries>(s.vui.colour_primaries);
+            output_format_.transfer_char = static_cast<OMTransferCharacteristic>(s.vui.transfer_characteristics);
+            output_format_.color_space = static_cast<OMColorSpace>(s.vui.matrix_coefficients);
+          }
+          if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
+            output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+          }
+          break;
+        }
+      }
+    } else if (codec_id_ == OM_CODEC_H265 && !options.extradata.empty()) {
+      video_parser::H265AccessUnitParser parser;
+      parser.parseExtradata(options.extradata);
+      if (parser.hasSps()) {
+        for (int i = 0; i < 16; ++i) {
+          const auto& s = parser.sps(i);
+          if (!s.valid) continue;
+          if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+            output_format_.color_primaries = static_cast<OMColorPrimaries>(s.vui.colour_primaries);
+            output_format_.transfer_char = static_cast<OMTransferCharacteristic>(s.vui.transfer_characteristics);
+            output_format_.color_space = static_cast<OMColorSpace>(s.vui.matrix_coeffs);
+          }
+          if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
+            output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+          }
+          break;
+        }
+      }
+    }
     bool is_10_bit = (profile_ == OM_PROFILE_H265_MAIN_10 ||
                       profile_ == OM_PROFILE_H265_MAIN_4_2_2_10 ||
                       profile_ == OM_PROFILE_H265_MAIN_4_4_4_10 ||
@@ -680,9 +724,13 @@ public:
     output_format_.format = om_format;
 
     Picture picture(om_format, width, height);
-    picture.color_space = color_space_;
-    picture.transfer_char = transfer_char_;
-    picture.color_range = OM_COLOR_RANGE_MPEG;
+    picture.color_space = output_format_.color_space;
+    picture.transfer_char = output_format_.transfer_char;
+    picture.color_primaries = output_format_.color_primaries;
+    picture.color_range = output_format_.color_range;
+    picture.mastering_display = output_format_.mastering_display;
+    picture.content_light_level = output_format_.content_light_level;
+    if (picture.color_range == OM_COLOR_RANGE_UNSPECIFIED) picture.color_range = OM_COLOR_RANGE_MPEG;
     if (cv_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
         cv_format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange) {
         picture.color_range = OM_COLOR_RANGE_JPEG;
@@ -831,8 +879,6 @@ private:
   CFPtr<CMVideoFormatDescriptionRef> format_description_;
   CFPtr<VTDecompressionSessionRef> session_;
   VideoFormat output_format_ = {};
-  OMColorSpace color_space_ = OM_COLOR_SPACE_BT709;
-  OMTransferCharacteristic transfer_char_ = OM_TRANSFER_BT709;
   int nal_length_size_ = 4;
   int32_t timescale_ = kDefaultTimeScale;
   bool initialized_ = false;
@@ -1047,6 +1093,7 @@ public:
 
     width_ = options.format.video.width;
     height_ = options.format.video.height;
+    input_format_ = options.video_format;
     timescale_ = kDefaultTimeScale;
 
     OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault,
@@ -1108,6 +1155,8 @@ public:
         extradata_ = std::move(extra);
     }
     info.extradata = extradata_;
+    info.mastering_display = input_format_.mastering_display;
+    info.content_light_level = input_format_.content_light_level;
     return info;
   }
 
@@ -1285,6 +1334,7 @@ private:
   VTCompressionSessionRef session_ = nullptr;
   EncoderCallbackContext callback_context_;
   std::vector<uint8_t> extradata_;
+  VideoFormat input_format_ = {};
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   int32_t timescale_ = kDefaultTimeScale;

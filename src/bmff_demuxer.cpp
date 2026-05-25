@@ -124,6 +124,34 @@ static auto colorSpaceFromPrimaries(uint16_t p) -> OMColorSpace {
   }
 }
 
+static auto colorSpaceFromMatrix(uint16_t m) -> OMColorSpace {
+  switch (m) {
+    case 1: return OM_COLOR_SPACE_BT709;
+    case 5:
+    case 6: return OM_COLOR_SPACE_BT601;
+    case 9: return OM_COLOR_SPACE_BT2020;
+    case 10: return OM_COLOR_SPACE_BT2020_CL;
+    default: return OM_COLOR_SPACE_UNKNOWN;
+  }
+}
+
+static auto colorPrimariesFromCode(uint16_t p) -> OMColorPrimaries {
+  switch (p) {
+    case 1: return OM_PRIMARIES_BT709;
+    case 4: return OM_PRIMARIES_BT470M;
+    case 5: return OM_PRIMARIES_BT470BG;
+    case 6: return OM_PRIMARIES_BT601;
+    case 7: return OM_PRIMARIES_SMPTE240M;
+    case 8: return OM_PRIMARIES_FILM;
+    case 9: return OM_PRIMARIES_BT2020;
+    case 10: return OM_PRIMARIES_SMPTE428;
+    case 11: return OM_PRIMARIES_SMPTE431;
+    case 12: return OM_PRIMARIES_SMPTE432;
+    case 22: return OM_PRIMARIES_EBU3213;
+    default: return OM_PRIMARIES_UNKNOWN;
+  }
+}
+
 static auto transferCharFromCode(uint16_t t) -> OMTransferCharacteristic {
   switch (t) {
     case 1: return OM_TRANSFER_BT709;
@@ -425,12 +453,15 @@ inline void parseColr(std::span<const uint8_t> body, BMFFTrack& track) {
   BufReader r(body.data(), body.size());
   const uint32_t colour_type = r.read_u32_le();
 
-  uint16_t primaries = 0, transfer = 0;
+  uint16_t primaries = 0, transfer = 0, matrix = 0;
+  OMColorRange range = OM_COLOR_RANGE_UNSPECIFIED;
   switch (colour_type) {
     case ATOM('n', 'c', 'l', 'x'):
       if (body.size() < 11) return;
       primaries = r.read_u16_be();
       transfer = r.read_u16_be();
+      matrix = r.read_u16_be();
+      range = (r.read_u8() & 0x80u) ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
       break;
     case ATOM('n', 'c', 'l', 'c'):
     case ATOM('r', 'I', 'C', 'C'):
@@ -438,13 +469,40 @@ inline void parseColr(std::span<const uint8_t> body, BMFFTrack& track) {
       if (body.size() < 10) return;
       primaries = r.read_u16_be();
       transfer = r.read_u16_be();
+      matrix = r.read_u16_be();
       break;
     default:
       return;
   }
 
-  track.track.format.video.color_space = colorSpaceFromPrimaries(primaries);
+  track.track.format.video.color_primaries = colorPrimariesFromCode(primaries);
+  track.track.format.video.color_space = colorSpaceFromMatrix(matrix);
   track.track.format.video.transfer_char = transferCharFromCode(transfer);
+  track.track.format.video.color_range = range;
+}
+
+inline void parseMdcv(std::span<const uint8_t> body, BMFFTrack& track) {
+  if (body.size() < 24) return;
+  BufReader r(body.data(), body.size());
+  auto& md = track.track.format.video.mastering_display;
+  for (int i = 0; i < 3; ++i) {
+    md.display_primaries[i][0] = r.read_u16_be();
+    md.display_primaries[i][1] = r.read_u16_be();
+  }
+  md.white_point[0] = r.read_u16_be();
+  md.white_point[1] = r.read_u16_be();
+  md.max_display_mastering_luminance = r.read_u32_be();
+  md.min_display_mastering_luminance = r.read_u32_be();
+  md.has_value = true;
+}
+
+inline void parseClli(std::span<const uint8_t> body, BMFFTrack& track) {
+  if (body.size() < 4) return;
+  BufReader r(body.data(), body.size());
+  auto& cll = track.track.format.video.content_light_level;
+  cll.max_content_light_level = r.read_u16_be();
+  cll.max_pic_average_light_level = r.read_u16_be();
+  cll.has_value = true;
 }
 
 inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
@@ -1603,9 +1661,9 @@ private:
       // Video metadata
       case ATOM('b', 't', 'r', 't'): parseBtrt(body, track); break;
       case ATOM('c', 'o', 'l', 'r'): parseColr(body, track); break;
-      case ATOM('m', 'd', 'c', 'v'): /* reserved for future HDR */ break;
+      case ATOM('m', 'd', 'c', 'v'): parseMdcv(body, track); break;
       case ATOM('C', 'L', 'L', 'I'):
-      case ATOM('c', 'l', 'l', 'i'): /* reserved for future HDR */ break;
+      case ATOM('c', 'l', 'l', 'i'): parseClli(body, track); break;
 
       // Codec configuration boxes
       case ATOM('a', 'v', 'c', 'C'): parseAvcc(body, track); break;
@@ -1871,6 +1929,8 @@ private:
     track.format.video.height = load_u16_be(vis + 2);
     track.format.video.color_space = OM_COLOR_SPACE_UNKNOWN;
     track.format.video.transfer_char = OM_TRANSFER_UNKNOWN;
+    track.format.video.color_primaries = OM_PRIMARIES_UNKNOWN;
+    track.format.video.color_range = OM_COLOR_RANGE_UNSPECIFIED;
     return true;
   }
 };
