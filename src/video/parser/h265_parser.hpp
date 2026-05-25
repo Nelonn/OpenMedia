@@ -183,6 +183,8 @@ public:
     H265StRefPicSet st_ref_pic_set[64] = {};
     bool long_term_ref_pics_present_flag = false;
     int num_long_term_ref_pics_sps = 0;
+    int lt_ref_pic_poc_lsb_sps[32] = {};
+    bool used_by_curr_pic_lt_sps_flag[32] = {};
     bool sps_temporal_mvp_enabled_flag = false;
     bool strong_intra_smoothing_enabled_flag = false;
     bool vui_parameters_present_flag = false;
@@ -295,17 +297,20 @@ private:
   bool has_sps_ = false;
   bool has_pps_ = false;
   uint8_t nal_length_size_ = 0;
-  int previous_poc_ = 0;
-  int previous_nal_type_ = -1;
   bool have_previous_slice_ = false;
   int nal_unit_type_ = 0;
   int slice_pic_order_cnt_lsb_ = 0;
   bool first_slice_segment_in_pic_flag_ = false;
+  int temporal_id_ = 0;
+  int ref_pic_order_cnt_msb_ = 0;
+  int ref_pic_order_cnt_lsb_ = 0;
+  bool first_picture_ = true;
 
   auto normalizePacket(std::span<const uint8_t> packet) const -> std::vector<uint8_t>;
   auto findNalUnits(std::span<const uint8_t> packet) -> std::vector<NalUnit>;
   auto parseNal(std::span<const uint8_t> nal_data) -> bool;
   auto startsNewAccessUnit(int nal_type) const -> bool;
+  auto computePoc(const Sps& sps, const H265SliceHeader& sh, int nal_type) -> int;
   auto finishCurrentFrame() -> H265ParsedFrame;
 
   auto parseVui(BitReader& br, Sps& sps) -> bool;

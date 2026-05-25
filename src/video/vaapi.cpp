@@ -481,9 +481,14 @@ public:
 
     if (codec_id_ == OM_CODEC_H265) h265_parser_.reset();
 
+    output_format_ = {};
     output_format_.width = width_;
     output_format_.height = height_;
     output_format_.format = (rt_format == VA_RT_FORMAT_YUV420_10) ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+    output_format_.color_space = options.format.video.color_space;
+    output_format_.transfer_char = options.format.video.transfer_char;
+    output_format_.color_primaries = options.format.video.color_primaries;
+    output_format_.color_range = OM_COLOR_RANGE_UNSPECIFIED;
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -777,6 +782,12 @@ public:
         pic.format = output_format_.format;
         pic.width = output_format_.width;
         pic.height = output_format_.height;
+        pic.color_space = output_format_.color_space;
+        pic.transfer_char = output_format_.transfer_char;
+        pic.color_primaries = output_format_.color_primaries;
+        pic.color_range = output_format_.color_range;
+        pic.mastering_display = output_format_.mastering_display;
+        pic.content_light_level = output_format_.content_light_level;
         auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
         surface_slots_[first_surface_idx].last_pic = pic_obj;
         pic.buffer = pic_obj;
@@ -963,6 +974,12 @@ public:
         pic.format = output_format_.format;
         pic.width = output_format_.width;
         pic.height = output_format_.height;
+        pic.color_space = output_format_.color_space;
+        pic.transfer_char = output_format_.transfer_char;
+        pic.color_primaries = output_format_.color_primaries;
+        pic.color_range = output_format_.color_range;
+        pic.mastering_display = output_format_.mastering_display;
+        pic.content_light_level = output_format_.content_light_level;
         auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
         surface_slots_[surface_idx].last_pic = pic_obj;
         pic.buffer = pic_obj;
@@ -1025,6 +1042,12 @@ public:
           pic.format = output_format_.format;
           pic.width = output_format_.width;
           pic.height = output_format_.height;
+          pic.color_space = output_format_.color_space;
+          pic.transfer_char = output_format_.transfer_char;
+          pic.color_primaries = output_format_.color_primaries;
+          pic.color_range = output_format_.color_range;
+          pic.mastering_display = output_format_.mastering_display;
+          pic.content_light_level = output_format_.content_light_level;
           auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
           surface_slots_[selected_slot_idx].last_pic = pic_obj;
           pic.buffer = pic_obj;
@@ -1070,6 +1093,12 @@ public:
         pic.format = output_format_.format;
         pic.width = output_format_.width;
         pic.height = output_format_.height;
+        pic.color_space = output_format_.color_space;
+        pic.transfer_char = output_format_.transfer_char;
+        pic.color_primaries = output_format_.color_primaries;
+        pic.color_range = output_format_.color_range;
+        pic.mastering_display = output_format_.mastering_display;
+        pic.content_light_level = output_format_.content_light_level;
         auto pic_obj = std::make_shared<VAAPIHardwarePicture>(display_, surface);
         surface_slots_[selected_slot_idx].last_pic = pic_obj;
         pic.buffer = pic_obj;
@@ -1119,6 +1148,7 @@ class VAAPIEncoder final : public Encoder {
   bool initialized_ = false;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
+  VideoFormat input_format_ = {};
   std::vector<VASurfaceID> surface_pool_;
   size_t surface_idx_ = 0;
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -1134,6 +1164,7 @@ public:
     codec_id_ = options.format.codec_id;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
+    input_format_ = options.video_format;
     OMVAAPIInit init = {};
     if (options.hw_device.has_value() && options.hw_device->type == HWDeviceType::VAAPI) {
       display_ = static_cast<OMVAAPIContext*>(options.hw_device->context)->display;
@@ -1188,7 +1219,10 @@ public:
   }
 
   auto getInfo() -> EncodingInfo override {
-    return {};
+    EncodingInfo info = {};
+    info.mastering_display = input_format_.mastering_display;
+    info.content_light_level = input_format_.content_light_level;
+    return info;
   }
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {

@@ -27,6 +27,7 @@ class NVEnc final : public Encoder {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   OMPixelFormat format_ = OM_FORMAT_NV12;
+  VideoFormat input_format_ = {};
 
   struct InputSurface {
     NV_ENC_INPUT_PTR input_ptr = nullptr;
@@ -68,6 +69,7 @@ public:
     width_ = options.video_format.width;
     height_ = options.video_format.height;
     format_ = options.video_format.format;
+    input_format_ = options.video_format;
 
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open_params = {};
     open_params.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
@@ -155,7 +157,12 @@ public:
     return OM_SUCCESS;
   }
 
-  auto getInfo() -> EncodingInfo override { return {}; }
+  auto getInfo() -> EncodingInfo override {
+    EncodingInfo info = {};
+    info.mastering_display = input_format_.mastering_display;
+    info.content_light_level = input_format_.content_light_level;
+    return info;
+  }
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);

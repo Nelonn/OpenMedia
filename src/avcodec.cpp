@@ -448,6 +448,7 @@ public:
     }
 
     if (options.format.type == OM_MEDIA_VIDEO) {
+      configured_video_format_ = options.video_format;
       codec_ctx_->width = static_cast<int>(options.video_format.width);
       codec_ctx_->height = static_cast<int>(options.video_format.height);
       codec_ctx_->time_base.num = 1;
@@ -518,6 +519,8 @@ public:
     if (initialized_ && codec_ctx_ && codec_ctx_->extradata_size > 0) {
       info.extradata.assign(codec_ctx_->extradata, codec_ctx_->extradata + codec_ctx_->extradata_size);
     }
+    info.mastering_display = configured_video_format_.mastering_display;
+    info.content_light_level = configured_video_format_.content_light_level;
     return info;
   }
 
@@ -664,6 +667,7 @@ private:
   AVCodecID av_codec_id_;
   AVPtr<AVCodecContext> codec_ctx_;
   AVPtr<AVPacket> packet_;
+  VideoFormat configured_video_format_ = {};
   AVDictionary* options_dict_ = nullptr;
   bool initialized_ = false;
 };

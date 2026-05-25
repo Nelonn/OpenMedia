@@ -69,12 +69,14 @@ void H265AccessUnitParser::reset() {
   has_sps_ = false;
   has_pps_ = false;
   nal_length_size_ = 0;
-  previous_poc_ = 0;
-  previous_nal_type_ = -1;
   have_previous_slice_ = false;
   nal_unit_type_ = 0;
   slice_pic_order_cnt_lsb_ = 0;
   first_slice_segment_in_pic_flag_ = false;
+  temporal_id_ = 0;
+  ref_pic_order_cnt_msb_ = 0;
+  ref_pic_order_cnt_lsb_ = 0;
+  first_picture_ = true;
 }
 
 void H265AccessUnitParser::parseExtradata(std::span<const uint8_t> extradata) {
@@ -144,12 +146,10 @@ auto H265AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
       current_.slice_offsets.push_back(output_offset);
       current_.slice_nalus.emplace_back(nal_data.begin(), nal_data.end());
       current_.nal_unit_type = nal_type;
-      current_.poc = slice_pic_order_cnt_lsb_;
+      current_.poc = computePoc(sps_[pps_[current_.slice_headers.back().pps_id].sps_id], current_.slice_headers.back(), nal_type);
       current_.is_irap = isIrapNal(nal_type);
       current_.is_reference = nal_type != 0 && nal_type != 2 && nal_type != 4 && nal_type != 6 && nal_type != 8;
       current_has_vcl_ = true;
-      previous_poc_ = current_.poc;
-      previous_nal_type_ = nal_type;
       have_previous_slice_ = true;
     }
   }
@@ -525,6 +525,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
   if (nal_data.size() < 2) return false;
   if ((nal_data[0] & 0x80u) != 0 || (nal_data[1] & 0x07u) == 0) return false;
   nal_unit_type_ = (nal_data[0] >> 1u) & 0x3fu;
+  temporal_id_ = static_cast<int>((nal_data[1] & 0x07u) - 1u);
   first_slice_segment_in_pic_flag_ = false;
   slice_pic_order_cnt_lsb_ = 0;
 
@@ -608,8 +609,8 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
     if (sps.long_term_ref_pics_present_flag) {
       sps.num_long_term_ref_pics_sps = static_cast<int>(br.readUE());
       for (int i = 0; i < sps.num_long_term_ref_pics_sps; ++i) {
-        br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4));
-        br.readBit();
+        sps.lt_ref_pic_poc_lsb_sps[i] = static_cast<int>(br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4)));
+        sps.used_by_curr_pic_lt_sps_flag[i] = br.readBit() != 0;
       }
     }
     sps.sps_temporal_mvp_enabled_flag = br.readBit() != 0;
@@ -687,8 +688,9 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
   if (isIrapNal(nal_unit_type_)) br.readBit();
   const int pps_id = static_cast<int>(br.readUE());
   sh.pps_id = pps_id;
-  if (pps_id < 0 || pps_id >= 64 || !pps_[pps_id].valid) return br.ok();
+  if (pps_id < 0 || pps_id >= 64 || !pps_[pps_id].valid) return false;
   const auto& pps = pps_[pps_id];
+  if (pps.sps_id < 0 || pps.sps_id >= 16 || !sps_[pps.sps_id].valid) return false;
   const auto& sps = sps_[pps.sps_id];
 
   if (!first_slice_segment_in_pic_flag_) {
@@ -725,12 +727,18 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data) -> bool {
         if (sps.num_long_term_ref_pics_sps > 0) num_long_term_sps = static_cast<int>(br.readUE());
         int num_long_term_pics = static_cast<int>(br.readUE());
         for (int i = 0; i < num_long_term_sps + num_long_term_pics; ++i) {
+          bool used_by_curr_pic = false;
           if (i < num_long_term_sps) {
-            if (sps.num_long_term_ref_pics_sps > 1) br.readBits(static_cast<uint32_t>(ceilLog2(sps.num_long_term_ref_pics_sps)));
+            int lt_idx_sps = 0;
+            if (sps.num_long_term_ref_pics_sps > 1) {
+              lt_idx_sps = static_cast<int>(br.readBits(static_cast<uint32_t>(ceilLog2(sps.num_long_term_ref_pics_sps))));
+            }
+            used_by_curr_pic = sps.used_by_curr_pic_lt_sps_flag[lt_idx_sps];
           } else {
             br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4));
-            br.readBit();
+            used_by_curr_pic = br.readBit() != 0;
           }
+          if (used_by_curr_pic) ++sh.num_pic_total_curr;
           if (br.readBit()) br.readUE();
         }
       }
@@ -818,9 +826,34 @@ auto H265AccessUnitParser::startsNewAccessUnit(int nal_type) const -> bool {
   if (nal_type == 35 || nal_type == 32 || nal_type == 33 || nal_type == 34) return true;
   if (!isVclNal(nal_type) || !have_previous_slice_) return false;
   if (first_slice_segment_in_pic_flag_) return true;
-  if (slice_pic_order_cnt_lsb_ != previous_poc_) return true;
-  if (isIrapNal(nal_type) != isIrapNal(previous_nal_type_)) return true;
   return false;
+}
+
+auto H265AccessUnitParser::computePoc(const Sps& sps, const H265SliceHeader& sh, int nal_type) -> int {
+  const int max_pic_order_cnt_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+  const bool irap_pic = isIrapNal(nal_type);
+  const bool no_rasl_output_flag = irap_pic && ((nal_type >= NAL_BLA_W_LP && nal_type <= NAL_IDR_N_LP) || first_picture_);
+
+  int pic_order_cnt_msb = 0;
+  if (!irap_pic || !no_rasl_output_flag) {
+    if (sh.slice_pic_order_cnt_lsb < ref_pic_order_cnt_lsb_ &&
+        (ref_pic_order_cnt_lsb_ - sh.slice_pic_order_cnt_lsb) >= max_pic_order_cnt_lsb / 2) {
+      pic_order_cnt_msb = ref_pic_order_cnt_msb_ + max_pic_order_cnt_lsb;
+    } else if (sh.slice_pic_order_cnt_lsb > ref_pic_order_cnt_lsb_ &&
+               (sh.slice_pic_order_cnt_lsb - ref_pic_order_cnt_lsb_) > max_pic_order_cnt_lsb / 2) {
+      pic_order_cnt_msb = ref_pic_order_cnt_msb_ - max_pic_order_cnt_lsb;
+    } else {
+      pic_order_cnt_msb = ref_pic_order_cnt_msb_;
+    }
+  }
+
+  if (temporal_id_ == 0 && (nal_type < NAL_RADL_N || nal_type > 14)) {
+    ref_pic_order_cnt_lsb_ = sh.slice_pic_order_cnt_lsb;
+    ref_pic_order_cnt_msb_ = pic_order_cnt_msb;
+  }
+
+  first_picture_ = false;
+  return pic_order_cnt_msb + sh.slice_pic_order_cnt_lsb;
 }
 
 auto H265AccessUnitParser::finishCurrentFrame() -> H265ParsedFrame {
@@ -829,8 +862,6 @@ auto H265AccessUnitParser::finishCurrentFrame() -> H265ParsedFrame {
   current_ = {};
   current_has_vcl_ = false;
   current_parameter_sets_changed_ = false;
-  previous_poc_ = 0;
-  previous_nal_type_ = -1;
   have_previous_slice_ = false;
   return out;
 }

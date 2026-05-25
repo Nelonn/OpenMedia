@@ -33,7 +33,6 @@ struct H264ParserState {
   int prev_pic_order_cnt_msb = 0;
   int prev_frame_num = 0;
   int prev_frame_num_offset = 0;
-  bool have_prev_poc = false;
 };
 
 class H264AccessUnitParser {

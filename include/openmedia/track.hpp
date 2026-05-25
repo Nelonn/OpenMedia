@@ -60,6 +60,9 @@ struct OPENMEDIA_ABI MediaFormat {
       OMColorSpace color_space;
       OMTransferCharacteristic transfer_char;
       OMColorPrimaries color_primaries;
+      OMColorRange color_range;
+      OMMasteringDisplayMetadata mastering_display;
+      OMContentLightLevel content_light_level;
     } video;
     struct {
       uint32_t width;

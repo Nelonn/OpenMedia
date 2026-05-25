@@ -32,7 +32,6 @@ void H264AccessUnitParser::resetPoc() {
   state_.prev_pic_order_cnt_msb = 0;
   state_.prev_frame_num = 0;
   state_.prev_frame_num_offset = 0;
-  state_.have_prev_poc = false;
 }
 
 void H264AccessUnitParser::parseExtradata(std::span<const uint8_t> extradata) {
@@ -156,7 +155,7 @@ auto H264AccessUnitParser::parseNal(std::span<const uint8_t> nal_data, h264::NAL
   bs.init(nal_data.data(), nal_data.size());
   if (!h264::read_nal_header(nal, bs)) return false;
   if ((nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) && state_.has_sps && state_.has_pps) {
-    h264::read_slice_header(slice, nal, state_.pps, state_.sps, bs);
+    return h264::read_slice_header(slice, nal, state_.pps, state_.sps, bs);
   }
   return true;
 }
@@ -222,25 +221,26 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
     }
     const int max_pic_order_cnt_lsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
     int pic_order_cnt_msb = 0;
-    if (state_.have_prev_poc) {
-      if (slice.pic_order_cnt_lsb < state_.prev_pic_order_cnt_lsb &&
-          (state_.prev_pic_order_cnt_lsb - slice.pic_order_cnt_lsb) >= max_pic_order_cnt_lsb / 2) {
-        pic_order_cnt_msb = state_.prev_pic_order_cnt_msb + max_pic_order_cnt_lsb;
-      } else if (slice.pic_order_cnt_lsb > state_.prev_pic_order_cnt_lsb &&
-                 (slice.pic_order_cnt_lsb - state_.prev_pic_order_cnt_lsb) > max_pic_order_cnt_lsb / 2) {
-        pic_order_cnt_msb = state_.prev_pic_order_cnt_msb - max_pic_order_cnt_lsb;
-      } else {
-        pic_order_cnt_msb = state_.prev_pic_order_cnt_msb;
-      }
+    if (slice.pic_order_cnt_lsb < state_.prev_pic_order_cnt_lsb &&
+        (state_.prev_pic_order_cnt_lsb - slice.pic_order_cnt_lsb) >= max_pic_order_cnt_lsb / 2) {
+      pic_order_cnt_msb = state_.prev_pic_order_cnt_msb + max_pic_order_cnt_lsb;
+    } else if (slice.pic_order_cnt_lsb > state_.prev_pic_order_cnt_lsb &&
+               (slice.pic_order_cnt_lsb - state_.prev_pic_order_cnt_lsb) > max_pic_order_cnt_lsb / 2) {
+      pic_order_cnt_msb = state_.prev_pic_order_cnt_msb - max_pic_order_cnt_lsb;
+    } else {
+      pic_order_cnt_msb = state_.prev_pic_order_cnt_msb;
     }
-    poc = pic_order_cnt_msb + slice.pic_order_cnt_lsb;
+    const int top_foc = pic_order_cnt_msb + slice.pic_order_cnt_lsb;
+    const int bottom_foc = top_foc + slice.delta_pic_order_cnt_bottom;
+    poc = slice.mmco5 ? 0 : std::min(top_foc, bottom_foc);
     if (current_.nal.idc != 0) {
-      state_.prev_pic_order_cnt_lsb = slice.pic_order_cnt_lsb;
-      state_.prev_pic_order_cnt_msb = pic_order_cnt_msb;
-    }
-    if (slice.mmco5) {
-      state_.prev_pic_order_cnt_msb = 0;
-      state_.prev_pic_order_cnt_lsb = !slice.field_pic_flag ? poc : 0;
+      if (slice.mmco5) {
+        state_.prev_pic_order_cnt_msb = 0;
+        state_.prev_pic_order_cnt_lsb = top_foc;
+      } else {
+        state_.prev_pic_order_cnt_lsb = slice.pic_order_cnt_lsb;
+        state_.prev_pic_order_cnt_msb = pic_order_cnt_msb;
+      }
     }
   } else if (sps.pic_order_cnt_type == 1) {
     const int max_frame_num = 1 << (sps.log2_max_frame_num_minus4 + 4);
@@ -264,9 +264,9 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
     }
     if (current_.nal.idc == 0) expected_poc += sps.offset_for_non_ref_pic;
 
-    if (!slice.field_pic_flag) poc = expected_poc + slice.delta_pic_order_cnt[0];
-    else if (!slice.bottom_field_flag) poc = expected_poc + slice.delta_pic_order_cnt[0];
-    else poc = expected_poc + sps.offset_for_top_to_bottom_field + slice.delta_pic_order_cnt[0];
+    const int top_foc = expected_poc + slice.delta_pic_order_cnt[0];
+    const int bottom_foc = top_foc + sps.offset_for_top_to_bottom_field + slice.delta_pic_order_cnt[1];
+    poc = slice.mmco5 ? 0 : std::min(top_foc, bottom_foc);
 
     state_.prev_frame_num = slice.mmco5 ? 0 : slice.frame_num;
     state_.prev_frame_num_offset = slice.mmco5 ? 0 : frame_num_offset;
@@ -281,12 +281,12 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
     if (is_idr) poc = 0;
     else if (current_.nal.idc == 0) poc = 2 * abs_frame_num - 1;
     else poc = 2 * abs_frame_num;
+    if (slice.mmco5) poc = 0;
 
     state_.prev_frame_num = slice.mmco5 ? 0 : slice.frame_num;
     state_.prev_frame_num_offset = slice.mmco5 ? 0 : frame_num_offset;
   }
 
-  state_.have_prev_poc = true;
   return poc;
 }
 

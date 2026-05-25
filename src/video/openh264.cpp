@@ -174,9 +174,12 @@ public:
 
       Picture pic(OM_FORMAT_YUV420P, output_format_.width, output_format_.height);
 
-      copyPlane(pic.planes.data[0], data[0], output_format_.width, output_format_.height, buf_info.UsrData.sSystemBuffer.iStride[0]);
-      copyPlane(pic.planes.data[1], data[1], output_format_.width / 2, output_format_.height / 2, buf_info.UsrData.sSystemBuffer.iStride[1]);
-      copyPlane(pic.planes.data[2], data[2], output_format_.width / 2, output_format_.height / 2, buf_info.UsrData.sSystemBuffer.iStride[1]);
+      const auto [luma_w, luma_h] = getPlaneDimensions(OM_FORMAT_YUV420P, 0, output_format_.width, output_format_.height);
+      const auto [chroma_w, chroma_h] = getPlaneDimensions(OM_FORMAT_YUV420P, 1, output_format_.width, output_format_.height);
+
+      copyPlane(pic.planes.data[0], pic.planes.linesize[0], data[0], buf_info.UsrData.sSystemBuffer.iStride[0], luma_w, luma_h);
+      copyPlane(pic.planes.data[1], pic.planes.linesize[1], data[1], buf_info.UsrData.sSystemBuffer.iStride[1], chroma_w, chroma_h);
+      copyPlane(pic.planes.data[2], pic.planes.linesize[2], data[2], buf_info.UsrData.sSystemBuffer.iStride[1], chroma_w, chroma_h);
 
       Frame frame = {};
       frame.pts = packet.pts;
@@ -383,9 +386,10 @@ public:
     if (!encoder_) return Err(OM_CODEC_ENCODE_FAILED);
 
     const auto& pic = std::get<Picture>(frame.data);
+    if (pic.format != OM_FORMAT_YUV420P) {
+      return Err(OM_CODEC_NOT_SUPPORTED);
+    }
 
-    // OpenH264 expects I420. If input is different, we'd need conversion,
-    // but for now we assume input frame matches configured format.
     SSourcePicture src_pic = {};
     src_pic.iColorFormat = videoFormatI420;
     src_pic.iPicWidth = pic.width;

@@ -116,6 +116,37 @@ private:
 // ---------------------------------------------------------------------------
 namespace detail {
 
+static auto describeError(OMError err) -> const char* {
+    switch (err) {
+        case OM_SUCCESS:                  return "success";
+        case OM_COMMON_INVALID_ARGUMENT:  return "invalid argument";
+        case OM_COMMON_NOT_INITIALIZED:   return "not initialized";
+        case OM_COMMON_NOT_SUPPORTED:     return "not supported";
+        case OM_COMMON_OUT_OF_MEMORY:     return "out of memory";
+        case OM_IO_INVALID_STREAM:        return "invalid stream";
+        case OM_IO_SEEK_REQUIRED:         return "seek required";
+        case OM_IO_SEEK_FAILED:           return "seek failed";
+        case OM_IO_NOT_ENOUGH_DATA:       return "not enough data";
+        case OM_IO_END_OF_STREAM:         return "end of stream";
+        case OM_IO_READ_FAILED:           return "read failed";
+        case OM_IO_OPEN_FAILED:           return "open failed";
+        case OM_FORMAT_DETECTION_FAILED:  return "format detection failed";
+        case OM_FORMAT_NOT_SUPPORTED:     return "format not supported";
+        case OM_FORMAT_INVALID_HEADER:    return "invalid header";
+        case OM_FORMAT_CORRUPTED:         return "corrupted format";
+        case OM_FORMAT_NO_STREAMS:        return "no streams found";
+        case OM_FORMAT_PARSE_FAILED:      return "format parse failed";
+        case OM_CODEC_NOT_FOUND:          return "codec not found";
+        case OM_CODEC_NOT_SUPPORTED:      return "codec not supported";
+        case OM_CODEC_OPEN_FAILED:        return "codec open failed";
+        case OM_CODEC_INVALID_PARAMS:     return "invalid codec parameters";
+        case OM_CODEC_DECODE_FAILED:      return "decode failed";
+        case OM_CODEC_HWACCEL_FAILED:     return "hardware acceleration failed";
+        case OM_CODEC_HWACCEL_NOT_FOUND:  return "hardware acceleration not found";
+        default:                          return "unknown error";
+    }
+}
+
 static auto getBitsPerComponent(OMPixelFormat fmt) noexcept -> uint8_t {
     switch (fmt) {
         case OM_FORMAT_YUV420P10:
@@ -579,19 +610,18 @@ public:
     auto play(const std::string& path) -> bool {
         stop();
         path_ = path;
+        last_error_message_.clear();
 
         auto input = InputStream::createFileStream(path);
         if (!input || !input->isValid()) {
-            SDL_Log("[Player] Cannot open: %s", path.c_str());
-            return false;
+            return fail("Cannot open: " + path);
         }
 
         uint8_t probe[2048];
         const size_t n  = input->read(probe);
         const DetectedFormat fmt = format_detector_.detect({probe, n});
         if (fmt.isUnknown()) {
-            SDL_Log("[Player] Unknown format: %s", path.c_str());
-            return false;
+            return fail("Unknown format: " + path);
         }
         input->seek(0, Whence::BEG);
 
@@ -601,12 +631,11 @@ public:
                 demuxer_ = desc->demuxer_factory();
         }
         if (!demuxer_) {
-            SDL_Log("[Player] No demuxer for format %d", int(fmt.container));
-            return false;
+            return fail("No demuxer for detected format");
         }
-        if (demuxer_->open(std::move(input)) != OM_SUCCESS) {
-            SDL_Log("[Player] Demuxer open failed");
-            return false;
+        if (const OMError err = demuxer_->open(std::move(input)); err != OM_SUCCESS) {
+            return fail("Demuxer open failed: " + std::string(detail::describeError(err)) +
+                        " (" + std::to_string(int(err)) + ")");
         }
 
         onDemuxerOpen();
@@ -650,6 +679,7 @@ public:
     auto hasImage()       const -> bool  { return has_image_; }
     auto hasVideo()       const -> bool  { return has_video_; }
     auto hasAudio()       const -> bool  { return has_audio_; }
+    auto getLastError()   const -> const std::string& { return last_error_message_; }
 
     auto isActive() const -> bool {
         return has_video_ || audio_sink_.started();
@@ -744,6 +774,7 @@ private:
 
     // Timeline
     double total_duration_secs_ = 0;
+    std::string last_error_message_;
 
     // Threads
     std::thread       demux_thread_;
@@ -773,6 +804,12 @@ private:
             case HWDeviceType::VAAPI:  return name.starts_with("vaapi_");
             default:                   return false;
         }
+    }
+
+    auto fail(std::string message) -> bool {
+        last_error_message_ = std::move(message);
+        SDL_Log("[Player] %s", last_error_message_.c_str());
+        return false;
     }
 
     void releaseHardwareDevice() {

@@ -581,6 +581,8 @@ public:
       extradata->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&buf));
       if (buf) info.extradata.assign(static_cast<const uint8_t*>(buf->GetNative()), static_cast<const uint8_t*>(buf->GetNative()) + buf->GetSize());
     }
+    info.mastering_display = input_format_.mastering_display;
+    info.content_light_level = input_format_.content_light_level;
     return info;
   }
 

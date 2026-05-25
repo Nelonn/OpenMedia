@@ -262,6 +262,8 @@ public:
 
   auto getInfo() -> EncodingInfo override {
     EncodingInfo info = {};
+    info.mastering_display = input_format_.mastering_display;
+    info.content_light_level = input_format_.content_light_level;
     // WMF doesn't always provide extradata easily until first frame or drain
     return info;
   }
@@ -399,9 +401,15 @@ public:
 
     if (!createDecoderResources(bit_depth)) return OM_CODEC_HWACCEL_FAILED;
 
+    output_format_ = {};
     output_format_.width = width_;
     output_format_.height = height_;
-    if (h264_.has_sps) {
+    output_format_.format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+    output_format_.color_space = options.format.video.color_space;
+    output_format_.transfer_char = options.format.video.transfer_char;
+    output_format_.color_primaries = options.format.video.color_primaries;
+    output_format_.color_range = OM_COLOR_RANGE_UNSPECIFIED;
+    if (codec_id_ == OM_CODEC_H264 && h264_.has_sps) {
       for (uint32_t i = 0; i < 32; ++i) {
         if (!h264_.sps_valid[i]) continue;
         const auto& s = h264_.sps[i];
@@ -409,6 +417,23 @@ public:
           output_format_.color_primaries = (OMColorPrimaries) s.vui.colour_primaries;
           output_format_.transfer_char = (OMTransferCharacteristic) s.vui.transfer_characteristics;
           output_format_.color_space = (OMColorSpace) s.vui.matrix_coefficients;
+        }
+        if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
+          output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+        }
+        break;
+      }
+    } else if (codec_id_ == OM_CODEC_H265 && h265_ && h265_->hasSps()) {
+      for (int i = 0; i < 16; ++i) {
+        const auto& s = h265_->sps(i);
+        if (!s.valid) continue;
+        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+          output_format_.color_primaries = (OMColorPrimaries) s.vui.colour_primaries;
+          output_format_.transfer_char = (OMTransferCharacteristic) s.vui.transfer_characteristics;
+          output_format_.color_space = (OMColorSpace) s.vui.matrix_coeffs;
+        }
+        if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
+          output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
         }
         break;
       }
@@ -794,6 +819,12 @@ private:
 
     const OMPixelFormat om_fmt = (desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
     Picture pic(om_fmt, width_, height_);
+    pic.color_space = output_format_.color_space;
+    pic.transfer_char = output_format_.transfer_char;
+    pic.color_primaries = output_format_.color_primaries;
+    pic.color_range = output_format_.color_range;
+    pic.mastering_display = output_format_.mastering_display;
+    pic.content_light_level = output_format_.content_light_level;
     const auto y_stride = pic.planes.getLinesize(0);
     const auto uv_stride = pic.planes.getLinesize(1);
     auto* y = pic.planes.getData(0);

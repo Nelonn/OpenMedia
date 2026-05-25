@@ -42,6 +42,8 @@ class NVDec final : public Decoder {
   VideoFormat output_format_ = {};
   std::vector<Frame> decoded_frames_;
   std::mutex frames_mutex_;
+  OMMasteringDisplayMetadata pending_mastering_display_ = {};
+  OMContentLightLevel pending_content_light_level_ = {};
 
   bool initialized_ = false;
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -64,13 +66,40 @@ class NVDec final : public Decoder {
   }
 
   auto onSEIMessage(CUVIDSEIMESSAGEINFO* info) -> int {
+    auto read_be16 = [](const uint8_t* data) -> uint16_t {
+      return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8u) | data[1]);
+    };
+    auto read_be32 = [](const uint8_t* data) -> uint32_t {
+      return (static_cast<uint32_t>(data[0]) << 24u) |
+             (static_cast<uint32_t>(data[1]) << 16u) |
+             (static_cast<uint32_t>(data[2]) << 8u) |
+             static_cast<uint32_t>(data[3]);
+    };
+
+    auto* sei_data = static_cast<const uint8_t*>(info->pSEIData);
+    size_t offset = 0;
     for (uint32_t i = 0; i < info->sei_message_count; ++i) {
-        const auto& msg = info->pSEIMessage[i];
-        if (msg.sei_message_type == 137) { // Mastering Display Colour Volume
-            // Map msg.pSEIMessageData to Mastering Display structure
-        } else if (msg.sei_message_type == 144) { // Content Light Level
-            // Map msg.pSEIMessageData to CLL structure
+      const auto& msg = info->pSEIMessage[i];
+      if (!sei_data) break;
+      const auto* payload = sei_data + offset;
+      if (msg.sei_message_type == 137 && msg.sei_message_size >= 24) {
+        for (int p = 0; p < 3; ++p) {
+          pending_mastering_display_.display_primaries[p][0] = read_be16(payload + p * 4);
+          pending_mastering_display_.display_primaries[p][1] = read_be16(payload + p * 4 + 2);
         }
+        pending_mastering_display_.white_point[0] = read_be16(payload + 12);
+        pending_mastering_display_.white_point[1] = read_be16(payload + 14);
+        pending_mastering_display_.max_display_mastering_luminance = read_be32(payload + 16);
+        pending_mastering_display_.min_display_mastering_luminance = read_be32(payload + 20);
+        pending_mastering_display_.has_value = true;
+        output_format_.mastering_display = pending_mastering_display_;
+      } else if (msg.sei_message_type == 144 && msg.sei_message_size >= 4) {
+        pending_content_light_level_.max_content_light_level = read_be16(payload);
+        pending_content_light_level_.max_pic_average_light_level = read_be16(payload + 2);
+        pending_content_light_level_.has_value = true;
+        output_format_.content_light_level = pending_content_light_level_;
+      }
+      offset += msg.sei_message_size;
     }
     return 1;
   }
@@ -113,6 +142,7 @@ class NVDec final : public Decoder {
       switch (t) {
         case 1: return OM_TRANSFER_BT709;
         case 16: return OM_TRANSFER_PQ;
+        case 18: return OM_TRANSFER_HLG;
         default: return OM_TRANSFER_UNKNOWN;
       }
     };
@@ -127,6 +157,7 @@ class NVDec final : public Decoder {
     output_format_.color_primaries = map_primaries(format->video_signal_description.color_primaries);
     output_format_.transfer_char = map_transfer(format->video_signal_description.transfer_characteristics);
     output_format_.color_space = map_matrix(format->video_signal_description.matrix_coefficients);
+    output_format_.color_range = format->video_signal_description.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
 
     if (format->seqhdr_data_length >= sizeof(CUVIDEOFORMATEX)) {
       CUVIDEOFORMATEX* ex = (CUVIDEOFORMATEX*) format;
@@ -179,6 +210,12 @@ class NVDec final : public Decoder {
       pic.format = output_format_.format;
       pic.width = output_format_.width;
       pic.height = output_format_.height;
+      pic.color_space = output_format_.color_space;
+      pic.transfer_char = output_format_.transfer_char;
+      pic.color_primaries = output_format_.color_primaries;
+      pic.color_range = output_format_.color_range;
+      pic.mastering_display = pending_mastering_display_;
+      pic.content_light_level = pending_content_light_level_;
       pic.buffer = std::static_pointer_cast<HardwarePicture>(pic_buffer);
       frame.data = std::move(pic);
 
@@ -209,6 +246,13 @@ public:
 
     codec_id_ = options.format.codec_id;
     h264_ = {};
+    output_format_ = {};
+    output_format_.color_space = options.format.video.color_space;
+    output_format_.transfer_char = options.format.video.transfer_char;
+    output_format_.color_primaries = options.format.video.color_primaries;
+    output_format_.color_range = OM_COLOR_RANGE_UNSPECIFIED;
+    pending_mastering_display_ = {};
+    pending_content_light_level_ = {};
     if (codec_id_ == OM_CODEC_H264) {
       h264_.parseExtradata(options.extradata);
     }
