@@ -100,8 +100,11 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   if (!registry) return;
 
   // Audio codecs
+  registry->registerCodec(&CODEC_PCM_U8);
   registry->registerCodec(&CODEC_PCM_S16LE);
+  registry->registerCodec(&CODEC_PCM_S32LE);
   registry->registerCodec(&CODEC_PCM_F32LE);
+  registry->registerCodec(&CODEC_PCM_F64LE);
 #if defined(__APPLE__)
   registry->registerCodec(&CODEC_AUDIO_TOOLBOX_ALAC);
 #else

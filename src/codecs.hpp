@@ -5,8 +5,11 @@
 namespace openmedia {
 
 // Audio
+extern const CodecDescriptor CODEC_PCM_U8;
 extern const CodecDescriptor CODEC_PCM_S16LE;
+extern const CodecDescriptor CODEC_PCM_S32LE;
 extern const CodecDescriptor CODEC_PCM_F32LE;
+extern const CodecDescriptor CODEC_PCM_F64LE;
 extern const CodecDescriptor CODEC_ALAC;
 extern const CodecDescriptor CODEC_FDK_AAC;
 extern const CodecDescriptor CODEC_MP3;
