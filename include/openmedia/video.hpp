@@ -63,8 +63,10 @@ OM_ENUM(OMColorSpace, uint8_t) {
 
 OM_ENUM(OMColorRange, uint8_t) {
     OM_COLOR_RANGE_UNSPECIFIED = 0,
-    OM_COLOR_RANGE_MPEG = 1, // Limited range
-    OM_COLOR_RANGE_JPEG = 2, // Full range
+    OM_COLOR_RANGE_MPEG = 1,
+    OM_COLOR_RANGE_LIMITED = OM_COLOR_RANGE_MPEG,
+    OM_COLOR_RANGE_JPEG = 2,
+    OM_COLOR_RANGE_FULL = OM_COLOR_RANGE_JPEG,
 };
 
 OM_ENUM(OMTransferCharacteristic, uint8_t) {
