@@ -344,6 +344,8 @@ struct OPENMEDIA_ABI VideoFormat {
   OMTransferCharacteristic transfer_char;
   OMColorPrimaries color_primaries;
   OMColorRange color_range;
+  OMMasteringDisplayMetadata mastering_display;
+  OMContentLightLevel content_light_level;
 };
 
 struct OPENMEDIA_ABI Picture {
