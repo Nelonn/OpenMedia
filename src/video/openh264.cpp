@@ -386,9 +386,10 @@ public:
     if (!encoder_) return Err(OM_CODEC_ENCODE_FAILED);
 
     const auto& pic = std::get<Picture>(frame.data);
+    if (pic.format != OM_FORMAT_YUV420P) {
+      return Err(OM_CODEC_NOT_SUPPORTED);
+    }
 
-    // OpenH264 expects I420. If input is different, we'd need conversion,
-    // but for now we assume input frame matches configured format.
     SSourcePicture src_pic = {};
     src_pic.iColorFormat = videoFormatI420;
     src_pic.iPicWidth = pic.width;
