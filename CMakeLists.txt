@@ -42,6 +42,7 @@ target_sources(OpenMedia PRIVATE
         include/openmedia/macro.h
         include/openmedia/media.h
         include/openmedia/media.hpp
+        include/openmedia/metadata_keys.hpp
         include/openmedia/packet.hpp
         include/openmedia/result.hpp
         include/openmedia/track.hpp

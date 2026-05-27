@@ -4,7 +4,9 @@
 #include <mkvparser/mkvreader.h>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <map>
+#include <optional>
 #include <openmedia/audio.hpp>
 #include <openmedia/format_api.hpp>
 #include <openmedia/io.hpp>
@@ -18,6 +20,83 @@
 #include <util/io_util.hpp>
 
 namespace openmedia {
+
+static constexpr uint64_t MKV_TRACK_ENTRY = 0xAE;
+static constexpr uint64_t MKV_BLOCK_ADDITION_MAPPING = 0x41E4;
+static constexpr uint64_t MKV_BLOCK_ADD_ID_VALUE = 0x41F0;
+static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE = 0x41E7;
+static constexpr uint64_t MKV_BLOCK_ADD_ID_EXTRA_DATA = 0x41ED;
+static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE_DOLBY_VISION = 4;
+
+struct EbmlElementView {
+  uint64_t id = 0;
+  uint64_t size = 0;
+  size_t payload = 0;
+  size_t end = 0;
+};
+
+static auto readEbmlVint(std::span<const uint8_t> data, size_t& pos, bool strip_marker) -> std::optional<uint64_t> {
+  if (pos >= data.size()) return std::nullopt;
+
+  const uint8_t first = data[pos];
+  uint8_t marker = 0x80;
+  size_t length = 1;
+  while (length <= 8 && (first & marker) == 0) {
+    marker >>= 1u;
+    ++length;
+  }
+  if (length > 8 || pos + length > data.size()) return std::nullopt;
+
+  uint64_t value = strip_marker ? (first & ~marker) : first;
+  for (size_t i = 1; i < length; ++i) {
+    value = (value << 8u) | data[pos + i];
+  }
+
+  pos += length;
+  return value;
+}
+
+static auto nextEbmlElement(std::span<const uint8_t> data, size_t& pos) -> std::optional<EbmlElementView> {
+  const auto id = readEbmlVint(data, pos, false);
+  const auto size = readEbmlVint(data, pos, true);
+  if (!id || !size) return std::nullopt;
+
+  const size_t payload = pos;
+  if (*size > data.size() - payload) return std::nullopt;
+  const size_t end = payload + static_cast<size_t>(*size);
+  pos = end;
+  return EbmlElementView {.id = *id, .size = *size, .payload = payload, .end = end};
+}
+
+static auto readEbmlUInt(std::span<const uint8_t> data) -> std::optional<uint64_t> {
+  if (data.empty() || data.size() > 8) return std::nullopt;
+  uint64_t value = 0;
+  for (const uint8_t b : data) value = (value << 8u) | b;
+  return value;
+}
+
+static void setDolbyVisionConfigurationMetadata(Dictionary& metadata, std::span<const uint8_t> data) {
+  if (data.size() < 4) return;
+
+  const uint8_t major = data[0];
+  const uint8_t minor = data[1];
+  const uint8_t profile_level = data[2];
+  const uint8_t flags = data[3];
+
+  metadata.setBool(DOLBY_VISION_PRESENT, true);
+  metadata.setBinary(DOLBY_VISION_CONFIG, data);
+  metadata.setInt32(DOLBY_VISION_VERSION_MAJOR, major);
+  metadata.setInt32(DOLBY_VISION_VERSION_MINOR, minor);
+  metadata.setInt32(DOLBY_VISION_PROFILE, profile_level >> 1u);
+  metadata.setInt32(DOLBY_VISION_LEVEL, ((profile_level & 0x01u) << 5u) | (flags >> 3u));
+  metadata.setBool(DOLBY_VISION_RPU_PRESENT, (flags & 0x04u) != 0);
+  metadata.setBool(DOLBY_VISION_EL_PRESENT, (flags & 0x02u) != 0);
+  metadata.setBool(DOLBY_VISION_BL_PRESENT, (flags & 0x01u) != 0);
+
+  if (data.size() >= 5) {
+    metadata.setInt32(DOLBY_VISION_BL_SIGNAL_COMPATIBILITY_ID, data[4] >> 4u);
+  }
+}
 
 class InputStreamMkvReader final : public mkvparser::IMkvReader {
   std::unique_ptr<RandomRead> random_;
@@ -312,6 +391,8 @@ private:
           track.extradata.assign(cp, cp + cp_size);
         }
 
+        parseDolbyVisionBlockAdditionMapping(t, track);
+
         tracks_.push_back(track);
         track_map_[static_cast<int32_t>(t->GetNumber())] = next_index++;
 
@@ -340,6 +421,58 @@ private:
     }
 
     return OM_SUCCESS;
+  }
+
+  void parseDolbyVisionBlockAdditionMapping(const mkvparser::Track* parser_track, Track& track) {
+    if (!parser_track || !mkv_reader_ || parser_track->m_element_size <= 0) return;
+    if (parser_track->m_element_size > static_cast<long long>(std::numeric_limits<int>::max())) return;
+
+    std::vector<uint8_t> track_entry(static_cast<size_t>(parser_track->m_element_size));
+    if (mkv_reader_->Read(parser_track->m_element_start,
+                          static_cast<long>(track_entry.size()),
+                          track_entry.data()) != 0) {
+      return;
+    }
+
+    size_t pos = 0;
+    auto root = nextEbmlElement(track_entry, pos);
+    if (!root || root->id != MKV_TRACK_ENTRY) return;
+
+    auto payload = std::span<const uint8_t>(track_entry.data() + root->payload, root->end - root->payload);
+    pos = 0;
+    while (pos < payload.size()) {
+      auto child = nextEbmlElement(payload, pos);
+      if (!child) return;
+      if (child->id != MKV_BLOCK_ADDITION_MAPPING) continue;
+
+      auto mapping = payload.subspan(child->payload, child->end - child->payload);
+      size_t mapping_pos = 0;
+      std::optional<uint64_t> block_add_id;
+      std::optional<uint64_t> block_add_type;
+      std::span<const uint8_t> extra_data;
+
+      while (mapping_pos < mapping.size()) {
+        auto item = nextEbmlElement(mapping, mapping_pos);
+        if (!item) return;
+
+        auto item_payload = mapping.subspan(item->payload, item->end - item->payload);
+        if (item->id == MKV_BLOCK_ADD_ID_VALUE) {
+          block_add_id = readEbmlUInt(item_payload);
+        } else if (item->id == MKV_BLOCK_ADD_ID_TYPE) {
+          block_add_type = readEbmlUInt(item_payload);
+        } else if (item->id == MKV_BLOCK_ADD_ID_EXTRA_DATA) {
+          extra_data = item_payload;
+        }
+      }
+
+      if (block_add_type == MKV_BLOCK_ADD_ID_TYPE_DOLBY_VISION) {
+        track.metadata.setBool(DOLBY_VISION_PRESENT, true);
+        if (block_add_id) {
+          track.metadata.setInt32(DOLBY_VISION_BLOCK_ADD_ID, static_cast<int32_t>(*block_add_id));
+        }
+        setDolbyVisionConfigurationMetadata(track.metadata, extra_data);
+      }
+    }
   }
 
   static auto mkvCodecIdToOMCodec(const char* id) -> OMCodecId {
@@ -616,6 +749,12 @@ private:
     if (track.format.video.width > 0 && track.format.video.height > 0) {
       video_track->set_display_width(track.format.video.width);
       video_track->set_display_height(track.format.video.height);
+    }
+
+    if (const Value* value = track.metadata.get(DOLBY_VISION_BLOCK_ADD_ID)) {
+      if (auto block_add_id = value->toInt64(); block_add_id && *block_add_id > 0) {
+        video_track->set_max_block_additional_id(static_cast<uint64_t>(*block_add_id));
+      }
     }
 
     return track_number;

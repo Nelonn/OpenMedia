@@ -70,19 +70,31 @@ static auto isAvcVariant(uint32_t fmt) -> bool {
       ATOM('a', 'v', 'c', '2'),
       ATOM('a', 'v', 'c', '3'),
       ATOM('a', 'v', 'c', '4'),
+      ATOM('d', 'v', 'a', '1'),
+      ATOM('d', 'v', 'a', 'v'),
       ATOM('H', '2', '6', '4'),
       ATOM('X', '2', '6', '4'),
   };
   return containsAtom(kTable, fmt);
 }
 
+static auto isDolbyVisionAvcVariant(uint32_t fmt) -> bool {
+  return fmt == ATOM('d', 'v', 'a', '1') || fmt == ATOM('d', 'v', 'a', 'v');
+}
+
 static auto isHevcVariant(uint32_t fmt) -> bool {
   static constexpr uint32_t kTable[] = {
       ATOM('h', 'v', 'c', '1'),
       ATOM('h', 'e', 'v', '1'),
+      ATOM('d', 'v', 'h', '1'),
+      ATOM('d', 'v', 'h', 'e'),
       ATOM('H', 'E', 'V', 'C'),
   };
   return containsAtom(kTable, fmt);
+}
+
+static auto isDolbyVisionHevcVariant(uint32_t fmt) -> bool {
+  return fmt == ATOM('d', 'v', 'h', '1') || fmt == ATOM('d', 'v', 'h', 'e');
 }
 
 static auto isVvcVariant(uint32_t fmt) -> bool {
@@ -613,6 +625,34 @@ inline auto parseHvcc(std::span<const uint8_t> body,
   track.track.extradata = annexb_extra;
   track.bsf = std::make_unique<AnnexBFilter>(
       nalu_len_sz, std::move(annexb_extra));
+
+  return true;
+}
+
+inline auto parseDolbyVisionConfiguration(std::span<const uint8_t> body,
+                                          BMFFTrack& track) -> bool {
+  if (body.size() < 4) return false;
+
+  BufReader r(body.data(), body.size());
+  const uint8_t major = r.read_u8();
+  const uint8_t minor = r.read_u8();
+  const uint8_t profile_level = r.read_u8();
+  const uint8_t flags = r.read_u8();
+  if (!r.ok()) return false;
+
+  track.track.metadata.setBool(DOLBY_VISION_PRESENT, true);
+  track.track.metadata.setBinary(DOLBY_VISION_CONFIG, body);
+  track.track.metadata.setInt32(DOLBY_VISION_VERSION_MAJOR, major);
+  track.track.metadata.setInt32(DOLBY_VISION_VERSION_MINOR, minor);
+  track.track.metadata.setInt32(DOLBY_VISION_PROFILE, profile_level >> 1u);
+  track.track.metadata.setInt32(DOLBY_VISION_LEVEL, ((profile_level & 0x01u) << 5u) | (flags >> 3u));
+  track.track.metadata.setBool(DOLBY_VISION_RPU_PRESENT, (flags & 0x04u) != 0);
+  track.track.metadata.setBool(DOLBY_VISION_EL_PRESENT, (flags & 0x02u) != 0);
+  track.track.metadata.setBool(DOLBY_VISION_BL_PRESENT, (flags & 0x01u) != 0);
+
+  if (body.size() >= 5) {
+    track.track.metadata.setInt32(DOLBY_VISION_BL_SIGNAL_COMPATIBILITY_ID, body[4] >> 4u);
+  }
 
   return true;
 }
@@ -1668,6 +1708,10 @@ private:
       // Codec configuration boxes
       case ATOM('a', 'v', 'c', 'C'): parseAvcc(body, track); break;
       case ATOM('h', 'v', 'c', 'C'): parseHvcc(body, track); break;
+      case ATOM('d', 'v', 'c', 'C'):
+      case ATOM('d', 'v', 'v', 'C'):
+        parseDolbyVisionConfiguration(body, track);
+        break;
       case ATOM('V', 'v', 'c', 'C'):
       case ATOM('v', 'v', 'c', 'C'): parseVvcc(body, track); break;
       case ATOM('e', 'v', 'c', 'C'): parseEvcc(body, track); break;
@@ -1802,6 +1846,11 @@ private:
       } else if (isAvcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_H264;
+        if (isDolbyVisionAvcVariant(fmt)) {
+          st.metadata.setBool(DOLBY_VISION_PRESENT, true);
+          st.metadata.setString(DOLBY_VISION_SAMPLE_ENTRY,
+                                std::string_view(fmt == ATOM('d', 'v', 'a', '1') ? "dva1" : "dvav"));
+        }
         if (!seekAndParseVideoEntry(entry_body, st)) {
           entry_pos = entry_end;
           continue;
@@ -1811,6 +1860,11 @@ private:
       } else if (isHevcVariant(fmt)) {
         st.format.type = OM_MEDIA_VIDEO;
         st.format.codec_id = OM_CODEC_HEVC;
+        if (isDolbyVisionHevcVariant(fmt)) {
+          st.metadata.setBool(DOLBY_VISION_PRESENT, true);
+          st.metadata.setString(DOLBY_VISION_SAMPLE_ENTRY,
+                                std::string_view(fmt == ATOM('d', 'v', 'h', '1') ? "dvh1" : "dvhe"));
+        }
         if (!seekAndParseVideoEntry(entry_body, st)) {
           fatal_ = true;
           return;
