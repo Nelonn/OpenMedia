@@ -24,5 +24,6 @@ extern const FormatDescriptor FORMAT_GIF;
 extern const FormatDescriptor FORMAT_TGA;
 extern const FormatDescriptor FORMAT_BMP;
 extern const FormatDescriptor FORMAT_TIFF;
+extern const FormatDescriptor FORMAT_ICNS;
 
 }
