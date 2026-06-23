@@ -11,6 +11,7 @@ OM_ENUM(OMCodecId, uint32_t) {
   OM_CODEC_NONE = 0,
 
   // Video codecs
+  OM_CODEC_RAW_VIDEO = 1,
   OM_CODEC_H261 = OM_MAGIC('H261'),
   OM_CODEC_H262 = OM_MAGIC('H262'),
   OM_CODEC_MPEG2 = OM_CODEC_H262,
@@ -54,11 +55,21 @@ OM_ENUM(OMCodecId, uint32_t) {
   OM_CODEC_DTS = OM_MAGIC('DTS '),
   OM_CODEC_AC3 = OM_MAGIC('ac-3'),
   OM_CODEC_EAC3 = OM_MAGIC('ec-3'),
+  OM_CODEC_LC3 = OM_MAGIC('lc3 '),
+  OM_CODEC_SBC = OM_MAGIC('sbc '),
+  OM_CODEC_APTX = OM_MAGIC('aptX'),
+  OM_CODEC_APTX_HD = OM_MAGIC('apXh'),
+  OM_CODEC_APTX_LL = OM_MAGIC('apXl'),
+  OM_CODEC_APTX_AD = OM_MAGIC('apXa'),
+  OM_CODEC_LDAC = OM_MAGIC('ldac'),
+  OM_CODEC_LHDC = OM_MAGIC('lhdc'),
+  OM_CODEC_SSC = OM_MAGIC('ssc '),
 
   // Image codecs
   OM_CODEC_JPEG = OM_MAGIC('JPEG'),
   OM_CODEC_JPEGXL = OM_MAGIC('jxl '),
   OM_CODEC_JPEGXR = OM_MAGIC('jxr '),
+  OM_CODEC_JPEG2000 = OM_MAGIC('jP  '),
   OM_CODEC_PNG = OM_MAGIC_RAW(0x89, 'P', 'N', 'G'),
   OM_CODEC_WEBP = OM_MAGIC('WEBP'),
   OM_CODEC_BMP = OM_MAGIC_RAW('B', 'M', 0x00, 0x00),

@@ -47,6 +47,7 @@ target_sources(OpenMedia PRIVATE
         include/openmedia/result.hpp
         include/openmedia/track.hpp
         include/openmedia/video.hpp
+        src/image/icns.cpp
         src/util/bit_reader.cpp
         src/util/bit_reader.hpp
         src/util/cpp.hpp
@@ -440,23 +441,6 @@ if (OPENMEDIA_PNG)
     target_sources(OpenMedia PRIVATE src/image/png_decoder.cpp)
 endif ()
 
-if (OPENMEDIA_TIFF)
-    if (AUI_BOOT)
-        auib_import(TIFF https://github.com/libsdl-org/libtiff
-                VERSION f324415f50cb5c90f7712e9dfe69831f5d2ea88d
-                CMAKE_ARGS -Dtiff-tools=OFF -Dtiff-docs=OFF)
-    elseif (NOT TARGET TIFF::tiff)
-        set(tiff-tools OFF)
-        set(tiff-tests OFF)
-        set(tiff-contrib OFF)
-        set(tiff-docs OFF)
-        add_subdirectory(third_party/external/libtiff)
-    endif ()
-    target_link_libraries(OpenMedia PRIVATE TIFF::tiff)
-    target_sources(OpenMedia PRIVATE src/image/tiff_demuxer.cpp)
-    target_sources(OpenMedia PRIVATE src/image/tiff_decoder.cpp)
-endif ()
-
 if (OPENMEDIA_TGA)
     if (AUI_BOOT)
         auib_import(tga https://github.com/Nelonn/tga
@@ -493,6 +477,15 @@ if (OPENMEDIA_DAV1D)
     target_sources(OpenMedia PRIVATE src/video/dav1d.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DAV1D)
 endif ()
+
+#if (OPENMEDIA_AVIF)
+#    if (AUI_BOOT)
+#        auib_import(libavif https://github.com/aomediacodec/libavif
+#                VERSION 253f0d0f04e771dd94b37682a211b10a9cfe702e
+#                CMAKE_ARGS -DAVIF_LIBYUV=LOCAL -DAVIF_CODEC_DAV1D_ENABLED=ON)
+#    endif ()
+#    target_link_libraries(OpenMedia PRIVATE avif)
+#endif ()
 
 if (OPENMEDIA_VPX)
     if (AUI_BOOT)
@@ -550,6 +543,23 @@ if (OPENMEDIA_XEVE)
     target_link_libraries(OpenMedia PRIVATE XEVE::xeve)
     target_sources(OpenMedia PRIVATE src/video/xeve.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVE)
+endif ()
+
+if (OPENMEDIA_TIFF)
+    if (AUI_BOOT)
+        auib_import(TIFF https://github.com/libsdl-org/libtiff
+                VERSION f324415f50cb5c90f7712e9dfe69831f5d2ea88d
+                CMAKE_ARGS -Dtiff-tools=OFF -Dtiff-docs=OFF)
+    elseif (NOT TARGET TIFF::tiff)
+        set(tiff-tools OFF)
+        set(tiff-tests OFF)
+        set(tiff-contrib OFF)
+        set(tiff-docs OFF)
+        add_subdirectory(third_party/external/libtiff)
+    endif ()
+    target_link_libraries(OpenMedia PRIVATE TIFF::tiff)
+    target_sources(OpenMedia PRIVATE src/image/tiff_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/image/tiff_decoder.cpp)
 endif ()
 
 if (OPENMEDIA_INSTALL)
