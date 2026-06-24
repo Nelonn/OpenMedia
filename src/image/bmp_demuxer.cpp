@@ -141,15 +141,11 @@ public:
   }
 };
 
-auto create_bmp_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<BMPDemuxer>();
-}
-
 const FormatDescriptor FORMAT_BMP = {
     .container_id = OM_CONTAINER_BMP,
     .name = "bmp",
     .long_name = "BMP (Bitmap)",
-    .demuxer_factory = [] { return create_bmp_demuxer(); },
+    .demuxer_factory = [] { return std::make_unique<BMPDemuxer>(); },
     .muxer_factory = {},
 };
 

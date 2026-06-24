@@ -121,15 +121,11 @@ public:
   }
 };
 
-auto create_png_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<PNGDemuxer>();
-}
-
 const FormatDescriptor FORMAT_PNG = {
     .container_id = static_cast<OMCodecId>(OM_CONTAINER_PNG),
     .name = "png",
     .long_name = "PNG (Portable Network Graphics)",
-    .demuxer_factory = [] { return create_png_demuxer(); },
+    .demuxer_factory = [] { return std::make_unique<PNGDemuxer>(); },
     .muxer_factory = {},
 };
 

@@ -20,7 +20,11 @@ if (PROJECT_IS_TOP_LEVEL)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 endif ()
 
-add_library(OpenMedia)
+if (OPENMEDIA_STATIC)
+    add_library(OpenMedia STATIC)
+else ()
+    add_library(OpenMedia SHARED)
+endif ()
 
 target_sources(OpenMedia PRIVATE
         include/openmedia/audio.hpp

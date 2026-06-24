@@ -312,10 +312,6 @@ public:
   }
 };
 
-auto create_bmp_decoder() -> std::unique_ptr<Decoder> {
-  return std::make_unique<BMPDecoder>();
-}
-
 const CodecDescriptor CODEC_BMP = {
   .codec_id = OM_CODEC_BMP,
   .type = OM_MEDIA_IMAGE,
@@ -323,7 +319,7 @@ const CodecDescriptor CODEC_BMP = {
   .long_name = "BMP image decoder",
   .vendor = "OpenMedia",
   .flags = NONE,
-  .decoder_factory = create_bmp_decoder,
+  .decoder_factory = [] { return std::make_unique<BMPDecoder>(); },
 };
 
 } // namespace openmedia
