@@ -9,6 +9,7 @@ endif ()
 option(AUI_BOOT "AUI Boot compatibility" ON)
 
 option(OPENMEDIA_INSTALL "Install OpenMedia" ON)
+option(OPENMEDIA_STATIC "Build static OpenMedia instead of shared" OFF)
 
 # Universal
 option(OPENMEDIA_FFMPEG "FFmpeg" ${LINUX})
