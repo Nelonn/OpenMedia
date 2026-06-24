@@ -549,7 +549,7 @@ if (OPENMEDIA_TIFF)
     if (AUI_BOOT)
         auib_import(TIFF https://github.com/libsdl-org/libtiff
                 VERSION f324415f50cb5c90f7712e9dfe69831f5d2ea88d
-                CMAKE_ARGS -Dtiff-tools=OFF -Dtiff-docs=OFF)
+                CMAKE_ARGS -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF -Dtiff-install=ON)
     elseif (NOT TARGET TIFF::tiff)
         set(tiff-tools OFF)
         set(tiff-tests OFF)
