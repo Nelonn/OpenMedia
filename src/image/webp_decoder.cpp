@@ -72,10 +72,6 @@ public:
   }
 };
 
-auto create_webp_decoder() -> std::unique_ptr<Decoder> {
-  return std::make_unique<WEBPDecoder>();
-}
-
 const CodecDescriptor CODEC_WEBP = {
   .codec_id = OM_CODEC_WEBP,
   .type = OM_MEDIA_IMAGE,
@@ -83,7 +79,7 @@ const CodecDescriptor CODEC_WEBP = {
   .long_name = "WebP image decoder",
   .vendor = "Google",
   .flags = NONE,
-  .decoder_factory = create_webp_decoder,
+  .decoder_factory = [] { return std::make_unique<WEBPDecoder>(); },
 };
 
 } // namespace openmedia

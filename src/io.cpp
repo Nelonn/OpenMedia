@@ -8,12 +8,21 @@
 #include <openmedia/io.hpp>
 #include <thread>
 
+#if defined(_WIN32) && !defined(__MINGW32__)
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace openmedia {
 
 #if defined(_WIN32) && !defined(__MINGW32__)
 static auto utf8_to_wstring(const std::string& str) -> std::wstring {
-  std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-  return converter.from_bytes(str);
+  if (str.empty()) return {};
+  int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), nullptr, 0);
+  if (size <= 0) return {};
+  std::wstring result(size, 0);
+  MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), result.data(), size);
+  return result;
 }
 #endif
 

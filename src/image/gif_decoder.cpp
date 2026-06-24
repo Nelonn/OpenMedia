@@ -178,10 +178,6 @@ public:
   }
 };
 
-auto create_gif_decoder() -> std::unique_ptr<Decoder> {
-  return std::make_unique<GIFDecoder>();
-}
-
 const CodecDescriptor CODEC_GIF = {
   .codec_id = OM_CODEC_GIF,
   .type = OM_MEDIA_IMAGE,
@@ -189,7 +185,7 @@ const CodecDescriptor CODEC_GIF = {
   .long_name = "GIF image decoder",
   .vendor = "libgif",
   .flags = NONE,
-  .decoder_factory = create_gif_decoder,
+  .decoder_factory = [] { return std::make_unique<GIFDecoder>(); },
 };
 
 } // namespace openmedia

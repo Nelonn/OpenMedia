@@ -178,15 +178,11 @@ private:
   }
 };
 
-auto create_webp_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<WEBPDemuxer>();
-}
-
 const FormatDescriptor FORMAT_WEBP = {
     .container_id = OM_CONTAINER_WEBP,
     .name = "webp",
     .long_name = "WebP",
-    .demuxer_factory = [] { return create_webp_demuxer(); },
+    .demuxer_factory = [] { return std::make_unique<WEBPDemuxer>(); },
     .muxer_factory = {},
 };
 

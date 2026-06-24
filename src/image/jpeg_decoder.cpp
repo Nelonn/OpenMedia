@@ -190,10 +190,6 @@ public:
   }
 };
 
-auto create_jpeg_decoder() -> std::unique_ptr<Decoder> {
-  return std::make_unique<JPEGDecoder>();
-}
-
 const CodecDescriptor CODEC_JPEG = {
   .codec_id = OM_CODEC_JPEG,
   .type = OM_MEDIA_IMAGE,
@@ -201,7 +197,7 @@ const CodecDescriptor CODEC_JPEG = {
   .long_name = "JPEG image decoder",
   .vendor = "libjpeg-turbo",
   .flags = NONE,
-  .decoder_factory = create_jpeg_decoder,
+  .decoder_factory = [] { return std::make_unique<JPEGDecoder>(); },
 };
 
 } // namespace openmedia

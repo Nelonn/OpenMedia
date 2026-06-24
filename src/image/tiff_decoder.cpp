@@ -281,10 +281,6 @@ public:
   }
 };
 
-auto create_tiff_decoder() -> std::unique_ptr<Decoder> {
-  return std::make_unique<TIFFDecoder>();
-}
-
 const CodecDescriptor CODEC_TIFF = {
   .codec_id = OM_CODEC_TIFF,
   .type = OM_MEDIA_IMAGE,
@@ -292,7 +288,7 @@ const CodecDescriptor CODEC_TIFF = {
   .long_name = "TIFF image decoder",
   .vendor = "libtiff",
   .flags = NONE,
-  .decoder_factory = create_tiff_decoder,
+  .decoder_factory = [] { return std::make_unique<TIFFDecoder>(); },
 };
 
 } // namespace openmedia

@@ -260,15 +260,11 @@ public:
   }
 };
 
-auto create_mp3_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<MP3Demuxer>();
-}
-
 const FormatDescriptor FORMAT_MP3 = {
     .container_id = OM_CONTAINER_MP3,
     .name = "mp3",
     .long_name = "MPEG Audio Layer III",
-    .demuxer_factory = [] { return create_mp3_demuxer(); },
+    .demuxer_factory = [] { return std::make_unique<MP3Demuxer>(); },
     .muxer_factory = {},
 };
 

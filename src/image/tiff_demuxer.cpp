@@ -181,15 +181,11 @@ public:
   }
 };
 
-auto create_tiff_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<TIFFDemuxer>();
-}
-
 const FormatDescriptor FORMAT_TIFF = {
     .container_id = OM_CONTAINER_TIFF,
     .name = "tiff",
     .long_name = "TIFF (Tagged Image File Format)",
-    .demuxer_factory = [] { return create_tiff_demuxer(); },
+    .demuxer_factory = [] { return std::make_unique<TIFFDemuxer>(); },
     .muxer_factory = {},
 };
 
