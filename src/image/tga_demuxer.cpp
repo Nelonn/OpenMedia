@@ -133,15 +133,11 @@ public:
   }
 };
 
-auto create_tga_demuxer() -> std::unique_ptr<Demuxer> {
-  return std::make_unique<TGADemuxer>();
-}
-
 const FormatDescriptor FORMAT_TGA = {
     .container_id = OM_CONTAINER_TGA,
     .name = "tga",
     .long_name = "TGA (Truevision TARGA)",
-    .demuxer_factory = [] { return create_tga_demuxer(); },
+    .demuxer_factory = [] { return std::make_unique<TGADemuxer>(); },
     .muxer_factory = {},
 };
 

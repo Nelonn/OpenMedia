@@ -98,6 +98,7 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
   registry->registerFormat(&FORMAT_TGA);
   registry->registerFormat(&FORMAT_BMP);
   registry->registerFormat(&FORMAT_TIFF);
+  registry->registerFormat(&FORMAT_ICNS);
 }
 
 } // namespace openmedia

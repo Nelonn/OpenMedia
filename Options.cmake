@@ -35,6 +35,7 @@ option(OPENMEDIA_WEBP "WEBP" ON)
 option(OPENMEDIA_EXR "EXR" OFF)
 option(OPENMEDIA_JPEG "JPEG" ON)
 option(OPENMEDIA_TGA "TGA" ON)
+option(OPENMEDIA_AVIF "AVIF" ON)
 
 # Software Video (royalty)
 option(OPENMEDIA_DAV1D "dav1d (AV1 decoder)" ON) # royalty-free

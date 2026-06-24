@@ -45,11 +45,30 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_AC3: return {"AC-3", "Dolby Digital", OM_MEDIA_AUDIO};
     case OM_CODEC_EAC3:
       return {"E-AC-3", "Dolby Digital Plus", OM_MEDIA_AUDIO};
+    case OM_CODEC_LC3:
+      return {"LC3", "Low Complexity Communication Codec", OM_MEDIA_AUDIO};
+    case OM_CODEC_SBC:
+      return {"SBC", "Subband Coding", OM_MEDIA_AUDIO};
+    case OM_CODEC_APTX:
+      return {"aptX", "Qualcomm aptX Audio", OM_MEDIA_AUDIO};
+    case OM_CODEC_APTX_HD:
+      return {"aptX HD", "Qualcomm aptX HD High Definition Audio", OM_MEDIA_AUDIO};
+    case OM_CODEC_APTX_LL:
+      return {"aptX LL", "Qualcomm aptX Low Latency", OM_MEDIA_AUDIO};
+    case OM_CODEC_APTX_AD:
+      return {"aptX Adaptive", "Qualcomm aptX Adaptive", OM_MEDIA_AUDIO};
+    case OM_CODEC_LDAC:
+      return {"LDAC", "Sony LDAC Audio Coding", OM_MEDIA_AUDIO};
+    case OM_CODEC_LHDC:
+      return {"LHDC", "Low Latency High-Definition Audio Codec", OM_MEDIA_AUDIO};
+    case OM_CODEC_SSC:
+      return {"SSC", "Samsung Seamless Codec", OM_MEDIA_AUDIO};
 
       // Image
     case OM_CODEC_JPEG: return {"JPEG", "Joint Photographic Experts Group", OM_MEDIA_IMAGE};
     case OM_CODEC_JPEGXL: return {"JPEG XL", "JPEG XL", OM_MEDIA_IMAGE};
     case OM_CODEC_JPEGXR: return {"JPEG XR", "JPEG Extended Range", OM_MEDIA_IMAGE};
+    case OM_CODEC_JPEG2000: return {"JPEG 2000", "JPEG 2000", OM_MEDIA_IMAGE};
     case static_cast<uint32_t>(OM_CODEC_PNG): return {"PNG", "Portable Network Graphics", OM_MEDIA_IMAGE};
     case OM_CODEC_WEBP: return {"WebP", "WebP", OM_MEDIA_IMAGE};
     case OM_CODEC_BMP: return {"BMP", "Bitmap", OM_MEDIA_IMAGE};
