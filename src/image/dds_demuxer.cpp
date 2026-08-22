@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
 #define TINYDDSLOADER_IMPLEMENTATION
 #include <tinyddsloader.h>
 #include <util/demuxer_base.hpp>

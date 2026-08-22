@@ -5,6 +5,7 @@
 #include <cstring>
 #include <codecs.hpp>
 #include <openmedia/video.hpp>
+#include <cstdint>
 #include <tinyddsloader.h>
 #include <util/io_util.hpp>
 #include <vector>
