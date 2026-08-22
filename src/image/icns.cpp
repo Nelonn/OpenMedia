@@ -288,6 +288,9 @@ public:
       track.duration = 1;
       track.format.image.width = info.width;
       track.format.image.height = info.height;
+      if (track.format.codec_id == OM_CODEC_RAW_VIDEO) {
+        track.format.image.format = OM_FORMAT_R8G8B8A8;
+      }
       tracks_.push_back(track);
     }
 

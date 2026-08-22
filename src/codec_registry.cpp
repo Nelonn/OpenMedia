@@ -99,6 +99,8 @@ auto CodecRegistry::hasEncoder(OMCodecId codec_id) const noexcept -> bool {
 void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   if (!registry) return;
 
+  registry->registerCodec(&CODEC_RAW_VIDEO);
+
   // Audio codecs
   registry->registerCodec(&CODEC_PCM_U8);
   registry->registerCodec(&CODEC_PCM_S16LE);
@@ -238,6 +240,20 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_TGA);
   registry->registerCodec(&CODEC_BMP);
   registry->registerCodec(&CODEC_TIFF);
+
+#if defined(OPENMEDIA_HDR)
+  registry->registerCodec(&CODEC_RGBE);
+#endif
+
+#if defined(OPENMEDIA_DDS)
+  registry->registerCodec(&CODEC_BC1);
+  registry->registerCodec(&CODEC_BC2);
+  registry->registerCodec(&CODEC_BC3);
+  registry->registerCodec(&CODEC_BC4);
+  registry->registerCodec(&CODEC_BC5);
+  registry->registerCodec(&CODEC_BC6H);
+  registry->registerCodec(&CODEC_BC7);
+#endif
 
 #if defined(OPENMEDIA_AVCODEC)
   registerFFmpegCodecs(registry);

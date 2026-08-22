@@ -99,6 +99,12 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
   registry->registerFormat(&FORMAT_BMP);
   registry->registerFormat(&FORMAT_TIFF);
   registry->registerFormat(&FORMAT_ICNS);
+#if defined(OPENMEDIA_DDS)
+  registry->registerFormat(&FORMAT_DDS);
+#endif
+#if defined(OPENMEDIA_HDR)
+  registry->registerFormat(&FORMAT_HDR);
+#endif
 }
 
 } // namespace openmedia

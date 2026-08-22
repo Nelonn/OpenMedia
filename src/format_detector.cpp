@@ -90,6 +90,9 @@ void FormatDetector::addStandardImages() {
     if (v0 == magic_u32(0x00, 0x00, 0x01, 0x00)) return DetectedFormat::fromContainer(OM_CONTAINER_ICO);
     if (v0 == magic_u32(0x76, 0x2F, 0x31, 0x01)) return DetectedFormat::fromContainer(OM_CONTAINER_EXR);
     if (v0 == magic_u32('i', 'c', 'n', 's')) return DetectedFormat::fromContainer(OM_CONTAINER_ICNS);
+    if (v0 == magic_u32('D', 'D', 'S', ' ')) return DetectedFormat::fromContainer(OM_CONTAINER_DDS);
+    if (v0 == magic_u32('#', '?', 'R', 'A') || v0 == magic_u32('#', '?', 'R', 'G'))
+      return DetectedFormat::fromContainer(OM_CONTAINER_HDR);
     if (data.size() >= 12 && load_u32(data.data() + 4) == magic_u32('f', 't', 'y', 'p')) {
       uint32_t brand = load_u32(data.data() + 8);
       if (brand == magic_u32('a', 'v', 'i', 'f')) return DetectedFormat::fromContainer(OM_CONTAINER_HEIF);

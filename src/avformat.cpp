@@ -114,6 +114,7 @@ static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
     case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
     case AV_CODEC_ID_PRORES: return OM_CODEC_PRORES;
     case AV_CODEC_ID_THEORA: return OM_CODEC_THEORA;
+    case AV_CODEC_ID_RAWVIDEO: return OM_CODEC_RAW_VIDEO;
 
     // Audio codecs
     case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
@@ -313,6 +314,11 @@ private:
       track.id = static_cast<int32_t>(stream->id);
       track.format.codec_id = avCodecIdToOmCodecId(stream->codecpar->codec_id);
       track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
+
+      if (track.format.codec_id == OM_CODEC_RAW_VIDEO && stream->codecpar->format >= 0) {
+        track.format.video.format =
+            avPixelFormatToOmPixelFormat(static_cast<AVPixelFormat>(stream->codecpar->format));
+      }
 
       if (track.format.codec_id == OM_CODEC_JPEG || track.format.codec_id == OM_CODEC_PNG ||
           track.format.codec_id == OM_CODEC_WEBP || track.format.codec_id == OM_CODEC_BMP ||
