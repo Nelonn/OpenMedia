@@ -348,8 +348,6 @@ private:
       track.format.codec_id = avCodecIdToOmCodecId(stream->codecpar->codec_id);
       track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
 
-      // Raw video: the pixel format lives on codecpar->format (FFmpeg-style),
-      // since OM_CODEC_RAW_VIDEO does not encode the format in the id.
       if (track.format.codec_id == OM_CODEC_RAW_VIDEO && stream->codecpar->format >= 0) {
         track.format.video.format =
             avPixelFormatToOmPixelFormat(static_cast<AVPixelFormat>(stream->codecpar->format));
