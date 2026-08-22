@@ -58,6 +58,7 @@ struct OPENMEDIA_ABI MediaFormat {
       uint32_t width;
       uint32_t height;
       Rational framerate;
+      OMPixelFormat format = OM_FORMAT_UNKNOWN;
       OMColorSpace color_space;
       OMTransferCharacteristic transfer_char;
       OMColorPrimaries color_primaries;
@@ -68,6 +69,7 @@ struct OPENMEDIA_ABI MediaFormat {
     struct {
       uint32_t width;
       uint32_t height;
+      OMPixelFormat format = OM_FORMAT_UNKNOWN;
     } image;
   };
 };

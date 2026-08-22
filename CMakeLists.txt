@@ -95,6 +95,7 @@ target_sources(OpenMedia PRIVATE
         src/video/parser/start_code_avx512.cpp
         src/video/parser/start_code_neon.cpp
         src/video/parser/start_code_sve.cpp
+        src/video/raw_video_decoder.cpp
 )
 
 target_include_directories(OpenMedia PUBLIC
@@ -419,6 +420,18 @@ endif ()
 if (OPENMEDIA_BMP)
     target_sources(OpenMedia PRIVATE src/image/bmp_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/bmp_decoder.cpp)
+endif ()
+
+if (OPENMEDIA_DDS)
+    target_sources(OpenMedia PRIVATE src/image/dds_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/image/dds_decoder.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DDS)
+endif ()
+
+if (OPENMEDIA_HDR)
+    target_sources(OpenMedia PRIVATE src/image/hdr_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/image/hdr_decoder.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_HDR)
 endif ()
 
 if (OPENMEDIA_GIF)

@@ -114,6 +114,7 @@ static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
     case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
     case AV_CODEC_ID_PRORES: return OM_CODEC_PRORES;
     case AV_CODEC_ID_THEORA: return OM_CODEC_THEORA;
+    case AV_CODEC_ID_RAWVIDEO: return OM_CODEC_RAW_VIDEO;
 
     // Audio codecs
     case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
@@ -137,6 +138,39 @@ static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
     case AV_CODEC_ID_TARGA: return OM_CODEC_TGA;
 
     default: return OM_CODEC_NONE;
+  }
+}
+
+// Map FFmpeg's AVPixelFormat to OpenMedia. Used for OM_CODEC_RAW_VIDEO streams,
+// where the pixel format travels on codecpar->format, not in the codec id.
+static auto avPixelFormatToOmPixelFormat(AVPixelFormat pix_fmt) -> OMPixelFormat {
+  switch (pix_fmt) {
+    case AV_PIX_FMT_RGBA: return OM_FORMAT_R8G8B8A8;
+    case AV_PIX_FMT_BGRA: return OM_FORMAT_B8G8R8A8;
+    case AV_PIX_FMT_GRAY8: return OM_FORMAT_GRAY8;
+    case AV_PIX_FMT_GRAY16LE: return OM_FORMAT_GRAY16;
+    case AV_PIX_FMT_YUV420P: return OM_FORMAT_YUV420P;
+    case AV_PIX_FMT_YUV422P: return OM_FORMAT_YUV422P;
+    case AV_PIX_FMT_YUV444P: return OM_FORMAT_YUV444P;
+    case AV_PIX_FMT_YUV410P: return OM_FORMAT_YUV410P;
+    case AV_PIX_FMT_YUV411P: return OM_FORMAT_YUV411P;
+    case AV_PIX_FMT_NV12: return OM_FORMAT_NV12;
+    case AV_PIX_FMT_NV21: return OM_FORMAT_NV21;
+    case AV_PIX_FMT_NV16: return OM_FORMAT_NV16;
+    case AV_PIX_FMT_NV24: return OM_FORMAT_NV24;
+    case AV_PIX_FMT_P010LE: return OM_FORMAT_P010;
+    case AV_PIX_FMT_P012LE: return OM_FORMAT_P012;
+    case AV_PIX_FMT_P016LE: return OM_FORMAT_P016;
+    case AV_PIX_FMT_YUV420P10LE: return OM_FORMAT_YUV420P10;
+    case AV_PIX_FMT_YUV420P12LE: return OM_FORMAT_YUV420P12;
+    case AV_PIX_FMT_YUV420P16LE: return OM_FORMAT_YUV420P16;
+    case AV_PIX_FMT_YUV422P10LE: return OM_FORMAT_YUV422P10;
+    case AV_PIX_FMT_YUV422P12LE: return OM_FORMAT_YUV422P12;
+    case AV_PIX_FMT_YUV422P16LE: return OM_FORMAT_YUV422P16;
+    case AV_PIX_FMT_YUV444P10LE: return OM_FORMAT_YUV444P10;
+    case AV_PIX_FMT_YUV444P12LE: return OM_FORMAT_YUV444P12;
+    case AV_PIX_FMT_YUV444P16LE: return OM_FORMAT_YUV444P16;
+    default: return OM_FORMAT_UNKNOWN;
   }
 }
 
@@ -313,6 +347,13 @@ private:
       track.id = static_cast<int32_t>(stream->id);
       track.format.codec_id = avCodecIdToOmCodecId(stream->codecpar->codec_id);
       track.format.type = avMediaTypeToOmMediaType(stream->codecpar->codec_type);
+
+      // Raw video: the pixel format lives on codecpar->format (FFmpeg-style),
+      // since OM_CODEC_RAW_VIDEO does not encode the format in the id.
+      if (track.format.codec_id == OM_CODEC_RAW_VIDEO && stream->codecpar->format >= 0) {
+        track.format.video.format =
+            avPixelFormatToOmPixelFormat(static_cast<AVPixelFormat>(stream->codecpar->format));
+      }
 
       if (track.format.codec_id == OM_CODEC_JPEG || track.format.codec_id == OM_CODEC_PNG ||
           track.format.codec_id == OM_CODEC_WEBP || track.format.codec_id == OM_CODEC_BMP ||

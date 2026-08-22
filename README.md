@@ -60,14 +60,16 @@ integration while maintaining a simple, intuitive API.
 
 | Codec | Decoding | Encoding | Backends                                      |
 |-------|:--------:|:--------:|-----------------------------------------------|
-| PNG   |    ✅     |    🔧    | Portable Network Graphics (decoder & demuxer) |
-| JPEG  |    ✅     |    🔧    | Joint Photographic Experts Group              |
-| WebP  |    ✅     |    🔧    | Modern image format by Google                 |
-| GIF   |    ✅     |    🔧    | Graphics Interchange Format                   |
-| BMP   |    ✅     |    🔧    | Bitmap image format                           |
-| TIFF  |    ✅     |    🔧    | Tagged Image File Format                      |
-| TGA   |    ✅     |    🔧    | Truevision TARGA                              |
+| PNG   |    ✅    |    🔧    | Portable Network Graphics (decoder & demuxer) |
+| JPEG  |    ✅    |    🔧    | Joint Photographic Experts Group              |
+| WebP  |    ✅    |    🔧    | Modern image format by Google                 |
+| GIF   |    ✅    |    🔧    | Graphics Interchange Format                   |
+| BMP   |    ✅    |    🔧    | Bitmap image format                           |
+| TIFF  |    ✅    |    🔧    | Tagged Image File Format                      |
+| TGA   |    ✅    |    🔧    | Truevision TARGA                              |
 | EXR   |    🔧    |    🔧    | OpenEXR                                       |
+| DDS   |    ✅    |    🔧    | tinyddsloader, bcdec                          |
+| HDR   |    ✅    |    🔧    | HDR                                           |
 
 ---
 

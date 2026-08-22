@@ -36,6 +36,8 @@ option(OPENMEDIA_WEBP "WEBP" ON)
 option(OPENMEDIA_EXR "EXR" OFF)
 option(OPENMEDIA_JPEG "JPEG" ON)
 option(OPENMEDIA_TGA "TGA" ON)
+option(OPENMEDIA_DDS "DDS" ON)
+option(OPENMEDIA_HDR "HDR" ON)
 option(OPENMEDIA_AVIF "AVIF" ON)
 
 # Software Video (royalty)

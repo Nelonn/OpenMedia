@@ -105,6 +105,16 @@ extern const CodecDescriptor CODEC_GIF;
 extern const CodecDescriptor CODEC_TGA;
 extern const CodecDescriptor CODEC_BMP;
 extern const CodecDescriptor CODEC_TIFF;
+extern const CodecDescriptor CODEC_BC1;
+extern const CodecDescriptor CODEC_BC2;
+extern const CodecDescriptor CODEC_BC3;
+extern const CodecDescriptor CODEC_BC4;
+extern const CodecDescriptor CODEC_BC5;
+extern const CodecDescriptor CODEC_BC6H;
+extern const CodecDescriptor CODEC_BC7;
+extern const CodecDescriptor CODEC_RGBE;
+
+extern const CodecDescriptor CODEC_RAW_VIDEO;
 
 struct CodecRegistry;
 void registerFFmpegCodecs(CodecRegistry* registry) noexcept;

@@ -239,6 +239,22 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_BMP);
   registry->registerCodec(&CODEC_TIFF);
 
+  registry->registerCodec(&CODEC_RAW_VIDEO);
+
+#if defined(OPENMEDIA_HDR)
+  registry->registerCodec(&CODEC_RGBE);
+#endif
+
+#if defined(OPENMEDIA_DDS)
+  registry->registerCodec(&CODEC_BC1);
+  registry->registerCodec(&CODEC_BC2);
+  registry->registerCodec(&CODEC_BC3);
+  registry->registerCodec(&CODEC_BC4);
+  registry->registerCodec(&CODEC_BC5);
+  registry->registerCodec(&CODEC_BC6H);
+  registry->registerCodec(&CODEC_BC7);
+#endif
+
 #if defined(OPENMEDIA_AVCODEC)
   registerFFmpegCodecs(registry);
 #endif
