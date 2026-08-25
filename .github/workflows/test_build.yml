@@ -47,14 +47,14 @@ jobs:
           sudo apt-get update 
           sudo apt-get install -y cmake build-essential ninja-build libsdl2-dev libavcodec-dev libavutil-dev libavformat-dev ffmpeg libpipewire-0.3-dev nasm libxtst-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxrender-dev libva-dev
 
-      - name: Install Clang 22 (Linux)
+      - name: Install Clang 23 (Linux)
         if: matrix.compiler == 'Clang' && runner.os == 'Linux'
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 22 all
-          echo "CC=clang-22" >> $GITHUB_ENV
-          echo "CXX=clang++-22" >> $GITHUB_ENV
+          sudo ./llvm.sh 23 all
+          echo "CC=clang-23" >> $GITHUB_ENV
+          echo "CXX=clang++-23" >> $GITHUB_ENV
 
       - name: Install GCC (Linux)
         if: matrix.compiler == 'GCC' && runner.os == 'Linux'

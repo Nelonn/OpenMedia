@@ -294,7 +294,7 @@ endif ()
 
 if (OPENMEDIA_FDK_AAC)
     auib_import(fdk-aac https://github.com/mstorsjo/fdk-aac
-            VERSION d8e6b1a3aa606c450241632b64b703f21ea31ce3)
+            VERSION 7c83d08002332b2730c845eec3497e6bf585dd28)
     target_link_libraries(OpenMedia PRIVATE FDK-AAC::fdk-aac)
     target_sources(OpenMedia PRIVATE src/audio/fdk_aac.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_FDK_AAC)
@@ -403,15 +403,10 @@ if (OPENMEDIA_WEBP)
 endif ()
 
 if (OPENMEDIA_JPEG)
-    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" proc_lower)
-    set(_allow_jpeg_simd ON)
-    if(WIN32 AND proc_lower MATCHES "arm")
-        set(_allow_jpeg_simd OFF)
-    endif()
     auib_import(libjpeg-turbo
             https://github.com/libjpeg-turbo/libjpeg-turbo
-            VERSION 3.1.90
-            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_TOOLS=OFF -DWITH_SIMD=${_allow_jpeg_simd})
+            VERSION 3.2.0
+            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_TOOLS=OFF)
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/jpeg_decoder.cpp)
@@ -486,7 +481,7 @@ endif ()
 if (OPENMEDIA_DAV1D)
     if (AUI_BOOT)
         auib_import(dav1d https://github.com/Nelonn/dav1d
-                VERSION 87301c133c40ab9f296ccbb778fbaca37d6ce704)
+                VERSION 2ec676cc7e9f4c25d1831ca5fb6fb5455b3d055c)
     elseif (NOT TARGET dav1d::dav1d)
         add_subdirectory(third_party/external/dav1d)
     endif ()
