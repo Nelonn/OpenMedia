@@ -356,7 +356,7 @@ if (OPENMEDIA_JPEG)
     endif()
     auib_import(libjpeg-turbo
             https://github.com/libjpeg-turbo/libjpeg-turbo
-            VERSION 3.1.90
+            VERSION 3.2.0
             CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_TOOLS=OFF -DWITH_SIMD=${_allow_jpeg_simd})
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)
