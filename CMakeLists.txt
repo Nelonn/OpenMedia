@@ -240,7 +240,7 @@ endif ()
 
 if (OPENMEDIA_FDK_AAC)
     auib_import(fdk-aac https://github.com/mstorsjo/fdk-aac
-            VERSION d8e6b1a3aa606c450241632b64b703f21ea31ce3)
+            VERSION 7c83d08002332b2730c845eec3497e6bf585dd28)
     target_link_libraries(OpenMedia PRIVATE FDK-AAC::fdk-aac)
     target_sources(OpenMedia PRIVATE src/audio/fdk_aac.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_FDK_AAC)
