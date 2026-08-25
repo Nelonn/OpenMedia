@@ -351,7 +351,7 @@ endif ()
 if (OPENMEDIA_JPEG)
     string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" proc_lower)
     set(_allow_jpeg_simd ON)
-    if(WIN32 AND proc_lower MATCHES "arm")
+    if(WIN32 AND proc_lower MATCHES "arm" AND CMAKE_C_COMPILER MATCHES "MSVC")
         set(_allow_jpeg_simd OFF)
     endif()
     auib_import(libjpeg-turbo
