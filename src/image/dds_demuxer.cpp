@@ -242,7 +242,10 @@ class DDSDemuxer final : public BaseDemuxer {
   DXGI format_ = DXGI::Unknown;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
-  bool packet_read_ = false;
+  uint32_t mip_count_ = 1;
+  uint32_t array_size_ = 1;
+  uint32_t total_frames_ = 1;
+  uint32_t current_frame_ = 0;
 
 public:
   auto open(std::unique_ptr<InputStream> input) -> OMError override {
@@ -267,13 +270,16 @@ public:
     }
 
     if (dds.GetTextureDimension() != tinyddsloader::DDSFile::TextureDimension::Texture2D) {
-      // Only 2D textures map cleanly onto OpenMedia's single-image model.
       return OM_FORMAT_NOT_SUPPORTED;
     }
 
     width_ = dds.GetWidth();
     height_ = dds.GetHeight();
     format_ = dds.GetFormat();
+    mip_count_ = dds.GetMipCount() > 0 ? dds.GetMipCount() : 1;
+    array_size_ = dds.GetArraySize() > 0 ? dds.GetArraySize() : 1;
+    total_frames_ = mip_count_ * array_size_;
+    current_frame_ = 0;
 
     if (width_ == 0 || height_ == 0) {
       return OM_FORMAT_PARSE_FAILED;
@@ -284,7 +290,8 @@ public:
     track.format.type = OM_MEDIA_IMAGE;
     track.format.codec_id = codecForFormat(format_);
     track.time_base = {1, 1};
-    track.duration = 1;
+    track.duration = total_frames_;
+    track.nb_frames = total_frames_;
     track.format.image.width = width_;
     track.format.image.height = height_;
     if (track.format.codec_id == OM_CODEC_RAW_VIDEO) {
@@ -296,20 +303,22 @@ public:
   }
 
   auto readPacket() -> Result<Packet, OMError> override {
-    if (packet_read_) {
+    if (current_frame_ >= total_frames_) {
       return Err(OM_FORMAT_END_OF_FILE);
     }
-    packet_read_ = true;
+
+    const uint32_t frame_idx = current_frame_++;
+    const uint32_t array_idx = frame_idx / mip_count_;
+    const uint32_t mip_idx = frame_idx % mip_count_;
 
     Packet pkt;
     pkt.stream_index = 0;
     pkt.pos = 0;
-    pkt.pts = 0;
-    pkt.dts = 0;
+    pkt.pts = static_cast<int64_t>(frame_idx);
+    pkt.dts = static_cast<int64_t>(frame_idx);
     pkt.is_keyframe = true;
 
     if (tinyddsloader::DDSFile::IsCompressed(format_)) {
-      // Compressed: hand the container bytes to the BC decoder.
       pkt.allocate(raw_.size());
       if (!raw_.empty()) {
         memcpy(pkt.bytes.data(), raw_.data(), raw_.size());
@@ -318,12 +327,11 @@ public:
       return Ok(std::move(pkt));
     }
 
-    // Uncompressed: the packet is already the decoded image, no codec involved.
     tinyddsloader::DDSFile dds;
     if (dds.Load(raw_.data(), raw_.size()) != tinyddsloader::Result::Success) {
       return Err(OM_FORMAT_PARSE_FAILED);
     }
-    const tinyddsloader::DDSFile::ImageData* img = dds.GetImageData(0, 0);
+    const tinyddsloader::DDSFile::ImageData* img = dds.GetImageData(mip_idx, array_idx);
     if (!img || !img->m_mem) {
       return Err(OM_FORMAT_PARSE_FAILED);
     }
@@ -342,7 +350,9 @@ public:
 
   auto seek(int32_t /*stream_idx*/, int64_t timestamp, SeekMode /*mode*/) -> OMError override {
     if (timestamp <= 0) {
-      packet_read_ = false;
+      current_frame_ = 0;
+    } else {
+      current_frame_ = std::min<uint32_t>(static_cast<uint32_t>(timestamp), total_frames_);
     }
     return OM_SUCCESS;
   }
