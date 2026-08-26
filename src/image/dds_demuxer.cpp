@@ -239,6 +239,7 @@ auto decodeUncompressed(const tinyddsloader::DDSFile::ImageData& img, DXGI fmt, 
 
 class DDSDemuxer final : public BaseDemuxer {
   std::vector<uint8_t> raw_;
+  tinyddsloader::DDSFile dds_;
   DXGI format_ = DXGI::Unknown;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
@@ -263,21 +264,20 @@ public:
       return OM_IO_NOT_ENOUGH_DATA;
     }
 
-    tinyddsloader::DDSFile dds;
-    const tinyddsloader::Result result = dds.Load(raw_.data(), raw_.size());
+    const tinyddsloader::Result result = dds_.Load(raw_.data(), raw_.size());
     if (result != tinyddsloader::Result::Success) {
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    if (dds.GetTextureDimension() != tinyddsloader::DDSFile::TextureDimension::Texture2D) {
+    if (dds_.GetTextureDimension() != tinyddsloader::DDSFile::TextureDimension::Texture2D) {
       return OM_FORMAT_NOT_SUPPORTED;
     }
 
-    width_ = dds.GetWidth();
-    height_ = dds.GetHeight();
-    format_ = dds.GetFormat();
-    mip_count_ = dds.GetMipCount() > 0 ? dds.GetMipCount() : 1;
-    array_size_ = dds.GetArraySize() > 0 ? dds.GetArraySize() : 1;
+    width_ = dds_.GetWidth();
+    height_ = dds_.GetHeight();
+    format_ = dds_.GetFormat();
+    mip_count_ = dds_.GetMipCount() > 0 ? dds_.GetMipCount() : 1;
+    array_size_ = dds_.GetArraySize() > 0 ? dds_.GetArraySize() : 1;
     total_frames_ = mip_count_ * array_size_;
     current_frame_ = 0;
 
@@ -311,6 +311,11 @@ public:
     const uint32_t array_idx = frame_idx / mip_count_;
     const uint32_t mip_idx = frame_idx % mip_count_;
 
+    const tinyddsloader::DDSFile::ImageData* img = dds_.GetImageData(mip_idx, array_idx);
+    if (!img || !img->m_mem) {
+      return Err(OM_FORMAT_PARSE_FAILED);
+    }
+
     Packet pkt;
     pkt.stream_index = 0;
     pkt.pos = 0;
@@ -319,21 +324,12 @@ public:
     pkt.is_keyframe = true;
 
     if (tinyddsloader::DDSFile::IsCompressed(format_)) {
-      pkt.allocate(raw_.size());
-      if (!raw_.empty()) {
-        memcpy(pkt.bytes.data(), raw_.data(), raw_.size());
+      pkt.allocate(img->m_memSlicePitch);
+      if (img->m_memSlicePitch > 0) {
+        memcpy(pkt.bytes.data(), img->m_mem, img->m_memSlicePitch);
       }
-      pkt.bytes = pkt.bytes.subspan(0, raw_.size());
+      pkt.bytes = pkt.bytes.subspan(0, img->m_memSlicePitch);
       return Ok(std::move(pkt));
-    }
-
-    tinyddsloader::DDSFile dds;
-    if (dds.Load(raw_.data(), raw_.size()) != tinyddsloader::Result::Success) {
-      return Err(OM_FORMAT_PARSE_FAILED);
-    }
-    const tinyddsloader::DDSFile::ImageData* img = dds.GetImageData(mip_idx, array_idx);
-    if (!img || !img->m_mem) {
-      return Err(OM_FORMAT_PARSE_FAILED);
     }
 
     std::vector<uint8_t> decoded;
