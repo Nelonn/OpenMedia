@@ -197,31 +197,58 @@ public:
       return Err(OM_CODEC_DECODE_FAILED);
     }
 
-    const tinyddsloader::DDSFile::ImageData* img = dds.GetImageData(0, 0);
-    if (!img || !img->m_mem) {
-      return Err(OM_CODEC_DECODE_FAILED);
-    }
-
     const DXGI fmt = dds.GetFormat();
     if (!tinyddsloader::DDSFile::IsCompressed(fmt)) {
-      // Uncompressed DDS is delivered pre-decoded by the demuxer as
-      // OM_CODEC_RAW_VIDEO; the BC decoders only handle compressed textures.
       return Err(OM_CODEC_NOT_SUPPORTED);
     }
     output_format_ = isBC6H(fmt) ? OM_FORMAT_RGBA64 : OM_FORMAT_R8G8B8A8;
     width_ = w;
     height_ = h;
 
-    Picture pic(output_format_, w, h);
-    if (!decodeCompressedMip(*img, fmt, pic)) {
-      return Err(OM_CODEC_NOT_SUPPORTED);
-    }
+    const uint32_t mip_count = dds.GetMipCount() > 0 ? dds.GetMipCount() : 1;
+    const uint32_t array_size = dds.GetArraySize() > 0 ? dds.GetArraySize() : 1;
+    const uint32_t total_images = mip_count * array_size;
 
-    Frame frame;
-    frame.pts = packet.pts;
-    frame.dts = packet.dts;
-    frame.data = std::move(pic);
-    frames.push_back(std::move(frame));
+    if (packet.pts >= 0) {
+      uint32_t frame_idx = static_cast<uint32_t>(packet.pts);
+      if (frame_idx >= total_images) {
+        frame_idx = 0;
+      }
+      const uint32_t array_idx = frame_idx / mip_count;
+      const uint32_t mip_idx = frame_idx % mip_count;
+
+      const tinyddsloader::DDSFile::ImageData* img = dds.GetImageData(mip_idx, array_idx);
+      if (!img || !img->m_mem) {
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+
+      Picture pic(output_format_, img->m_width, img->m_height);
+      if (!decodeCompressedMip(*img, fmt, pic)) {
+        return Err(OM_CODEC_NOT_SUPPORTED);
+      }
+
+      Frame frame;
+      frame.pts = packet.pts;
+      frame.dts = packet.dts;
+      frame.data = std::move(pic);
+      frames.push_back(std::move(frame));
+    } else {
+      for (uint32_t array_idx = 0; array_idx < array_size; ++array_idx) {
+        for (uint32_t mip_idx = 0; mip_idx < mip_count; ++mip_idx) {
+          const tinyddsloader::DDSFile::ImageData* img = dds.GetImageData(mip_idx, array_idx);
+          if (!img || !img->m_mem) continue;
+
+          Picture pic(output_format_, img->m_width, img->m_height);
+          if (!decodeCompressedMip(*img, fmt, pic)) continue;
+
+          Frame frame;
+          frame.pts = static_cast<int64_t>(array_idx * mip_count + mip_idx);
+          frame.dts = frame.pts;
+          frame.data = std::move(pic);
+          frames.push_back(std::move(frame));
+        }
+      }
+    }
 
     return Ok(std::move(frames));
   }

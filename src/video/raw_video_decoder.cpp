@@ -55,19 +55,36 @@ public:
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
     std::vector<Frame> frames;
 
-    // Empty packet is the end-of-stream marker; nothing to produce.
     if (packet.bytes.empty()) {
       return Ok(std::move(frames));
     }
 
-    Picture pic(format_, width_, height_);
+    uint32_t w = width_;
+    uint32_t h = height_;
+    const uint32_t bpp = getBytesPerPixel(format_, 0);
+    if (bpp > 0 && packet.bytes.size() < static_cast<size_t>(width_) * height_ * bpp) {
+      for (uint32_t shift = 1; shift < 32; ++shift) {
+        const uint32_t mw = std::max(1u, width_ >> shift);
+        const uint32_t mh = std::max(1u, height_ >> shift);
+        if (static_cast<size_t>(mw) * mh * bpp == packet.bytes.size()) {
+          w = mw;
+          h = mh;
+          break;
+        }
+        if (mw == 1 && mh == 1) {
+          break;
+        }
+      }
+    }
+
+    Picture pic(format_, w, h);
 
     const uint32_t num_planes = getNumPlanes(format_);
     size_t offset = 0;
     for (uint32_t p = 0; p < num_planes; p++) {
-      const auto [plane_w, plane_h] = getPlaneDimensions(format_, p, width_, height_);
-      const uint32_t bpp = getBytesPerPixel(format_, p);
-      const size_t row_bytes = static_cast<size_t>(plane_w) * bpp;
+      const auto [plane_w, plane_h] = getPlaneDimensions(format_, p, w, h);
+      const uint32_t plane_bpp = getBytesPerPixel(format_, p);
+      const size_t row_bytes = static_cast<size_t>(plane_w) * plane_bpp;
 
       if (offset + row_bytes * plane_h > packet.bytes.size()) {
         return Err(OM_CODEC_DECODE_FAILED);
