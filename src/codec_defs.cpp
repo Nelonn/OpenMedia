@@ -78,6 +78,7 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_HEIC: return {"HEIC", "High Efficiency Image Format", OM_MEDIA_IMAGE};
     case OM_CODEC_TGA: return {"TGA", "Truevision TGA", OM_MEDIA_IMAGE};
     case OM_CODEC_EXR: return {"EXR", "OpenEXR", OM_MEDIA_IMAGE};
+    case OM_CODEC_DNG: return {"DNG", "Digital Negative", OM_MEDIA_IMAGE};
 
     default: return {};
   }

@@ -97,13 +97,18 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
   registry->registerFormat(&FORMAT_GIF);
   registry->registerFormat(&FORMAT_TGA);
   registry->registerFormat(&FORMAT_BMP);
+#if defined(OPENMEDIA_TIFF)
   registry->registerFormat(&FORMAT_TIFF);
+#endif
   registry->registerFormat(&FORMAT_ICNS);
 #if defined(OPENMEDIA_DDS)
   registry->registerFormat(&FORMAT_DDS);
 #endif
 #if defined(OPENMEDIA_HDR)
   registry->registerFormat(&FORMAT_HDR);
+#endif
+#if defined(OPENMEDIA_DNG)
+  registry->registerFormat(&FORMAT_DNG);
 #endif
 }
 

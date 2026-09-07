@@ -239,7 +239,12 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_GIF);
   registry->registerCodec(&CODEC_TGA);
   registry->registerCodec(&CODEC_BMP);
+#if defined(OPENMEDIA_TIFF)
   registry->registerCodec(&CODEC_TIFF);
+#endif
+#if defined(OPENMEDIA_DNG)
+  registry->registerCodec(&CODEC_DNG);
+#endif
 
 #if defined(OPENMEDIA_HDR)
   registry->registerCodec(&CODEC_RGBE);

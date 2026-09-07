@@ -113,6 +113,7 @@ extern const CodecDescriptor CODEC_BC5;
 extern const CodecDescriptor CODEC_BC6H;
 extern const CodecDescriptor CODEC_BC7;
 extern const CodecDescriptor CODEC_RGBE;
+extern const CodecDescriptor CODEC_DNG;
 
 extern const CodecDescriptor CODEC_RAW_VIDEO;
 

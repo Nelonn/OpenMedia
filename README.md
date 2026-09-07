@@ -15,7 +15,7 @@ integration while maintaining a simple, intuitive API.
 
 - Audio Codecs: AAC, ALAC, FLAC, Opus, Vorbis, MP3, AAC, PCM, and more
 - Video Codecs: AV1, H.264/AVC, H.265/HEVC, H.266/VVC, EVC, VP8, VP9, and more
-- Image Formats: PNG, JPEG, WebP, GIF, BMP, TIFF, TGA
+- Image Formats: PNG, JPEG, WebP, GIF, BMP, TIFF, TGA, DNG
 - Container Support - Matroska (MKV/MKA/WebM), MP4, Ogg, Wav, and more
 - Modular Architecture - Enable/disable codecs at compile-time via CMake options
 - Hardware Acceleration - Support for Vulkan Video, DirectX 11/12 Video, VA-API
@@ -70,6 +70,7 @@ integration while maintaining a simple, intuitive API.
 | EXR   |    🔧    |    🔧    | OpenEXR                                       |
 | DDS   |    ✅    |    🔧    | tinyddsloader, bcdec                          |
 | HDR   |    ✅    |    🔧    | HDR                                           |
+| DNG   |    ✅    |    🔧    | Digital Negative (RAW image format)           |
 
 ---
 

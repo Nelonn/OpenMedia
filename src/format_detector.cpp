@@ -85,9 +85,28 @@ void FormatDetector::addStandardImages() {
     if (v0 == magic_u32(0x89, 'P', 'N', 'G')) return DetectedFormat::fromContainer(OM_CONTAINER_PNG);
     if (v0 == magic_u32('R', 'I', 'F', 'F') && data.size() >= 12 && load_u32(data.data() + 8) == magic_u32('W', 'E', 'B', 'P')) return DetectedFormat::fromContainer(OM_CONTAINER_WEBP);
     if ((v0 & 0xFFFF) == magic_u32('B', 'M', 0, 0)) return DetectedFormat::fromContainer(OM_CONTAINER_BMP);
-    if (v0 == magic_u32('G', 'I', 'F', '8')) return DetectedFormat::fromContainer(OM_CONTAINER_GIF);
-    if (v0 == magic_u32(0x49, 0x49, 0x2A, 0x00) || v0 == magic_u32(0x4D, 0x4D, 0x00, 0x2A)) return DetectedFormat::fromContainer(OM_CONTAINER_TIFF);
-    if (v0 == magic_u32(0x00, 0x00, 0x01, 0x00)) return DetectedFormat::fromContainer(OM_CONTAINER_ICO);
+    if (v0 == magic_u32(0x49, 0x49, 0x2A, 0x00) || v0 == magic_u32(0x4D, 0x4D, 0x00, 0x2A)) {
+      bool le = (data[0] == 'I');
+      if (data.size() >= 8) {
+        uint32_t ifd_offset = le ? (static_cast<uint32_t>(data[4]) | (static_cast<uint32_t>(data[5]) << 8) |
+                                    (static_cast<uint32_t>(data[6]) << 16) | (static_cast<uint32_t>(data[7]) << 24))
+                                 : ((static_cast<uint32_t>(data[4]) << 24) | (static_cast<uint32_t>(data[5]) << 16) |
+                                    (static_cast<uint32_t>(data[6]) << 8) | static_cast<uint32_t>(data[7]));
+        if (ifd_offset + 2 <= data.size()) {
+          uint16_t num_tags = le ? (static_cast<uint16_t>(data[ifd_offset]) | (static_cast<uint16_t>(data[ifd_offset + 1]) << 8))
+                                 : ((static_cast<uint16_t>(data[ifd_offset]) << 8) | static_cast<uint16_t>(data[ifd_offset + 1]));
+          size_t tag_ptr = ifd_offset + 2;
+          for (uint16_t i = 0; i < num_tags && tag_ptr + 12 <= data.size(); ++i, tag_ptr += 12) {
+            uint16_t tag_id = le ? (static_cast<uint16_t>(data[tag_ptr]) | (static_cast<uint16_t>(data[tag_ptr + 1]) << 8))
+                                 : ((static_cast<uint16_t>(data[tag_ptr]) << 8) | static_cast<uint16_t>(data[tag_ptr + 1]));
+            if (tag_id == 50706 || tag_id == 50707 || tag_id == 50708 || tag_id == 50709 || tag_id == 50721 || tag_id == 50778) {
+              return DetectedFormat::fromContainer(OM_CONTAINER_DNG);
+            }
+          }
+        }
+      }
+      return DetectedFormat::fromContainer(OM_CONTAINER_TIFF);
+    }
     if (v0 == magic_u32(0x76, 0x2F, 0x31, 0x01)) return DetectedFormat::fromContainer(OM_CONTAINER_EXR);
     if (v0 == magic_u32('i', 'c', 'n', 's')) return DetectedFormat::fromContainer(OM_CONTAINER_ICNS);
     if (v0 == magic_u32('D', 'D', 'S', ' ')) return DetectedFormat::fromContainer(OM_CONTAINER_DDS);

@@ -38,6 +38,7 @@ option(OPENMEDIA_JPEG "JPEG" ON)
 option(OPENMEDIA_TGA "TGA" ON)
 option(OPENMEDIA_DDS "DDS" ON)
 option(OPENMEDIA_HDR "HDR" ON)
+option(OPENMEDIA_DNG "DNG" ON)
 option(OPENMEDIA_AVIF "AVIF" ON)
 
 # Software Video (royalty)
