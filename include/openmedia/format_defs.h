@@ -42,4 +42,5 @@ OM_ENUM(OMContainerId, uint32_t) {
   OM_CONTAINER_TGA = OM_MAGIC('TGA '),
   OM_CONTAINER_DDS = OM_MAGIC('DDS '),
   OM_CONTAINER_HDR = OM_MAGIC_RAW('#', '?', 'R', 'A'), // Radiance RGBE
+  OM_CONTAINER_DNG = OM_MAGIC('DNG '),
 };

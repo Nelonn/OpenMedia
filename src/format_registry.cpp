@@ -105,6 +105,9 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
 #if defined(OPENMEDIA_HDR)
   registry->registerFormat(&FORMAT_HDR);
 #endif
+#if defined(OPENMEDIA_DNG)
+  registry->registerFormat(&FORMAT_DNG);
+#endif
 }
 
 } // namespace openmedia
