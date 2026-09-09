@@ -35,6 +35,7 @@ struct FLACStreamInfo {
 };
 
 struct FLACPicture {
+  OMCodecId codec_id = OM_CODEC_NONE;
   std::vector<uint8_t> cover_art;
   uint32_t width = 0;
   uint32_t height = 0;
@@ -173,7 +174,12 @@ static void parsePicture(const std::vector<uint8_t>& body, FLACPicture& picture)
 
   uint32_t pic_type = read_be32();
   uint32_t mime_len = read_be32();
-  pos += mime_len;
+  std::string mime_type;
+  if (mime_len != 0) {
+    mime_type.resize(mime_len);
+    memcpy(mime_type.data(), body.data() + pos, mime_len);
+    pos += mime_len;
+  }
   if (pos + 4 > body.size()) return;
   uint32_t desc_len = read_be32();
   pos += desc_len;
@@ -185,7 +191,17 @@ static void parsePicture(const std::vector<uint8_t>& body, FLACPicture& picture)
   uint32_t data_len = read_be32();
   if (pos + data_len > body.size()) return;
 
-  if (pic_type == 3 && data_len > 0) {
+  OMCodecId codec_id = OM_CODEC_NONE;
+  if (mime_type == "image/jpeg") {
+    codec_id = OM_CODEC_JPEG;
+  } else if (mime_type == "image/png") {
+    codec_id = OM_CODEC_PNG;
+  } else {
+    // unsupported codec
+  }
+
+  if (pic_type == 3 && data_len > 0 && codec_id != OM_CODEC_NONE) {
+    picture.codec_id = codec_id;
     picture.cover_art.assign(body.data() + pos, body.data() + pos + data_len);
     picture.width = width;
     picture.height = height;
