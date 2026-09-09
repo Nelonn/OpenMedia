@@ -45,7 +45,6 @@ constexpr auto operator==(const AudioFormat& lhs, const AudioFormat& rhs) noexce
 
 struct OPENMEDIA_ABI AudioSamples {
   AudioFormat format;
-  uint32_t bits_per_sample = 0;
   uint32_t nb_samples = 0; // samples per channel
   std::shared_ptr<Buffer> buffer;
   PlaneSpan<8> planes;

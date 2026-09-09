@@ -351,11 +351,11 @@ private:
     } else if (media_type == AVMEDIA_TYPE_AUDIO) {
       AudioSamples samples;
       samples.format.sample_format = avSampleFormatToOmSampleFormat(static_cast<AVSampleFormat>(av_frame->format));
+      samples.format.bits_per_sample = static_cast<uint8_t>(util.av_get_bytes_per_sample(static_cast<AVSampleFormat>(av_frame->format)) * 8);
       samples.format.sample_rate = static_cast<uint32_t>(av_frame->sample_rate);
       samples.format.channels = static_cast<uint32_t>(av_frame->ch_layout.nb_channels);
       samples.format.planar = (util.av_sample_fmt_is_planar &&
                                util.av_sample_fmt_is_planar(static_cast<AVSampleFormat>(av_frame->format)) != 0);
-      samples.bits_per_sample = static_cast<uint8_t>(util.av_get_bytes_per_sample(static_cast<AVSampleFormat>(av_frame->format)) * 8);
       samples.nb_samples = static_cast<uint32_t>(av_frame->nb_samples);
 
       samples.allocate();
