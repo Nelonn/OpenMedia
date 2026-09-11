@@ -84,8 +84,8 @@ public:
     track.time_base = {1, 100}; // GIF frames typically in centiseconds
     track.duration = frame_count_;
 
-    track.format.image.width = width_;
-    track.format.image.height = height_;
+    track.format.video.width = width_;
+    track.format.video.height = height_;
 
     tracks_.push_back(track);
 

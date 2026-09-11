@@ -20,10 +20,10 @@ public:
     }
 
     if (options.format.type == OM_MEDIA_IMAGE) {
-      width_ = options.format.image.width;
-      height_ = options.format.image.height;
-      if (options.format.image.format != OM_FORMAT_UNKNOWN) {
-        format_ = options.format.image.format;
+      width_ = options.format.video.width;
+      height_ = options.format.video.height;
+      if (options.format.video.format != OM_FORMAT_UNKNOWN) {
+        format_ = options.format.video.format;
       }
     } else {
       width_ = options.format.video.width;

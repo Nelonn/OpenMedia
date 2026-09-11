@@ -147,8 +147,8 @@ public:
     if (options.format.codec_id != OM_CODEC_RGBE) {
       return OM_CODEC_INVALID_PARAMS;
     }
-    width_ = options.format.image.width;
-    height_ = options.format.image.height;
+    width_ = options.format.video.width;
+    height_ = options.format.video.height;
     initialized_ = true;
     return OM_SUCCESS;
   }

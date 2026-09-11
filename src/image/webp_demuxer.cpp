@@ -81,8 +81,8 @@ public:
     track.format.codec_id = OM_CODEC_WEBP;
     track.time_base = {1, 1000}; // milliseconds
     track.duration = duration_ms_ > 0 ? duration_ms_ : frame_count_;
-    track.format.image.width = width_;
-    track.format.image.height = height_;
+    track.format.video.width = width_;
+    track.format.video.height = height_;
 
     tracks_.push_back(track);
 

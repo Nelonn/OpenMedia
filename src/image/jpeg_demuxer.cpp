@@ -185,8 +185,8 @@ public:
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;
     track.format.codec_id = OM_CODEC_JPEG;
-    track.format.image.width = width_;
-    track.format.image.height = height_;
+    track.format.video.width = width_;
+    track.format.video.height = height_;
     track.time_base = {1, 1};
     track.duration = 1;
 
