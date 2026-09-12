@@ -156,8 +156,8 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
     initialized_ = true;
-    width_ = options.format.image.width;
-    height_ = options.format.image.height;
+    width_ = options.format.video.width;
+    height_ = options.format.video.height;
     return OM_SUCCESS;
   }
 

@@ -215,8 +215,8 @@ public:
       hr = decoder_->ProcessOutput(0, 1, &output_buffer, &status);
 
       if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-        _com_error err(hr);
-        log(OM_CATEGORY_DECODER, OM_LEVEL_VERBOSE, std::format("ProcessOutput warned: {}", err.ErrorMessage()));
+        //_com_error err(hr);
+        //log(OM_CATEGORY_DECODER, OM_LEVEL_VERBOSE, std::format("ProcessOutput warned: {}", err.ErrorMessage()));
         break;
       }
       if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {

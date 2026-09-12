@@ -274,7 +274,6 @@ public:
     }
 
     AudioSamples samples(output_format_, packet_count);
-    samples.bits_per_sample = output_format_.bits_per_sample;
     std::memcpy(samples.planes.data[0],
                 decode_buffer_.data(),
                 static_cast<size_t>(packet_count) * output_format_.channels * sizeof(int16_t));

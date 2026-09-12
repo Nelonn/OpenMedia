@@ -66,11 +66,6 @@ struct OPENMEDIA_ABI MediaFormat {
       OMMasteringDisplayMetadata mastering_display;
       OMContentLightLevel content_light_level;
     } video;
-    struct {
-      uint32_t width;
-      uint32_t height;
-      OMPixelFormat format = OM_FORMAT_UNKNOWN;
-    } image;
   };
 };
 

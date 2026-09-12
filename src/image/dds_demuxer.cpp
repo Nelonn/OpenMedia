@@ -292,10 +292,10 @@ public:
     track.time_base = {1, 1};
     track.duration = total_frames_;
     track.nb_frames = total_frames_;
-    track.format.image.width = width_;
-    track.format.image.height = height_;
+    track.format.video.width = width_;
+    track.format.video.height = height_;
     if (track.format.codec_id == OM_CODEC_RAW_VIDEO) {
-      track.format.image.format = isHDRFormat(format_) ? OM_FORMAT_RGBA64 : OM_FORMAT_R8G8B8A8;
+      track.format.video.format = isHDRFormat(format_) ? OM_FORMAT_RGBA64 : OM_FORMAT_R8G8B8A8;
     }
     tracks_.push_back(track);
 

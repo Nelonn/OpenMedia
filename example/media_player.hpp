@@ -1014,8 +1014,8 @@ private:
 
     void setupImageDecoder(const Track& track) {
         if (!makeDecoder(track, video_decoder_)) return;
-        image_width_    = track.format.image.width;
-        image_height_   = track.format.image.height;
+        image_width_    = track.format.video.width;
+        image_height_   = track.format.video.height;
         total_duration_secs_ = static_cast<double>(track.duration) *
                                track.time_base.num / track.time_base.den;
         decodeAndShowImage();
