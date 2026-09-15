@@ -5,6 +5,10 @@
 #include <future>
 #include <openmedia/format_api.hpp>
 #include <openmedia/packet.hpp>
+#include <util/bit_reader.hpp>
+#include <util/bit_writer.hpp>
+#include <util/byte_reader.hpp>
+#include <util/byte_writer.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 #include <vector>
@@ -42,7 +46,7 @@ struct FLACPicture {
 };
 
 static auto crc8(const uint8_t* data, size_t len) -> uint8_t {
-  static constexpr auto s_table = []() {
+  static constexpr auto S_TABLE = []() {
     std::array<uint8_t, 256> t {};
     for (int i = 0; i < 256; i++) {
       uint8_t crc = static_cast<uint8_t>(i);
@@ -53,12 +57,14 @@ static auto crc8(const uint8_t* data, size_t len) -> uint8_t {
     return t;
   }();
   uint8_t crc = 0;
-  for (size_t i = 0; i < len; i++) crc = s_table[crc ^ data[i]];
+  for (size_t i = 0; i < len; i++) {
+    crc = S_TABLE[crc ^ data[i]];
+  }
   return crc;
 }
 
 static auto crc16(const uint8_t* data, size_t len) -> uint16_t {
-  static constexpr auto s_table = []() {
+  static constexpr auto S_TABLE = []() {
     std::array<uint16_t, 256> t {};
     for (int i = 0; i < 256; i++) {
       uint16_t crc = static_cast<uint16_t>(i << 8);
@@ -69,8 +75,9 @@ static auto crc16(const uint8_t* data, size_t len) -> uint16_t {
     return t;
   }();
   uint16_t crc = 0;
-  for (size_t i = 0; i < len; i++)
-    crc = static_cast<uint16_t>((crc << 8) ^ s_table[(crc >> 8) ^ data[i]]);
+  for (size_t i = 0; i < len; i++) {
+    crc = static_cast<uint16_t>((crc << 8) ^ S_TABLE[(crc >> 8) ^ data[i]]);
+  }
   return crc;
 }
 
@@ -123,89 +130,67 @@ struct FLACSeekPoint {
   uint16_t num_samples;
 };
 
-static auto parseStreamInfo(const std::vector<uint8_t>& body, FLACStreamInfo& stream) -> bool {
+static auto parseStreamInfo(std::span<const uint8_t> body, FLACStreamInfo& stream) -> bool {
   if (body.size() != 34) return false;
-  const uint8_t* data = body.data();
 
-  stream.min_blocksize = load_u16_be(data + 0);
-  stream.max_blocksize = load_u16_be(data + 2);
-  stream.min_framesize = read_u24_be(data + 4);
-  stream.max_framesize = read_u24_be(data + 7);
+  ByteReader r(body);
+  stream.min_blocksize = r.u16be();
+  stream.max_blocksize = r.u16be();
+  stream.min_framesize = r.u24be();
+  stream.max_framesize = r.u24be();
 
-  uint64_t packed = 0;
-  for (int i = 10; i < 18; ++i) {
-    packed = (packed << 8) | data[i];
-  }
+  BitReader br(r.bytes(8));
+  stream.sample_rate = br.readBits(20);
+  stream.channels = br.readBits(3) + 1;
+  stream.bits_per_sample = br.readBits(5) + 1;
+  stream.total_samples = br.readBits64(36);
 
-  stream.sample_rate = static_cast<uint32_t>((packed >> 44) & 0xFFFFF);
-  stream.channels = static_cast<uint32_t>(((packed >> 41) & 0x7) + 1);
-  stream.bits_per_sample = static_cast<uint32_t>(((packed >> 36) & 0x1F) + 1);
-  stream.total_samples = packed & 0xFFFFFFFFF;
-
-  std::memcpy(stream.md5sum, data + 18, 16);
-  return true;
+  const auto md5 = r.bytes(sizeof(stream.md5sum));
+  std::memcpy(stream.md5sum, md5.data(), md5.size());
+  return r.ok();
 }
 
-static void parseSeektable(const std::vector<uint8_t>& body,
+static void parseSeektable(std::span<const uint8_t> body,
                            std::vector<FLACSeekPoint>& seek_table) {
-  const size_t point_size = 18;
-  const size_t num_points = body.size() / point_size;
-  seek_table.reserve(seek_table.size() + num_points);
-  for (size_t i = 0; i < num_points; i++) {
-    const uint8_t* p = body.data() + i * point_size;
-    uint64_t sample_number = load_u64_be(p);
-    if (sample_number == UINT64_MAX) continue;
-    uint64_t stream_offset = load_u64_be(p + 8);
-    uint16_t num_samples = load_u16_be(p + 16);
+  constexpr size_t K_POINT_SIZE = 18;
+  ByteReader r(body);
+  seek_table.reserve(seek_table.size() + body.size() / K_POINT_SIZE);
+  while (r.canRead(K_POINT_SIZE)) {
+    const uint64_t sample_number = r.u64be();
+    const uint64_t stream_offset = r.u64be();
+    const uint16_t num_samples = r.u16be();
+    if (sample_number == UINT64_MAX) continue; // placeholder point
     seek_table.push_back({sample_number, stream_offset, num_samples});
   }
 }
 
-static void parsePicture(const std::vector<uint8_t>& body, FLACPicture& picture) {
-  if (body.size() < 8) return;
-  size_t pos = 0;
+static auto pictureCodecFromMime(std::string_view mime) -> OMCodecId {
+  if (mime == "image/jpeg" || mime == "image/jpg") return OM_CODEC_JPEG;
+  if (mime == "image/png") return OM_CODEC_PNG;
+  return OM_CODEC_NONE;
+}
 
-  auto read_be32 = [&]() -> uint32_t {
-    if (pos + 4 > body.size()) return 0;
-    uint32_t v = load_u32_be(body.data() + pos);
-    pos += 4;
-    return v;
-  };
+// METADATA_BLOCK_PICTURE, RFC 9639 §8.8. Keeps the front cover (type 3) or,
+// failing that, the first supported picture.
+static void parsePicture(std::span<const uint8_t> body, FLACPicture& picture) {
+  ByteReader r(body);
+  const uint32_t picture_type = r.u32be();
+  const std::string_view mime = r.str(r.u32be());
+  r.skip(r.u32be()); // description
+  const uint32_t width = r.u32be();
+  const uint32_t height = r.u32be();
+  r.skip(8); // color depth, number of indexed colors
+  const auto data = r.bytes(r.u32be());
+  if (!r.ok() || data.empty()) return;
 
-  uint32_t pic_type = read_be32();
-  uint32_t mime_len = read_be32();
-  std::string mime_type;
-  if (mime_len != 0) {
-    mime_type.resize(mime_len);
-    memcpy(mime_type.data(), body.data() + pos, mime_len);
-    pos += mime_len;
-  }
-  if (pos + 4 > body.size()) return;
-  uint32_t desc_len = read_be32();
-  pos += desc_len;
-  if (pos + 20 > body.size()) return;
-  uint32_t width = read_be32();
-  uint32_t height = read_be32();
-  /* color_depth */ read_be32();
-  /* color_count */ read_be32();
-  uint32_t data_len = read_be32();
-  if (pos + data_len > body.size()) return;
+  const OMCodecId codec_id = pictureCodecFromMime(mime);
+  if (codec_id == OM_CODEC_NONE) return;
+  if (picture_type != 3 && !picture.cover_art.empty()) return;
 
-  OMCodecId codec_id = OM_CODEC_NONE;
-  if (mime_type == "image/jpeg") {
-    codec_id = OM_CODEC_JPEG;
-  } else if (mime_type == "image/png") {
-    codec_id = OM_CODEC_PNG;
-  } else {
-    // unsupported codec
-  }
-
-  if (pic_type == 3 && data_len > 0 && codec_id != OM_CODEC_NONE) {
-    picture.codec_id = codec_id;
-    picture.cover_art.assign(body.data() + pos, body.data() + pos + data_len);
-    picture.width = width;
-    picture.height = height;
-  }
+  picture.codec_id = codec_id;
+  picture.cover_art.assign(data.begin(), data.end());
+  picture.width = width;
+  picture.height = height;
 }
 
 static void parseVorbisComment(const std::vector<uint8_t>& body) {
@@ -260,12 +245,16 @@ class FLACDemuxer final : public BaseDemuxer {
 
   std::vector<FLACSeekPoint> seek_points_;
   FLACPicture cover_art_;
+  bool cover_art_sent_ = false;
+  int32_t cover_art_track_index_ = -1;
 
   std::vector<uint8_t> read_buf_;
   int64_t read_buf_origin_ = 0;
 
 public:
   auto open(std::unique_ptr<InputStream> input) -> OMError override {
+    cover_art_sent_ = false;
+    cover_art_track_index_ = -1;
     input_ = std::move(input);
     if (!input_ || !input_->isValid()) {
       return OM_IO_INVALID_STREAM;
@@ -313,10 +302,7 @@ public:
 
       bool is_last = (block_header[0] & 0x80) != 0;
       auto block_type = static_cast<FLACMetadataType>(block_header[0] & 0x7F);
-      uint32_t body_len =
-          (static_cast<uint32_t>(block_header[1]) << 16) |
-          (static_cast<uint32_t>(block_header[2]) << 8) |
-          static_cast<uint32_t>(block_header[3]);
+      uint32_t body_len = load_u24_be(block_header + 1);
 
       extradata.insert(extradata.end(), block_header, block_header + 4);
 
@@ -370,10 +356,53 @@ public:
     track.extradata = std::move(extradata);
 
     tracks_.push_back(track);
+
+    if (!cover_art_.cover_art.empty()) {
+      Track image_track;
+      image_track.index = static_cast<int32_t>(tracks_.size());
+      image_track.format.type = OM_MEDIA_IMAGE;
+      image_track.format.codec_id = cover_art_.codec_id;
+      image_track.format.video.width = cover_art_.width;
+      image_track.format.video.height = cover_art_.height;
+      image_track.disposition = OM_DISPOSITION_COVER;
+      image_track.time_base = {1, 1};
+      image_track.duration = 1;
+      image_track.nb_frames = 1;
+      cover_art_track_index_ = image_track.index;
+      tracks_.push_back(std::move(image_track));
+    }
+
     return OM_SUCCESS;
   }
 
+  void close() override {
+    BaseDemuxer::close();
+    cover_art_sent_ = false;
+    cover_art_track_index_ = -1;
+    cover_art_ = {};
+    read_buf_.clear();
+    read_buf_origin_ = 0;
+    audio_data_offset_ = 0;
+    current_sample_pos_ = 0;
+    current_frame_index_ = 0;
+    seek_points_.clear();
+    stream_info_ = {};
+  }
+
   auto readPacket() -> Result<Packet, OMError> override {
+    if (!cover_art_sent_ && !cover_art_.cover_art.empty()) {
+      cover_art_sent_ = true;
+      Packet pkt;
+      pkt.allocate(cover_art_.cover_art.size());
+      std::memcpy(pkt.bytes.data(), cover_art_.cover_art.data(), cover_art_.cover_art.size());
+      pkt.stream_index = cover_art_track_index_ >= 0 ? cover_art_track_index_ : 1;
+      pkt.pos = 0;
+      pkt.pts = 0;
+      pkt.dts = 0;
+      pkt.duration = 1;
+      pkt.is_keyframe = true;
+      return Ok(std::move(pkt));
+    }
     return scanAndDeliverFrame();
   }
 
@@ -397,6 +426,9 @@ public:
   // -----------------------------------------------------------------------
   auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     is_sequential_ = false;
+    if (timestamp > 0) {
+      cover_art_sent_ = true;
+    }
 
     // Convert timestamp to samples.
     // If stream_idx < 0, timestamp is in microseconds; otherwise it's already in track time base (samples).
@@ -469,15 +501,9 @@ public:
 
 private:
 
-  // =======================================================================
-  // ensureBytes — grow read_buf_ until it holds at least `needed` bytes.
-  //
-  // IMPORTANT: because read_buf_ may reallocate its internal storage when
-  // it grows, callers that hold a MemoryBitReader over read_buf_.data()
-  // MUST call br.repoint(read_buf_.data(), read_buf_.size()) after every
-  // call to ensureBytes().  The helper ensureAndRepoint() below does this
-  // automatically.
-  // =======================================================================
+  // Grows read_buf_ until it holds at least `needed` bytes. read_buf_ may
+  // reallocate, so a BitReader over it must be rebound afterwards; use
+  // ensureAndRebind() for that.
   auto ensureBytes(size_t needed) -> bool {
     while (read_buf_.size() < needed) {
       uint8_t tmp[8192];
@@ -488,17 +514,10 @@ private:
     return true;
   }
 
-  // Ensure + repoint in one call.  Returns false on EOF before `needed`.
-  auto ensureAndRepoint(size_t needed, MemoryBitReader& br) -> bool {
-    if (read_buf_.size() >= needed) {
-      // Buffer is already large enough; still repoint in case a previous
-      // ensureBytes caused a reallocation that the caller hasn't seen yet.
-      br.repoint(read_buf_.data(), read_buf_.size());
-      return true;
-    }
-    bool ok = ensureBytes(needed);
-    // Always repoint — the buffer may have reallocated even on failure.
-    br.repoint(read_buf_.data(), read_buf_.size());
+  // ensureBytes() + rebind `br` to the (possibly reallocated) buffer.
+  auto ensureAndRebind(size_t needed, BitReader& br) -> bool {
+    const bool ok = ensureBytes(needed);
+    br.rebind(read_buf_);
     return ok;
   }
 
@@ -558,10 +577,8 @@ private:
     // ------------------------------------------------------------------
     // Phase 3: bit-accurate subframe consumption.
     //
-    // Key invariant: MemoryBitReader always points at read_buf_.data()
-    // and preserves its bit position across buffer growth via repoint().
-    // We never call br.init() again after the initial setup — only
-    // repoint() is used when the buffer grows.
+    // `br` keeps its bit position across buffer growth; `ensure` rebinds it
+    // to read_buf_ after every reallocation.
     // ------------------------------------------------------------------
     int hdr_len = parseHeaderLen(read_buf_.data() + frame_start_in_buf,
                                  read_buf_.size() - frame_start_in_buf);
@@ -574,18 +591,17 @@ private:
       if (read_buf_.size() <= subframe_start_byte) return Err(OM_FORMAT_PARSE_FAILED);
     }
 
-    MemoryBitReader br;
-    br.init(read_buf_.data(), read_buf_.size(), subframe_start_byte);
+    BitReader br(read_buf_);
+    br.skipBits(subframe_start_byte * 8);
 
-    // ensureAndRepoint wrapper that updates br after any buffer growth.
     auto ensure = [&](size_t needed) -> bool {
-      return ensureAndRepoint(needed, br);
+      return ensureAndRebind(needed, br);
     };
 
     int rc = consumeSubframes(br, ensure,
                               stream_info_.channels, info.block_size,
                               stream_info_.bits_per_sample, has_side, ch_assignment);
-    if (rc < 0) {
+    if (rc < 0 || !br.ok()) {
       // False positive — step over this sync byte and retry.
       read_buf_.erase(read_buf_.begin(),
                       read_buf_.begin() + frame_start_in_buf + 1);
@@ -595,10 +611,9 @@ private:
     // ------------------------------------------------------------------
     // Phase 4: align to byte boundary, then consume the 2-byte CRC-16.
     // ------------------------------------------------------------------
-    // br.bitPos() is the exact bit position after the last subframe bit.
-    // Align to the next byte boundary.
+    // br.bitPosition() is the exact bit position after the last subframe bit.
     br.alignToByte();
-    size_t aligned_byte = br.bytePos();         // first byte after subframe data
+    size_t aligned_byte = br.bytePosition();         // first byte after subframe data
     size_t frame_end_in_buf = aligned_byte + 2; // +2 for CRC-16
 
     if (!ensure(frame_end_in_buf)) {
@@ -613,8 +628,7 @@ private:
       size_t crc_data_len = frame_end_in_buf - frame_start_in_buf - 2;
       uint16_t computed = crc16(read_buf_.data() + frame_start_in_buf, crc_data_len);
       const uint8_t* crc_bytes = read_buf_.data() + frame_start_in_buf + crc_data_len;
-      uint16_t stored = static_cast<uint16_t>(
-          (static_cast<uint16_t>(crc_bytes[0]) << 8) | crc_bytes[1]);
+      uint16_t stored = static_cast<uint16_t>(load_u16_be(crc_bytes));
 
       if (computed != stored) {
         read_buf_.erase(read_buf_.begin(),
@@ -650,16 +664,12 @@ private:
   // =======================================================================
   // Bit-accurate subframe consumer (RFC 9639 §10.2 – §10.2.4).
   //
-  // CONTRACT: `ensure(n)` must call br.repoint() internally so that br's
-  // data pointer stays valid after any buffer reallocation.  The caller
-  // (scanAndDeliverFrame) sets this up via the lambda above.
-  //
-  // We NEVER call br.init() here — only the `ensure` callback may change
-  // the buffer and it always repoints br before returning.
+  // CONTRACT: `ensure(n)` rebinds br after growing the buffer, so br stays
+  // valid across reallocations. Nothing else here touches the buffer.
   //
   // Returns 0 on success, -1 on parse error.
   // =======================================================================
-  auto consumeSubframes(MemoryBitReader& br,
+  auto consumeSubframes(BitReader& br,
                         const std::function<bool(size_t)>& ensure,
                         int channels, int block_size,
                         int sample_bits, bool has_side, int ch_assignment) -> int {
@@ -678,7 +688,7 @@ private:
       // We are always byte-aligned at this point (the frame header
       // ends on a byte boundary, and each subframe ends on a bit
       // boundary that we align after the last subframe).
-      if (!ensure(br.bytePos() + 2)) return -1;
+      if (!ensure(br.bytePosition() + 2)) return -1;
 
       uint32_t sf_hdr = br.readBits(8);
       if (sf_hdr & 0x80) return -1; // reserved bit must be zero
@@ -692,8 +702,8 @@ private:
         int k = 0;
         while (true) {
           // Grow the buffer if we are near its edge mid-unary.
-          if (br.bytePos() + 2 > read_buf_.size()) {
-            if (!ensure(br.bytePos() + 64)) return -1;
+          if (br.bytePosition() + 2 > read_buf_.size()) {
+            if (!ensure(br.bytePosition() + 64)) return -1;
           }
           if (br.readBits(1) != 0) break;
           if (++k > 30) return -1;
@@ -706,7 +716,7 @@ private:
       // ---- Subframe data (RFC 9639 §10.2.1 – §10.2.4) ---------------
       if (type == 0) {
         // SUBFRAME_CONSTANT
-        size_t need = br.bytePos() + static_cast<size_t>((bps + 7) / 8) + 1;
+        size_t need = br.bytePosition() + static_cast<size_t>((bps + 7) / 8) + 1;
         if (!ensure(need)) return -1;
         br.skipBits(bps);
 
@@ -714,7 +724,7 @@ private:
         // SUBFRAME_VERBATIM
         int64_t verbatim_bits = static_cast<int64_t>(bps) * block_size;
         size_t verbatim_bytes = static_cast<size_t>((verbatim_bits + 7) / 8);
-        if (!ensure(br.bytePos() + verbatim_bytes + 1)) return -1;
+        if (!ensure(br.bytePosition() + verbatim_bytes + 1)) return -1;
         br.skipBits(verbatim_bits);
 
       } else if (type >= 8 && type <= 12) {
@@ -722,7 +732,7 @@ private:
         int order = type - 8;
         if (order > block_size) return -1;
         int64_t warmup_bits = static_cast<int64_t>(bps) * order;
-        if (!ensure(br.bytePos() + static_cast<size_t>((warmup_bits + 7) / 8) + 16))
+        if (!ensure(br.bytePosition() + static_cast<size_t>((warmup_bits + 7) / 8) + 16))
           return -1;
         br.skipBits(warmup_bits);
         if (consumeResidual(br, ensure, block_size, order) < 0) return -1;
@@ -732,13 +742,13 @@ private:
         int order = type - 31;
         if (order > block_size) return -1;
         int64_t warmup_bits = static_cast<int64_t>(bps) * order;
-        if (!ensure(br.bytePos() + static_cast<size_t>((warmup_bits + 7) / 8) + 32))
+        if (!ensure(br.bytePosition() + static_cast<size_t>((warmup_bits + 7) / 8) + 32))
           return -1;
         br.skipBits(warmup_bits);
         int qlp_prec = static_cast<int>(br.readBits(4)) + 1;
         br.skipBits(5); // qlp_shift
         int64_t coeff_bits = static_cast<int64_t>(qlp_prec) * order;
-        if (!ensure(br.bytePos() + static_cast<size_t>((coeff_bits + 7) / 8) + 16))
+        if (!ensure(br.bytePosition() + static_cast<size_t>((coeff_bits + 7) / 8) + 16))
           return -1;
         br.skipBits(coeff_bits);
         if (consumeResidual(br, ensure, block_size, order) < 0) return -1;
@@ -754,10 +764,10 @@ private:
   // Rice-coded residual consumer (RFC 9639 §10.2.5).
   // Returns 0 on success, -1 on error.
   // =======================================================================
-  auto consumeResidual(MemoryBitReader& br,
+  auto consumeResidual(BitReader& br,
                        const std::function<bool(size_t)>& ensure,
                        int block_size, int predictor_order) -> int {
-    if (!ensure(br.bytePos() + 2)) return -1;
+    if (!ensure(br.bytePosition() + 2)) return -1;
 
     int coding_method = static_cast<int>(br.readBits(2));
     if (coding_method > 1) return -1;
@@ -767,7 +777,7 @@ private:
     int escape_value = (coding_method == 0) ? 15 : 31;
 
     for (int p = 0; p < num_partitions; p++) {
-      if (!ensure(br.bytePos() + 4)) return -1;
+      if (!ensure(br.bytePosition() + 4)) return -1;
 
       int rice_param = static_cast<int>(br.readBits(rice_param_bits));
 
@@ -783,10 +793,10 @@ private:
 
       if (rice_param == escape_value) {
         // Escaped: 5 bits of raw_bits, then raw_bits per sample.
-        if (!ensure(br.bytePos() + 2)) return -1;
+        if (!ensure(br.bytePosition() + 2)) return -1;
         int raw_bits = static_cast<int>(br.readBits(5));
         int64_t total_bits = static_cast<int64_t>(raw_bits) * samples_in_partition;
-        size_t need_bytes = br.bytePos() + static_cast<size_t>((total_bits + 7) / 8) + 1;
+        size_t need_bytes = br.bytePosition() + static_cast<size_t>((total_bits + 7) / 8) + 1;
         if (!ensure(need_bytes)) return -1;
         br.skipBits(total_bits);
 
@@ -796,15 +806,15 @@ private:
           // Grow buffer on demand while reading the unary prefix.
           int zeros = 0;
           while (true) {
-            if (br.bytePos() + 8 > read_buf_.size()) {
-              if (!ensure(br.bytePos() + 4096)) return -1;
+            if (br.bytePosition() + 8 > read_buf_.size()) {
+              if (!ensure(br.bytePosition() + 4096)) return -1;
             }
             if (br.readBits(1) != 0) break;
             if (++zeros > 65536) return -1;
           }
           if (rice_param > 0) {
-            if (br.bytePos() + 8 > read_buf_.size()) {
-              if (!ensure(br.bytePos() + 4096)) return -1;
+            if (br.bytePosition() + 8 > read_buf_.size()) {
+              if (!ensure(br.bytePosition() + 4096)) return -1;
             }
             br.skipBits(rice_param);
           }
@@ -858,7 +868,7 @@ private:
     if (hint == 0x06 && pos < avail)
       return static_cast<int64_t>(data[pos]) + 1;
     if (hint == 0x07 && pos + 1 < avail)
-      return (static_cast<int64_t>(data[pos]) << 8 | data[pos + 1]) + 1;
+      return static_cast<int64_t>(load_u16_be(data + pos)) + 1;
     return 0;
   }
 
@@ -977,12 +987,303 @@ private:
   }
 };
 
+class FLACMuxer final : public BaseMuxer {
+  int32_t audio_track_index_ = -1;
+  int32_t image_track_index_ = -1;
+  bool header_written_ = false;
+  std::vector<uint8_t> cover_art_data_;
+  OMCodecId cover_art_codec_ = OM_CODEC_NONE;
+  uint32_t cover_art_width_ = 0;
+  uint32_t cover_art_height_ = 0;
+  uint64_t total_audio_samples_ = 0;
+  uint64_t total_audio_bytes_ = 0;
+  int64_t streaminfo_offset_ = -1;
+  std::vector<uint8_t> streaminfo_bytes_;
+  uint32_t min_blocksize_ = 0xFFFF;
+  uint32_t max_blocksize_ = 0;
+  uint32_t min_framesize_ = 0xFFFFFF;
+  uint32_t max_framesize_ = 0;
+
+public:
+  FLACMuxer() = default;
+  ~FLACMuxer() override = default;
+
+  auto open(std::unique_ptr<OutputStream> output) -> OMError override {
+    output_ = std::move(output);
+    if (!output_ || !output_->isValid()) {
+      return OM_IO_INVALID_STREAM;
+    }
+    opened_ = true;
+    finalized_ = false;
+    header_written_ = false;
+    audio_track_index_ = -1;
+    image_track_index_ = -1;
+    cover_art_data_.clear();
+    cover_art_codec_ = OM_CODEC_NONE;
+    cover_art_width_ = 0;
+    cover_art_height_ = 0;
+    total_audio_samples_ = 0;
+    total_audio_bytes_ = 0;
+    streaminfo_offset_ = -1;
+    streaminfo_bytes_.clear();
+    min_blocksize_ = 0xFFFF;
+    max_blocksize_ = 0;
+    min_framesize_ = 0xFFFFFF;
+    max_framesize_ = 0;
+    tracks_.clear();
+    return OM_SUCCESS;
+  }
+
+  void close() override {
+    BaseMuxer::close();
+    audio_track_index_ = -1;
+    image_track_index_ = -1;
+    header_written_ = false;
+    cover_art_data_.clear();
+    cover_art_codec_ = OM_CODEC_NONE;
+    cover_art_width_ = 0;
+    cover_art_height_ = 0;
+    total_audio_samples_ = 0;
+    total_audio_bytes_ = 0;
+    streaminfo_offset_ = -1;
+    streaminfo_bytes_.clear();
+    min_blocksize_ = 0xFFFF;
+    max_blocksize_ = 0;
+    min_framesize_ = 0xFFFFFF;
+    max_framesize_ = 0;
+  }
+
+  auto addTrack(const Track& track) -> int32_t override {
+    if (finalized_) return -1;
+
+    Track stored = track;
+    int32_t idx = static_cast<int32_t>(tracks_.size());
+    stored.index = idx;
+
+    if (stored.format.type == OM_MEDIA_AUDIO) {
+      if (stored.format.codec_id != OM_CODEC_FLAC) {
+        return -1;
+      }
+      if (audio_track_index_ >= 0) {
+        return -1;
+      }
+      audio_track_index_ = idx;
+      tracks_.push_back(std::move(stored));
+      return idx;
+    }
+
+    if (stored.format.type == OM_MEDIA_IMAGE || stored.isCover()) {
+      if (image_track_index_ >= 0) {
+        return -1;
+      }
+      image_track_index_ = idx;
+      cover_art_codec_ = stored.format.codec_id;
+      cover_art_width_ = stored.format.video.width;
+      cover_art_height_ = stored.format.video.height;
+      if (!stored.extradata.empty()) {
+        cover_art_data_ = stored.extradata;
+      }
+      tracks_.push_back(std::move(stored));
+      return idx;
+    }
+
+    return -1;
+  }
+
+  auto writePacket(const Packet& packet) -> OMError override {
+    if (!opened_ || finalized_ || tracks_.empty() || audio_track_index_ < 0) {
+      return OM_COMMON_NOT_INITIALIZED;
+    }
+
+    if (image_track_index_ >= 0 && packet.stream_index == image_track_index_) {
+      if (header_written_) {
+        return OM_FORMAT_MUXING_FAILED;
+      }
+      cover_art_data_.assign(packet.bytes.begin(), packet.bytes.end());
+      return OM_SUCCESS;
+    }
+
+    if (packet.stream_index != audio_track_index_) {
+      return OM_FORMAT_STREAM_NOT_FOUND;
+    }
+
+    if (!header_written_) {
+      auto err = writeHeader();
+      if (err != OM_SUCCESS) return err;
+    }
+
+    if (packet.duration > 0) {
+      total_audio_samples_ += static_cast<uint64_t>(packet.duration);
+      uint32_t bs = static_cast<uint32_t>(packet.duration);
+      if (bs < min_blocksize_) min_blocksize_ = bs;
+      if (bs > max_blocksize_) max_blocksize_ = bs;
+    }
+
+    uint32_t fs = static_cast<uint32_t>(packet.bytes.size());
+    if (fs < min_framesize_) min_framesize_ = fs;
+    if (fs > max_framesize_) max_framesize_ = fs;
+    total_audio_bytes_ += fs;
+
+    size_t written = output_->write(packet.bytes);
+    if (written != packet.bytes.size()) {
+      return OM_IO_WRITE_FAILED;
+    }
+
+    return OM_SUCCESS;
+  }
+
+  auto finalize() -> OMError override {
+    if (!opened_ || finalized_) {
+      return OM_SUCCESS;
+    }
+    if (!header_written_) {
+      auto err = writeHeader();
+      if (err != OM_SUCCESS) return err;
+    }
+
+    if (streaminfo_offset_ >= 0 && streaminfo_bytes_.size() == 34 && output_->canSeek()) {
+      uint8_t* si = streaminfo_bytes_.data();
+      if (min_blocksize_ != 0xFFFF) {
+        store_u16_be(si + 0, static_cast<uint16_t>(min_blocksize_));
+        store_u16_be(si + 2, static_cast<uint16_t>(max_blocksize_));
+      }
+      if (min_framesize_ != 0xFFFFFF) {
+        store_u24_be(si + 4, min_framesize_);
+        store_u24_be(si + 7, max_framesize_);
+      }
+      if (total_audio_samples_ > 0) {
+        constexpr uint64_t K_TOTAL_SAMPLES_MASK = 0xFFFFFFFFFull; // low 36 bits
+        const uint64_t packed = (load_u64_be(si + 10) & ~K_TOTAL_SAMPLES_MASK) |
+                                (total_audio_samples_ & K_TOTAL_SAMPLES_MASK);
+        store_u64_be(si + 10, packed);
+      }
+      if (output_->seek(streaminfo_offset_, Whence::BEG)) {
+        output_->write(streaminfo_bytes_);
+        output_->seek(0, Whence::END);
+      }
+    }
+
+    if (!output_->flush()) {
+      return OM_IO_WRITE_FAILED;
+    }
+
+    finalized_ = true;
+    return OM_SUCCESS;
+  }
+
+private:
+  auto writeHeader() -> OMError {
+    if (audio_track_index_ < 0) {
+      return OM_COMMON_NOT_INITIALIZED;
+    }
+    const auto& track = tracks_[audio_track_index_];
+    const bool has_picture = !cover_art_data_.empty() && pictureBodySize() <= K_MAX_BLOCK_SIZE;
+
+    std::vector<uint8_t> header_bytes;
+
+    if (track.extradata.size() >= 4 && std::memcmp(track.extradata.data(), "fLaC", 4) == 0) {
+      header_bytes.assign(track.extradata.begin(), track.extradata.end());
+      if (header_bytes.size() >= 42) {
+        streaminfo_offset_ = 8;
+        streaminfo_bytes_.assign(header_bytes.begin() + 8, header_bytes.begin() + 42);
+      }
+      if (has_picture) {
+        bool found_picture = false;
+        size_t pos = 4;
+        size_t last_hdr_pos = 4;
+        while (pos + 4 <= header_bytes.size()) {
+          last_hdr_pos = pos;
+          const bool is_last = (header_bytes[pos] & 0x80) != 0;
+          const auto type = static_cast<FLACMetadataType>(header_bytes[pos] & 0x7F);
+          if (type == FLACMetadataType::PICTURE) {
+            found_picture = true;
+          }
+          pos += 4 + load_u24_be(header_bytes.data() + pos + 1);
+          if (is_last) break;
+        }
+        if (!found_picture && last_hdr_pos + 4 <= header_bytes.size()) {
+          header_bytes[last_hdr_pos] &= 0x7F;
+          appendPictureBlock(header_bytes, true);
+        }
+      }
+    } else {
+      streaminfo_bytes_.assign(34, 0);
+      if (track.extradata.size() == 34) {
+        std::memcpy(streaminfo_bytes_.data(), track.extradata.data(), 34);
+      } else {
+        const uint32_t sr = track.format.audio.sample_rate ? track.format.audio.sample_rate : 44100;
+        const uint32_t ch = track.format.audio.channels ? track.format.audio.channels : 2;
+        const uint32_t bps = track.format.audio.bit_depth ? track.format.audio.bit_depth : 16;
+        const uint64_t dur = track.duration > 0 ? static_cast<uint64_t>(track.duration) : 0;
+
+        // sample_rate(20) | channels-1(3) | bits_per_sample-1(5) | total_samples(36)
+        SpanBitWriter(std::span(streaminfo_bytes_).subspan(10, 8))
+            .bits(sr & 0xFFFFF, 20)
+            .bits((ch - 1) & 0x7, 3)
+            .bits((bps - 1) & 0x1F, 5)
+            .bits64(dur & 0xFFFFFFFFF, 36)
+            .flush();
+      }
+
+      ByteWriter w(header_bytes);
+      w.str("fLaC")
+       .u8((has_picture ? 0x00 : 0x80) | static_cast<uint8_t>(FLACMetadataType::STREAMINFO))
+       .u24be(34);
+      streaminfo_offset_ = static_cast<int64_t>(w.size());
+      w.bytes(streaminfo_bytes_);
+
+      if (has_picture) {
+        appendPictureBlock(header_bytes, true);
+      }
+    }
+
+    size_t written = output_->write(header_bytes);
+    if (written != header_bytes.size()) {
+      return OM_IO_WRITE_FAILED;
+    }
+
+    header_written_ = true;
+    return OM_SUCCESS;
+  }
+
+  static constexpr uint32_t K_MAX_BLOCK_SIZE = 0xFFFFFF; // 24-bit metadata block length
+
+  auto pictureMime() const -> std::string_view {
+    const bool is_png = cover_art_codec_ == OM_CODEC_PNG ||
+                        (cover_art_data_.size() >= 8 && cover_art_data_[0] == 0x89 && cover_art_data_[1] == 'P');
+    return is_png ? "image/png" : "image/jpeg";
+  }
+
+  auto pictureBodySize() const -> size_t {
+    // 8 u32 fields + MIME string + picture data (description is empty).
+    return 8 * 4 + pictureMime().size() + cover_art_data_.size();
+  }
+
+  // METADATA_BLOCK_PICTURE, RFC 9639 §8.8. Caller guarantees it fits K_MAX_BLOCK_SIZE.
+  void appendPictureBlock(std::vector<uint8_t>& out, bool is_last) const {
+    const std::string_view mime = pictureMime();
+    ByteWriter w(out);
+    w.u8((is_last ? 0x80 : 0x00) | static_cast<uint8_t>(FLACMetadataType::PICTURE))
+     .u24be(static_cast<uint32_t>(pictureBodySize()))
+     .u32be(3) // picture type: front cover
+     .u32be(static_cast<uint32_t>(mime.size()))
+     .str(mime)
+     .u32be(0) // description length
+     .u32be(cover_art_width_)
+     .u32be(cover_art_height_)
+     .u32be(24) // color depth
+     .u32be(0)  // number of indexed colors
+     .u32be(static_cast<uint32_t>(cover_art_data_.size()))
+     .bytes(cover_art_data_);
+  }
+};
+
 const FormatDescriptor FORMAT_FLAC = {
     .container_id = OM_CONTAINER_FLAC,
     .name = "flac",
     .long_name = "FLAC (Free Lossless Audio Codec)",
     .demuxer_factory = [] { return std::make_unique<FLACDemuxer>(); },
-    .muxer_factory = {},
+    .muxer_factory = [] { return std::make_unique<FLACMuxer>(); },
 };
 
 } // namespace openmedia

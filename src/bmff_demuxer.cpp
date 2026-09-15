@@ -11,6 +11,7 @@
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
 #include <span>
+#include <util/byte_reader.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 #include <vector>
@@ -381,40 +382,40 @@ struct BMFFTrack {
 // ---------------------------------------------------------------------------
 
 inline void parseMvhd(std::span<const uint8_t> body, uint32_t& out_movie_timescale) {
-  BufReader r(body.data(), body.size());
-  const uint8_t version = r.read_u8();
+  ByteReader r(body);
+  const uint8_t version = r.u8();
   r.skip(3);
   r.skip(version == 1 ? 16 : 8);
-  out_movie_timescale = r.read_u32_be();
+  out_movie_timescale = r.u32be();
 }
 
 inline void parseTkhd(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
-  const uint8_t version = r.read_u8();
+  ByteReader r(body);
+  const uint8_t version = r.u8();
   r.skip(3);
   r.skip(version == 1 ? 16 : 8);
-  track.track.id = static_cast<int32_t>(r.read_u32_be());
+  track.track.id = static_cast<int32_t>(r.u32be());
 }
 
 inline void parseMdhd(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
-  const uint8_t version = r.read_u8();
+  ByteReader r(body);
+  const uint8_t version = r.u8();
   r.skip(3);
   if (version == 1) {
     r.skip(16);
-    track.timescale = static_cast<uint32_t>(r.read_u64_be());
-    track.track_duration = r.read_i64_be();
+    track.timescale = static_cast<uint32_t>(r.u64be());
+    track.track_duration = r.i64be();
   } else {
     r.skip(8);
-    track.timescale = r.read_u32_be();
-    track.track_duration = static_cast<int64_t>(r.read_u32_be());
+    track.timescale = r.u32be();
+    track.track_duration = static_cast<int64_t>(r.u32be());
   }
 }
 
 inline void parseHdlr(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(8); // version + flags + pre_defined
-  const uint32_t h = r.read_u32_le();
+  const uint32_t h = r.u32le();
   track.handler = h;
   switch (h) {
     case ATOM('s', 'o', 'u', 'n'): track.track.format.type = OM_MEDIA_AUDIO; break;
@@ -424,22 +425,22 @@ inline void parseHdlr(std::span<const uint8_t> body, BMFFTrack& track) {
 }
 
 inline void parseElst(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
-  const uint8_t version = r.read_u8();
+  ByteReader r(body);
+  const uint8_t version = r.u8();
   r.skip(3);
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
 
   track.elst_entries.reserve(count);
   for (uint32_t i = 0; i < count; ++i) {
     ELSTEntry e;
     if (version == 1) {
-      e.segment_duration = r.read_i64_be();
-      e.media_time = r.read_i64_be();
+      e.segment_duration = r.i64be();
+      e.media_time = r.i64be();
     } else {
-      e.segment_duration = static_cast<int64_t>(r.read_u32_be());
-      e.media_time = static_cast<int64_t>(r.read_i32_be());
+      e.segment_duration = static_cast<int64_t>(r.u32be());
+      e.media_time = static_cast<int64_t>(r.i32be());
     }
-    e.media_rate = r.read_i32_be() >> 16;
+    e.media_rate = r.i32be() >> 16;
     track.elst_entries.push_back(e);
   }
 }
@@ -462,26 +463,26 @@ inline auto getEditListStartDts(const BMFFTrack& track) -> int64_t {
 
 inline void parseColr(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 4) return;
-  BufReader r(body.data(), body.size());
-  const uint32_t colour_type = r.read_u32_le();
+  ByteReader r(body);
+  const uint32_t colour_type = r.u32le();
 
   uint16_t primaries = 0, transfer = 0, matrix = 0;
   OMColorRange range = OM_COLOR_RANGE_UNSPECIFIED;
   switch (colour_type) {
     case ATOM('n', 'c', 'l', 'x'):
       if (body.size() < 11) return;
-      primaries = r.read_u16_be();
-      transfer = r.read_u16_be();
-      matrix = r.read_u16_be();
-      range = (r.read_u8() & 0x80u) ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+      primaries = r.u16be();
+      transfer = r.u16be();
+      matrix = r.u16be();
+      range = (r.u8() & 0x80u) ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
       break;
     case ATOM('n', 'c', 'l', 'c'):
     case ATOM('r', 'I', 'C', 'C'):
     case ATOM('p', 'r', 'o', 'f'):
       if (body.size() < 10) return;
-      primaries = r.read_u16_be();
-      transfer = r.read_u16_be();
-      matrix = r.read_u16_be();
+      primaries = r.u16be();
+      transfer = r.u16be();
+      matrix = r.u16be();
       break;
     default:
       return;
@@ -495,33 +496,33 @@ inline void parseColr(std::span<const uint8_t> body, BMFFTrack& track) {
 
 inline void parseMdcv(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 24) return;
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   auto& md = track.track.format.video.mastering_display;
   for (int i = 0; i < 3; ++i) {
-    md.display_primaries[i][0] = r.read_u16_be();
-    md.display_primaries[i][1] = r.read_u16_be();
+    md.display_primaries[i][0] = r.u16be();
+    md.display_primaries[i][1] = r.u16be();
   }
-  md.white_point[0] = r.read_u16_be();
-  md.white_point[1] = r.read_u16_be();
-  md.max_display_mastering_luminance = r.read_u32_be();
-  md.min_display_mastering_luminance = r.read_u32_be();
+  md.white_point[0] = r.u16be();
+  md.white_point[1] = r.u16be();
+  md.max_display_mastering_luminance = r.u32be();
+  md.min_display_mastering_luminance = r.u32be();
   md.has_value = true;
 }
 
 inline void parseClli(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 4) return;
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   auto& cll = track.track.format.video.content_light_level;
-  cll.max_content_light_level = r.read_u16_be();
-  cll.max_pic_average_light_level = r.read_u16_be();
+  cll.max_content_light_level = r.u16be();
+  cll.max_pic_average_light_level = r.u16be();
   cll.has_value = true;
 }
 
 inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 12) return;
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(8);
-  if (const uint32_t avg = r.read_u32_be(); avg) {
+  if (const uint32_t avg = r.u32be(); avg) {
     track.track.bitrate = avg;
   }
 }
@@ -529,11 +530,11 @@ inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
 inline auto parseAvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 7) return false;
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
 
   r.skip(1); // configurationVersion
-  const uint8_t profile_idc = r.read_u8(); // AVCProfileIndication
-  const uint8_t profile_compat = r.read_u8(); // profile_compatibility
+  const uint8_t profile_idc = r.u8(); // AVCProfileIndication
+  const uint8_t profile_compat = r.u8(); // profile_compatibility
   r.skip(1); // AVCLevelIndication
 
   if (profile_idc == 66 && (profile_compat & 0x40u)) {
@@ -542,12 +543,12 @@ inline auto parseAvcc(std::span<const uint8_t> body,
     track.track.format.profile = static_cast<OMProfile>(profile_idc);
   }
 
-  const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
+  const uint8_t nalu_len_sz = (r.u8() & 0x03u) + 1u;
 
   std::vector<uint8_t> annexb_extra;
   auto extract_nals = [&](uint8_t count) {
     for (uint8_t i = 0; i < count; ++i) {
-      uint16_t nal_size = r.read_u16_be();
+      uint16_t nal_size = r.u16be();
       if (r.remaining() < nal_size) break;
       annexb_extra.insert(annexb_extra.end(),
                           AnnexBFilter::START_CODE_LONG,
@@ -558,10 +559,10 @@ inline auto parseAvcc(std::span<const uint8_t> body,
     }
   };
 
-  uint8_t num_sps = r.read_u8() & 0x1Fu;
+  uint8_t num_sps = r.u8() & 0x1Fu;
   extract_nals(num_sps);
   if (r.remaining() > 0) {
-    uint8_t num_pps = r.read_u8();
+    uint8_t num_pps = r.u8();
     extract_nals(num_pps);
   }
 
@@ -576,10 +577,10 @@ inline auto parseHvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
   if (body.size() < 23) return false;
 
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
 
   r.skip(1); // configurationVersion
-  const uint8_t ptl_byte = r.read_u8();
+  const uint8_t ptl_byte = r.u8();
   const uint8_t profile_idc = ptl_byte & 0x1Fu; // general_profile_idc
   r.skip(4); // general_profile_compatibility_flags
   r.skip(6); // general_constraint_indicator_flags (48 bit)
@@ -591,8 +592,8 @@ inline auto parseHvcc(std::span<const uint8_t> body,
   r.skip(1); // bitDepthChromaMinus8
   r.skip(2); // avgFrameRate
 
-  const uint8_t nalu_len_sz = (r.read_u8() & 0x03u) + 1u;
-  const uint8_t num_arrays = r.read_u8();
+  const uint8_t nalu_len_sz = (r.u8() & 0x03u) + 1u;
+  const uint8_t num_arrays = r.u8();
 
   if (profile_idc) {
     track.track.format.profile = static_cast<OMProfile>(profile_idc);
@@ -604,11 +605,11 @@ inline auto parseHvcc(std::span<const uint8_t> body,
     if (r.remaining() < 3) break;
 
     r.skip(1);
-    const uint16_t num_nalus = r.read_u16_be();
+    const uint16_t num_nalus = r.u16be();
 
     for (uint16_t j = 0; j < num_nalus; ++j) {
       if (r.remaining() < 2) break;
-      const uint16_t nal_size = r.read_u16_be();
+      const uint16_t nal_size = r.u16be();
       if (r.remaining() < nal_size) break;
 
       annexb_extra.insert(annexb_extra.end(),
@@ -633,11 +634,11 @@ inline auto parseDolbyVisionConfiguration(std::span<const uint8_t> body,
                                           BMFFTrack& track) -> bool {
   if (body.size() < 4) return false;
 
-  BufReader r(body.data(), body.size());
-  const uint8_t major = r.read_u8();
-  const uint8_t minor = r.read_u8();
-  const uint8_t profile_level = r.read_u8();
-  const uint8_t flags = r.read_u8();
+  ByteReader r(body);
+  const uint8_t major = r.u8();
+  const uint8_t minor = r.u8();
+  const uint8_t profile_level = r.u8();
+  const uint8_t flags = r.u8();
   if (!r.ok()) return false;
 
   track.track.metadata.setBool(DOLBY_VISION_PRESENT, true);
@@ -667,17 +668,17 @@ inline auto parseVvcc(std::span<const uint8_t> body,
   }
   fprintf(stderr, "\n");
 
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
 
   // byte 0: configurationVersion (must be 1)
-  const uint8_t config_version = r.read_u8();
+  const uint8_t config_version = r.u8();
   if (config_version != 1) {
     return false;
   }
 
   // byte 1: lengthSizeMinusOne(2) | ptl_present_flag(1) | reserved(5)
   // ISO 14496-15:2022 §11.2.4.2 VvcDecoderConfigurationRecord
-  const uint8_t flags       = r.read_u8();
+  const uint8_t flags       = r.u8();
   const uint8_t nalu_len_sz = ((flags >> 5) & 0x03u) + 1u;  // bits [6:5]
   const bool    ptl_present = (flags & 0x10u) != 0;          // bit 4
 
@@ -689,8 +690,8 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     if (r.remaining() < 3) {
       return false;
     }
-    const uint8_t b0 = r.read_u8();
-    const uint8_t b1 = r.read_u8();
+    const uint8_t b0 = r.u8();
+    const uint8_t b1 = r.u8();
     // b0 = ols_idx[8:1], b1[7] = ols_idx[0]
     // b1[6:4] = num_sublayers, b1[3:2] = constant_frame_rate
     // b1[1:0] = chroma_format_idc
@@ -703,7 +704,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     if (r.remaining() < 1) {
       return false;
     }
-    const uint8_t ptl_b0      = r.read_u8();
+    const uint8_t ptl_b0      = r.u8();
     const uint8_t profile_idc = ptl_b0 >> 1;   // bits [7:1]
     if (profile_idc) {
       track.track.format.profile = static_cast<OMProfile>(profile_idc);
@@ -720,7 +721,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     if (r.remaining() < 1) {
       return false;
     }
-    const uint8_t constraint_byte = r.read_u8();
+    const uint8_t constraint_byte = r.u8();
     const bool    gci_present     = (constraint_byte >> 5) & 0x01u;  // bit 5
 
     if (gci_present) {
@@ -743,7 +744,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
 
       uint8_t present_count = 0;
       for (uint32_t fb = 0; fb < flag_bytes; ++fb) {
-        const uint8_t fbyte      = r.read_u8();
+        const uint8_t fbyte      = r.u8();
         const uint32_t bits_used = (fb == flag_bytes - 1u)
             ? flag_count - fb * 8u
             : 8u;
@@ -763,7 +764,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     if (r.remaining() < 1) {
       return false;
     }
-    const uint8_t num_sub_profiles   = r.read_u8();
+    const uint8_t num_sub_profiles   = r.u8();
     const size_t  sub_profile_bytes  = static_cast<size_t>(num_sub_profiles) * 4u;
     if (r.remaining() < sub_profile_bytes) {
       return false;
@@ -775,7 +776,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
   if (r.remaining() < 1) {
     return false;
   }
-  const uint8_t num_arrays = r.read_u8();
+  const uint8_t num_arrays = r.u8();
 
   std::vector<uint8_t> annexb_extra;
 
@@ -783,11 +784,11 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     // array_completeness(1) | reserved(1) | nal_unit_type(6)
     if (r.remaining() < 3) break;
     r.skip(1);
-    const uint16_t num_nalus = r.read_u16_be();
+    const uint16_t num_nalus = r.u16be();
 
     for (uint16_t j = 0; j < num_nalus; ++j) {
       if (r.remaining() < 2) break;
-      const uint16_t nal_size = r.read_u16_be();
+      const uint16_t nal_size = r.u16be();
       if (nal_size == 0) continue;
       if (r.remaining() < nal_size) break;
 
@@ -847,32 +848,32 @@ inline void parseDops(std::span<const uint8_t> body, BMFFTrack& track) {
 }
 
 inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4); // version + flags
 
   auto readDescLen = [&]() -> uint32_t {
     uint32_t len = 0;
     for (int i = 0; i < 4; ++i) {
-      const uint8_t b = r.read_u8();
+      const uint8_t b = r.u8();
       len = (len << 7) | (b & 0x7Fu);
       if (!(b & 0x80u)) break;
     }
     return len;
   };
 
-  if (r.read_u8() != 0x03) return;
+  if (r.u8() != 0x03) return;
   const uint32_t es_len = readDescLen();
   const size_t es_end = r.tell() + es_len;
   if (es_end > r.size()) return;
 
   r.skip(2); // ES_ID
-  const uint8_t es_flags = r.read_u8();
+  const uint8_t es_flags = r.u8();
   if (es_flags & 0x80u) { r.skip(2); }           // streamDependenceFlag → dependsOn_ES_ID
-  if (es_flags & 0x40u) { r.skip(r.read_u8()); } // URL_Flag → URL_length + URL_string
+  if (es_flags & 0x40u) { r.skip(r.u8()); } // URL_Flag → URL_length + URL_string
   if (es_flags & 0x20u) { r.skip(2); }           // OCRstreamFlag → OCR_ES_Id
 
   while (r.tell() < es_end) {
-    const uint8_t tag = r.read_u8();
+    const uint8_t tag = r.u8();
     const uint32_t len = readDescLen();
     const size_t next = r.tell() + len;
     if (next > r.size()) break;
@@ -883,16 +884,17 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
       r.skip(1); // streamType (6 bits) + upStream (1 bit) + reserved (1 bit)
       r.skip(3); // bufferSizeDB
       r.skip(4); // maxBitrate
-      if (const uint32_t avg = r.read_u32_be(); avg) {
+      if (const uint32_t avg = r.u32be(); avg) {
         track.track.bitrate = avg;
       }
 
       while (r.tell() + 2 <= next) {
-        const uint8_t sub_tag = r.read_u8();
+        const uint8_t sub_tag = r.u8();
         const uint32_t sub_len = readDescLen();
         if (sub_tag == 0x05 && sub_len > 0) {
           // DecoderSpecificInfo — read raw then strip trailing zeros down to 2-byte minimum
-          auto raw = r.read_bytes(sub_len);
+          const auto raw_bytes = r.bytes(std::min<size_t>(sub_len, r.remaining()));
+          std::vector<uint8_t> raw(raw_bytes.begin(), raw_bytes.end());
           while (raw.size() > 2 && raw.back() == 0x00) {
             raw.pop_back();
           }
@@ -918,24 +920,25 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
 inline void parseAlacSpecific(std::span<const uint8_t> body, BMFFTrack& track) {
   // ALACSpecificBox: 4-byte version/flags + 24-byte ALACSpecificConfig
   if (body.size() < 28) return;
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4); // version + flags
   const uint8_t* c = r.cur();
   track.track.format.audio.bit_depth = c[5];
   track.track.format.audio.channels = c[9];
   track.track.format.audio.sample_rate = load_u32_be(c + 20);
-  track.track.extradata = r.read_bytes(24);
+  const auto config = r.bytes(24);
+  track.track.extradata.assign(config.begin(), config.end());
 }
 
 inline void parseStsz(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
-  const uint32_t global_size = r.read_u32_be();
-  const uint32_t count = r.read_u32_be();
+  const uint32_t global_size = r.u32be();
+  const uint32_t count = r.u32be();
   track.sample_sizes.resize(count);
   if (global_size == 0) {
     for (uint32_t i = 0; i < count; ++i) {
-      track.sample_sizes[i] = r.read_u32_be();
+      track.sample_sizes[i] = r.u32be();
     }
   } else {
     std::fill(track.sample_sizes.begin(), track.sample_sizes.end(), global_size);
@@ -943,110 +946,110 @@ inline void parseStsz(std::span<const uint8_t> body, BMFFTrack& track) {
 }
 
 inline void parseStz2(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
   r.skip(3); // reserved
-  const uint8_t field_size = r.read_u8();
-  const uint32_t count = r.read_u32_be();
+  const uint8_t field_size = r.u8();
+  const uint32_t count = r.u32be();
   track.sample_sizes.resize(count);
 
   switch (field_size) {
     case 4:
       for (uint32_t i = 0; i < count; i += 2) {
-        const uint8_t b = r.read_u8();
+        const uint8_t b = r.u8();
         track.sample_sizes[i] = (b >> 4) & 0xFu;
         if (i + 1 < count) track.sample_sizes[i + 1] = b & 0xFu;
       }
       break;
     case 8:
       for (uint32_t i = 0; i < count; ++i) {
-        track.sample_sizes[i] = r.read_u8();
+        track.sample_sizes[i] = r.u8();
       }
       break;
     default: // 16
       for (uint32_t i = 0; i < count; ++i) {
-        track.sample_sizes[i] = r.read_u16_be();
+        track.sample_sizes[i] = r.u16be();
       }
       break;
   }
 }
 
 inline void parseStco(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
   track.chunk_offsets.resize(count);
   for (uint32_t i = 0; i < count; ++i) {
-    track.chunk_offsets[i] = static_cast<int64_t>(r.read_u32_be());
+    track.chunk_offsets[i] = static_cast<int64_t>(r.u32be());
   }
 }
 
 inline void parseCo64(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
   track.chunk_offsets.resize(count);
   for (uint32_t i = 0; i < count; ++i) {
-    track.chunk_offsets[i] = static_cast<int64_t>(r.read_u64_be());
+    track.chunk_offsets[i] = static_cast<int64_t>(r.u64be());
   }
 }
 
 inline void parseStsc(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
   track.stsc_entries.resize(count);
   for (auto& e : track.stsc_entries) {
-    e.first_chunk = r.read_u32_be();
-    e.samples_per_chunk = r.read_u32_be();
-    e.sample_description_index = r.read_u32_be();
+    e.first_chunk = r.u32be();
+    e.samples_per_chunk = r.u32be();
+    e.sample_description_index = r.u32be();
   }
 }
 
 inline void parseStts(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
   track.stts_entries.resize(count);
   for (auto& e : track.stts_entries) {
-    e.sample_count = r.read_u32_be();
-    e.sample_delta = r.read_u32_be();
+    e.sample_count = r.u32be();
+    e.sample_delta = r.u32be();
   }
 }
 
 inline void parseCtts(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4); // version + flags
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
   track.ctts_entries.resize(count);
   for (auto& e : track.ctts_entries) {
-    e.sample_count = r.read_u32_be();
-    e.sample_offset = r.read_i32_be();
+    e.sample_count = r.u32be();
+    e.sample_offset = r.i32be();
   }
 }
 
 inline void parseStss(std::span<const uint8_t> body, BMFFTrack& track) {
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
-  const uint32_t count = r.read_u32_be();
+  const uint32_t count = r.u32be();
   track.sync_samples.resize(count);
   for (auto& s : track.sync_samples) {
-    s = r.read_u32_be();
+    s = r.u32be();
   }
   std::sort(track.sync_samples.begin(), track.sync_samples.end());
 }
 
 inline void parseTrex(std::span<const uint8_t> body, std::vector<TREXEntry>& trex_entries) {
   if (body.size() < 24) return;
-  BufReader r(body.data(), body.size());
+  ByteReader r(body);
   r.skip(4);
 
   TREXEntry entry;
-  entry.track_id = r.read_u32_be();
-  entry.default_sample_description_index = r.read_u32_be();
-  entry.default_sample_duration = r.read_u32_be();
-  entry.default_sample_size = r.read_u32_be();
-  entry.default_sample_flags = r.read_u32_be();
+  entry.track_id = r.u32be();
+  entry.default_sample_description_index = r.u32be();
+  entry.default_sample_duration = r.u32be();
+  entry.default_sample_size = r.u32be();
+  entry.default_sample_flags = r.u32be();
 
   const auto it = std::find_if(
       trex_entries.begin(), trex_entries.end(),
@@ -1480,14 +1483,14 @@ private:
   void parseTfhd(std::span<const uint8_t> body) {
     if (!current_fragment_ || body.size() < 8) return;
 
-    BufReader r(body.data(), body.size());
+    ByteReader r(body);
     r.skip(1);
-    const uint32_t flags = (static_cast<uint32_t>(r.read_u8()) << 16) |
-                           (static_cast<uint32_t>(r.read_u8()) << 8) |
-                           static_cast<uint32_t>(r.read_u8());
+    const uint32_t flags = (static_cast<uint32_t>(r.u8()) << 16) |
+                           (static_cast<uint32_t>(r.u8()) << 8) |
+                           static_cast<uint32_t>(r.u8());
 
     auto& fragment = *current_fragment_;
-    fragment.track_id = r.read_u32_be();
+    fragment.track_id = r.u32be();
     fragment.moof_offset = current_moof_offset_;
     fragment.base_data_offset = current_moof_offset_;
     fragment.default_sample_duration = 0;
@@ -1501,19 +1504,19 @@ private:
     }
 
     if (flags & 0x000001u) {
-      fragment.base_data_offset = r.read_u64_be();
+      fragment.base_data_offset = r.u64be();
     }
     if (flags & 0x000002u) {
-      r.read_u32_be();
+      r.u32be();
     }
     if (flags & 0x000008u) {
-      fragment.default_sample_duration = r.read_u32_be();
+      fragment.default_sample_duration = r.u32be();
     }
     if (flags & 0x000010u) {
-      fragment.default_sample_size = r.read_u32_be();
+      fragment.default_sample_size = r.u32be();
     }
     if (flags & 0x000020u) {
-      fragment.default_sample_flags = r.read_u32_be();
+      fragment.default_sample_flags = r.u32be();
     }
     if ((flags & 0x020000u) != 0 && (flags & 0x000001u) == 0) {
       fragment.base_data_offset = current_moof_offset_;
@@ -1523,13 +1526,13 @@ private:
   void parseTfdt(std::span<const uint8_t> body) {
     if (!current_fragment_ || body.size() < 8) return;
 
-    BufReader r(body.data(), body.size());
-    const uint8_t version = r.read_u8();
+    ByteReader r(body);
+    const uint8_t version = r.u8();
     r.skip(3);
 
     current_fragment_->decode_time = (version == 1)
-        ? static_cast<int64_t>(r.read_u64_be())
-        : static_cast<int64_t>(r.read_u32_be());
+        ? static_cast<int64_t>(r.u64be())
+        : static_cast<int64_t>(r.u32be());
     current_fragment_->has_decode_time = true;
   }
 
@@ -1539,21 +1542,21 @@ private:
     BMFFTrack* track = findTrackById(current_fragment_->track_id);
     if (!track) return;
 
-    BufReader r(body.data(), body.size());
-    const uint8_t version = r.read_u8();
-    const uint32_t flags = (static_cast<uint32_t>(r.read_u8()) << 16) |
-                           (static_cast<uint32_t>(r.read_u8()) << 8) |
-                           static_cast<uint32_t>(r.read_u8());
-    const uint32_t sample_count = r.read_u32_be();
+    ByteReader r(body);
+    const uint8_t version = r.u8();
+    const uint32_t flags = (static_cast<uint32_t>(r.u8()) << 16) |
+                           (static_cast<uint32_t>(r.u8()) << 8) |
+                           static_cast<uint32_t>(r.u8());
+    const uint32_t sample_count = r.u32be();
 
     int32_t data_offset = 0;
     if (flags & 0x000001u) {
-      data_offset = r.read_i32_be();
+      data_offset = r.i32be();
     }
 
     uint32_t first_sample_flags = current_fragment_->default_sample_flags;
     if (flags & 0x000004u) {
-      first_sample_flags = r.read_u32_be();
+      first_sample_flags = r.u32be();
     }
 
     int64_t sample_offset = static_cast<int64_t>(current_fragment_->base_data_offset) +
@@ -1564,21 +1567,21 @@ private:
 
     for (uint32_t i = 0; i < sample_count; ++i) {
       const uint32_t duration = (flags & 0x000100u)
-          ? r.read_u32_be()
+          ? r.u32be()
           : current_fragment_->default_sample_duration;
       const uint32_t size = (flags & 0x000200u)
-          ? r.read_u32_be()
+          ? r.u32be()
           : current_fragment_->default_sample_size;
 
       uint32_t sample_flags = current_fragment_->default_sample_flags;
       if (flags & 0x000400u) {
-        sample_flags = r.read_u32_be();
+        sample_flags = r.u32be();
       } else if ((flags & 0x000004u) && i == 0) {
         sample_flags = first_sample_flags;
       }
 
       const int32_t cts_offset = (flags & 0x000800u)
-          ? ((version == 1) ? r.read_i32_be() : static_cast<int32_t>(r.read_u32_be()))
+          ? ((version == 1) ? r.i32be() : static_cast<int32_t>(r.u32be()))
           : 0;
 
       const bool is_keyframe = track->track.format.type != OM_MEDIA_VIDEO ||
