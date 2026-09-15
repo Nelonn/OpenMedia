@@ -11,18 +11,6 @@ namespace openmedia {
 
 namespace {
 
-void store_u16_le(uint8_t* dst, uint16_t value) {
-  dst[0] = static_cast<uint8_t>(value & 0xFF);
-  dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
-}
-
-void store_u32_le(uint8_t* dst, uint32_t value) {
-  dst[0] = static_cast<uint8_t>(value & 0xFF);
-  dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
-  dst[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
-  dst[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
-}
-
 auto writeExact(OutputStream& output, std::span<const uint8_t> data) -> bool {
   return output.write(data) == data.size();
 }

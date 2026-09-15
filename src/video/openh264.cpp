@@ -273,7 +273,7 @@ public:
     set_bool(OPENH264_ENC_LTR, param.bEnableLongTermReference);
     set_int32(OPENH264_ENC_LTR_REF_NUM, param.iLTRRefNum);
     set_int32(OPENH264_ENC_LTR_PERIOD, param.iLtrMarkPeriod);
-    set_int32(OPENH264_ENC_THREADS, param.iMultipleThreadIdc);
+    set_int32(CODEC_THREADS, param.iMultipleThreadIdc);
     set_bool(OPENH264_ENC_LOAD_BALANCING, param.bUseLoadBalancing);
     set_int32(OPENH264_ENC_LOOP_FILTER, param.iLoopFilterDisableIdc);
     set_int32(OPENH264_ENC_LOOP_FILTER_ALPHA, param.iLoopFilterAlphaC0Offset);
@@ -531,7 +531,7 @@ const CodecDescriptor CODEC_OPENH264 = {
         OPENH264_ENC_LTR,
         OPENH264_ENC_LTR_REF_NUM,
         OPENH264_ENC_LTR_PERIOD,
-        OPENH264_ENC_THREADS,
+        CODEC_THREADS,
         OPENH264_ENC_LOAD_BALANCING,
         OPENH264_ENC_DENOISE,
         OPENH264_ENC_BGD,

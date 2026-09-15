@@ -3,9 +3,45 @@
 #include <openmedia/io.hpp>
 #include <vector>
 #include <bit>
+#include <cassert>
+#include <concepts>
 #include <cstring>
+#include <type_traits>
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <stdlib.h>
+#endif
 
 namespace openmedia {
+
+#if __cpp_lib_byteswap >= 202110L
+using std::byteswap;
+#else
+template<std::integral T>
+constexpr auto byteswap(T value) noexcept -> T {
+  using U = std::make_unsigned_t<T>;
+  const auto v = static_cast<U>(value);
+  if (!std::is_constant_evaluated()) {
+    switch (sizeof(T)) {
+#if defined(_MSC_VER) && !defined(__clang__)
+      case 2: return static_cast<T>(_byteswap_ushort(static_cast<uint16_t>(v)));
+      case 4: return static_cast<T>(_byteswap_ulong(static_cast<unsigned long>(v)));
+      case 8: return static_cast<T>(_byteswap_uint64(static_cast<uint64_t>(v)));
+#else
+      case 2: return static_cast<T>(__builtin_bswap16(static_cast<uint16_t>(v)));
+      case 4: return static_cast<T>(__builtin_bswap32(static_cast<uint32_t>(v)));
+      case 8: return static_cast<T>(__builtin_bswap64(static_cast<uint64_t>(v)));
+#endif
+      default: break;
+    }
+  }
+  U r = 0;
+  for (size_t i = 0; i < sizeof(T); ++i) {
+    r = static_cast<U>((r << 8) | ((v >> (i * 8)) & 0xFF));
+  }
+  return static_cast<T>(r);
+}
+#endif
 
 static constexpr auto magic_u32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) noexcept -> uint32_t {
   if constexpr (std::endian::native == std::endian::little) {
@@ -25,50 +61,62 @@ static consteval auto magic_u32(const char str[4]) noexcept -> uint32_t {
   return magic_u32(str[0], str[1], str[2], str[3]);
 }
 
-static auto load_u32(const void* p) -> uint32_t {
-  uint32_t val;
-  memcpy(&val, p, 4);
-  return val;
+namespace detail {
+
+template<std::unsigned_integral T>
+inline auto load(const uint8_t* src, std::endian order) noexcept -> T {
+  T v;
+  memcpy(&v, src, sizeof(T));
+  return order == std::endian::native ? v : byteswap(v);
 }
 
-static auto load_u16_be(const uint8_t* p) -> uint32_t {
-  return (static_cast<uint32_t>(p[0]) << 8) |
-         static_cast<uint32_t>(p[1]);
+template<std::unsigned_integral T>
+inline void store(uint8_t* dst, T v, std::endian order) noexcept {
+  if (order != std::endian::native) v = byteswap(v);
+  memcpy(dst, &v, sizeof(T));
 }
 
-static auto read_u24_be(const uint8_t* p) -> uint32_t {
-  return (static_cast<uint32_t>(p[0]) << 16) |
-         (static_cast<uint32_t>(p[1]) << 8) |
-         (static_cast<uint32_t>(p[2]));
+} // namespace detail
+
+// Native byte order, e.g. for comparing against magic_u32().
+inline auto load_u32(const void* p) noexcept -> uint32_t {
+  uint32_t v;
+  memcpy(&v, p, 4);
+  return v;
 }
 
-static auto load_u32_be(const uint8_t* p) -> uint32_t {
-  return (static_cast<uint32_t>(p[0]) << 24) |
-         (static_cast<uint32_t>(p[1]) << 16) |
-         (static_cast<uint32_t>(p[2]) << 8) |
-         static_cast<uint32_t>(p[3]);
+inline auto load_u16_be(const uint8_t* p) noexcept -> uint16_t { return detail::load<uint16_t>(p, std::endian::big); }
+inline auto load_u32_be(const uint8_t* p) noexcept -> uint32_t { return detail::load<uint32_t>(p, std::endian::big); }
+inline auto load_u64_be(const uint8_t* p) noexcept -> uint64_t { return detail::load<uint64_t>(p, std::endian::big); }
+inline auto load_u16_le(const uint8_t* p) noexcept -> uint16_t { return detail::load<uint16_t>(p, std::endian::little); }
+inline auto load_u32_le(const uint8_t* p) noexcept -> uint32_t { return detail::load<uint32_t>(p, std::endian::little); }
+inline auto load_u64_le(const uint8_t* p) noexcept -> uint64_t { return detail::load<uint64_t>(p, std::endian::little); }
+
+inline auto load_u24_be(const uint8_t* p) noexcept -> uint32_t {
+  return (static_cast<uint32_t>(p[0]) << 16) | load_u16_be(p + 1);
 }
 
-static auto load_u64_be(const uint8_t* p) -> uint64_t {
-  return (static_cast<uint64_t>(load_u32_be(p)) << 32) | load_u32_be(p + 4);
+inline auto load_u24_le(const uint8_t* p) noexcept -> uint32_t {
+  return load_u16_le(p) | (static_cast<uint32_t>(p[2]) << 16);
 }
 
-static auto load_u16_le(const uint8_t* p) -> uint16_t {
-  return (static_cast<uint32_t>(p[0])) |
-         (static_cast<uint32_t>(p[1]) << 8);
+inline void store_u16_be(uint8_t* p, uint16_t v) noexcept { detail::store(p, v, std::endian::big); }
+inline void store_u32_be(uint8_t* p, uint32_t v) noexcept { detail::store(p, v, std::endian::big); }
+inline void store_u64_be(uint8_t* p, uint64_t v) noexcept { detail::store(p, v, std::endian::big); }
+inline void store_u16_le(uint8_t* p, uint16_t v) noexcept { detail::store(p, v, std::endian::little); }
+inline void store_u32_le(uint8_t* p, uint32_t v) noexcept { detail::store(p, v, std::endian::little); }
+inline void store_u64_le(uint8_t* p, uint64_t v) noexcept { detail::store(p, v, std::endian::little); }
+
+inline void store_u24_be(uint8_t* p, uint32_t v) noexcept {
+  assert(v <= 0xFFFFFF);
+  p[0] = static_cast<uint8_t>(v >> 16);
+  store_u16_be(p + 1, static_cast<uint16_t>(v));
 }
 
-static auto load_u24_le(const uint8_t* p) -> uint32_t {
-  return (static_cast<uint32_t>(p[0])) |
-         (static_cast<uint32_t>(p[1]) << 8) |
-         (static_cast<uint32_t>(p[2]) << 16);
-}
-
-static auto load_u32_le(const uint8_t* p) -> uint32_t {
-  return (static_cast<uint32_t>(p[0])) |
-         (static_cast<uint32_t>(p[1]) << 8) |
-         (static_cast<uint32_t>(p[2]) << 16) |
-         (static_cast<uint32_t>(p[3]) << 24);
+inline void store_u24_le(uint8_t* p, uint32_t v) noexcept {
+  assert(v <= 0xFFFFFF);
+  store_u16_le(p, static_cast<uint16_t>(v));
+  p[2] = static_cast<uint8_t>(v >> 16);
 }
 
 static auto read_leb128(const uint8_t* data, size_t size, size_t* len) -> uint32_t {
@@ -103,157 +151,6 @@ static void copyPlane(uint8_t* dst, ptrdiff_t dst_stride, const uint8_t* src, pt
     src += src_stride;
   }
 }
-
-class MemoryBitReader {
-  const uint8_t* data_ = nullptr;
-  size_t size_ = 0;
-  size_t byte_ = 0;
-  uint8_t bit_ = 0; // [0..7], MSB first
-
-public:
-  // Full initialisation: sets data pointer AND resets position.
-  void init(const uint8_t* data, size_t size, size_t start_byte = 0) {
-    data_ = data;
-    size_ = size;
-    byte_ = start_byte;
-    bit_ = 0;
-  }
-
-  void repoint(const uint8_t* data, size_t size) {
-    data_ = data;
-    size_ = size;
-    // byte_ and bit_ are intentionally left unchanged.
-  }
-
-  auto eof() const -> bool { return byte_ >= size_; }
-
-  // Current read position in bits from the beginning of the buffer.
-  auto bitPos() const -> size_t { return byte_ * 8 + bit_; }
-
-  // Current read position in bytes (rounded down).
-  auto bytePos() const -> size_t { return byte_; }
-
-  // Read up to 32 bits, MSB first.  Returns 0 on EOF.
-  auto readBits(int n) -> uint32_t {
-    uint32_t val = 0;
-    for (int i = 0; i < n; i++) {
-      if (byte_ >= size_) return val;
-      val <<= 1;
-      val |= (data_[byte_] >> (7 - bit_)) & 1;
-      if (++bit_ == 8) {
-        bit_ = 0;
-        ++byte_;
-      }
-    }
-    return val;
-  }
-
-  // Skip n bits.
-  void skipBits(int64_t n) {
-    if (n <= 0) return;
-    // Fast-path: skip whole bytes when bit-aligned.
-    if (bit_ == 0 && n >= 8) {
-      int64_t whole = n / 8;
-      n %= 8;
-      byte_ += static_cast<size_t>(whole);
-      if (byte_ > size_) byte_ = size_;
-    }
-    for (int64_t i = 0; i < n; i++) readBits(1);
-  }
-
-  void alignToByte() {
-    if (bit_ != 0) {
-      bit_ = 0;
-      ++byte_;
-    }
-  }
-};
-
-class BufReader {
-private:
-  const uint8_t* data_;
-  size_t size_;
-  size_t pos_;
-  bool overflow_ = false;
-
-public:
-  BufReader(const uint8_t* data, size_t size)
-      : data_(data), size_(size), pos_(0) {}
-
-  auto ok() const -> bool {
-    return !overflow_;
-  }
-
-  auto can_read(size_t n) -> bool {
-    overflow_ = true;
-    return pos_ + n <= size_;
-  }
-
-  auto read_u8() -> uint8_t {
-    if (pos_ + 1 > size_) {
-      overflow_ = true;
-      return 0;
-    }
-    return data_[pos_++];
-  }
-  auto read_u16_be() -> uint16_t {
-    if (!can_read(2)) return 0;
-    uint16_t v = load_u16_be(data_ + pos_);
-    pos_ += 2;
-    return v;
-  }
-  auto read_u32_be() -> uint32_t {
-    if (!can_read(4)) return 0;
-    uint32_t v = load_u32_be(data_ + pos_);
-    pos_ += 4;
-    return v;
-  }
-  auto read_u32_le() -> uint32_t {
-    if (!can_read(4)) return 0;
-    uint32_t v = load_u32_le(data_ + pos_);
-    pos_ += 4;
-    return v;
-  }
-  auto read_i32_be() -> int32_t {
-    return static_cast<int32_t>(read_u32_be());
-  }
-  auto read_u64_be() -> uint64_t {
-    if (!can_read(8)) return 0;
-    uint64_t v = load_u64_be(data_ + pos_);
-    pos_ += 8;
-    return v;
-  }
-  auto read_i64_be() -> int64_t {
-    return static_cast<int64_t>(read_u64_be());
-  }
-
-  auto skip(size_t n) -> bool {
-    if (!can_read(n)) {
-      pos_ = size_;
-      return false;
-    }
-    pos_ += n;
-    return true;
-  }
-  auto seek(size_t off) -> bool {
-    if (off > size_) return false;
-    pos_ = off;
-    return true;
-  }
-
-  auto tell() const -> size_t { return pos_; }
-  auto remaining() const -> size_t { return size_ - pos_; }
-  auto cur() const -> const uint8_t* { return data_ + pos_; }
-  auto base() const -> const uint8_t* { return data_; }
-  auto size() const -> size_t { return size_; }
-
-  auto read_bytes(size_t n) -> std::vector<uint8_t> {
-    n = std::min(n, remaining());
-    std::vector<uint8_t> out(data_ + pos_, data_ + pos_ + n);
-    pos_ += n;
-    return out;
-  }
-};
 
 class RandomRead {
 private:
