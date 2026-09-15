@@ -5,6 +5,24 @@
 
 namespace openmedia {
 
+// Generic (software codecs)
+// int32 - Number of worker threads (0 = auto). Absent = codec default
+constexpr Key CODEC_THREADS = "threads";
+// bool - Minimize decoder output delay at the cost of frame-level parallelism
+constexpr Key CODEC_DEC_LOW_DELAY = "low_delay";
+// bool - Apply film grain synthesis on output frames (default true)
+constexpr Key CODEC_DEC_APPLY_FILM_GRAIN = "apply_film_grain";
+
+// dav1d
+// int32 - Max frame delay (0 = auto, 1 = low latency). Overrides low_delay
+constexpr Key DAV1D_DEC_MAX_FRAME_DELAY = "dav1d.max_frame_delay";
+// int32 - Operating point to decode (0-31)
+constexpr Key DAV1D_DEC_OPERATING_POINT = "dav1d.operating_point";
+// bool - Output all spatial layers instead of only the highest one
+constexpr Key DAV1D_DEC_ALL_LAYERS = "dav1d.all_layers";
+// int32 - Max frame size in pixels (0 = unlimited)
+constexpr Key DAV1D_DEC_FRAME_SIZE_LIMIT = "dav1d.frame_size_limit";
+
 // int32 - Encoding application mode (VOIP(2048)/AUDIO(2049)/RESTRICTED_LOWDELAY(2051))
 constexpr Key OPUS_ENC_APPLICATION = "opus.application";
 // int32 - Target bitrate in bps (OPUS_AUTO or specific value)
@@ -73,8 +91,6 @@ constexpr Key OPENH264_ENC_LTR = "openh264.ltr";
 constexpr Key OPENH264_ENC_LTR_REF_NUM = "openh264.ltr_ref_num";
 // int32 - LTR marking period
 constexpr Key OPENH264_ENC_LTR_PERIOD = "openh264.ltr_period";
-// int32 - Number of threads (0 for auto)
-constexpr Key OPENH264_ENC_THREADS = "openh264.threads";
 // bool - Enable load balancing for multi-thread slicing
 constexpr Key OPENH264_ENC_LOAD_BALANCING = "openh264.load_balancing";
 // bool - Enable denoise
