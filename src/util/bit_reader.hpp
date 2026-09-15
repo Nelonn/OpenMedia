@@ -124,7 +124,9 @@ private:
       return load_u64_be(data_.data() + byte);
     }
     uint8_t tail[8] = {};
-    if (byte < data_.size()) std::memcpy(tail, data_.data() + byte, data_.size() - byte);
+    if (byte < data_.size()) {
+      memcpy(tail, data_.data() + byte, data_.size() - byte);
+    }
     return load_u64_be(tail);
   }
 

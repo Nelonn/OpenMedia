@@ -83,7 +83,9 @@ public:
   // Byte-aligned raw copy.
   auto bytes(std::span<const uint8_t> data) -> BasicBitWriter& {
     flush();
-    if (!data.empty()) std::memcpy(sink_.grow(data.size()), data.data(), data.size());
+    if (!data.empty()) {
+      memcpy(sink_.grow(data.size()), data.data(), data.size());
+    }
     return *this;
   }
 

@@ -71,7 +71,9 @@ public:
   auto u64le(uint64_t v) -> BasicByteWriter& { store_u64_le(sink_.grow(8), v); return *this; }
 
   auto bytes(std::span<const uint8_t> data) -> BasicByteWriter& {
-    if (!data.empty()) std::memcpy(sink_.grow(data.size()), data.data(), data.size());
+    if (!data.empty()) {
+      memcpy(sink_.grow(data.size()), data.data(), data.size());
+    }
     return *this;
   }
 

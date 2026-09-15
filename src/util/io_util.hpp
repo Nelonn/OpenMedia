@@ -61,26 +61,19 @@ static consteval auto magic_u32(const char str[4]) noexcept -> uint32_t {
   return magic_u32(str[0], str[1], str[2], str[3]);
 }
 
-// ---------------------------------------------------------------------------
-// Endian load/store
-//
-// load_uN_{be,le}(src) / store_uN_{be,le}(dst, v) read or write exactly N/8
-// bytes. Everything is memcpy + optional byteswap, i.e. a single mov (+ bswap).
-// ---------------------------------------------------------------------------
-
 namespace detail {
 
 template<std::unsigned_integral T>
 inline auto load(const uint8_t* src, std::endian order) noexcept -> T {
   T v;
-  std::memcpy(&v, src, sizeof(T));
+  memcpy(&v, src, sizeof(T));
   return order == std::endian::native ? v : byteswap(v);
 }
 
 template<std::unsigned_integral T>
 inline void store(uint8_t* dst, T v, std::endian order) noexcept {
   if (order != std::endian::native) v = byteswap(v);
-  std::memcpy(dst, &v, sizeof(T));
+  memcpy(dst, &v, sizeof(T));
 }
 
 } // namespace detail
@@ -88,7 +81,7 @@ inline void store(uint8_t* dst, T v, std::endian order) noexcept {
 // Native byte order, e.g. for comparing against magic_u32().
 inline auto load_u32(const void* p) noexcept -> uint32_t {
   uint32_t v;
-  std::memcpy(&v, p, 4);
+  memcpy(&v, p, 4);
   return v;
 }
 
