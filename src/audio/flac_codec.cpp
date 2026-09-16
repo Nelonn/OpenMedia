@@ -12,6 +12,8 @@
 namespace openmedia {
 
 class FLACDecoder final : public Decoder {
+  static constexpr uint8_t STREAM_INFO_SIZE = 34;
+
   FLAC__StreamDecoder* decoder_ = nullptr;
   std::vector<Frame> decoded_frames_;
   std::vector<uint8_t> init_header_;
@@ -40,6 +42,23 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
 
+    // libFLAC decodes a native stream, so the extradata has to look like one.
+    // Containers such as MP4 carry only the bare 34-byte STREAMINFO body, and
+    // those get the "fLaC" marker plus a last-block STREAMINFO header put back
+    // in front; native FLAC already ships the full header.
+    if (options.extradata.size() >= 4 &&
+        std::memcmp(options.extradata.data(), "fLaC", 4) == 0) {
+      init_header_.assign(options.extradata.begin(), options.extradata.end());
+    } else if (options.extradata.size() == STREAM_INFO_SIZE) {
+      static constexpr uint8_t NATIVE_HEADER[] = {
+          'f', 'L', 'a', 'C', 0x80, 0x00, 0x00, STREAM_INFO_SIZE};
+      init_header_.assign(std::begin(NATIVE_HEADER), std::end(NATIVE_HEADER));
+      init_header_.insert(init_header_.end(),
+                          options.extradata.begin(), options.extradata.end());
+    } else {
+      return OM_CODEC_INVALID_PARAMS;
+    }
+
     auto status = FLAC__stream_decoder_init_stream(
         decoder_,
         read_callback,
@@ -48,15 +67,13 @@ public:
         nullptr,
         nullptr,
         write_callback,
-        nullptr,
+        metadata_callback,
         error_callback,
         this);
 
     if (status != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
       return OM_CODEC_OPEN_FAILED;
     }
-
-    init_header_ = std::vector<uint8_t>(options.extradata.begin(), options.extradata.end());
 
     Packet p;
     p.allocate(init_header_.size());
@@ -78,7 +95,11 @@ public:
 
   auto getInfo() -> std::optional<DecodingInfo> override {
     if (!output_format_.has_value()) return std::nullopt;
-    return {};
+
+    DecodingInfo info = {};
+    info.media_type = OM_MEDIA_AUDIO;
+    info.audio_format = *output_format_;
+    return info;
   }
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
@@ -122,6 +143,22 @@ private:
     *bytes = to_copy;
 
     return FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
+  }
+
+  static void metadata_callback(
+      const FLAC__StreamDecoder* /*decoder*/,
+      const FLAC__StreamMetadata* metadata,
+      void* client_data) {
+    if (metadata->type != FLAC__METADATA_TYPE_STREAMINFO) return;
+
+    const auto& si = metadata->data.stream_info;
+    AudioFormat fmt = {};
+    fmt.sample_format = OM_SAMPLE_S32;
+    fmt.bits_per_sample = si.bits_per_sample;
+    fmt.sample_rate = si.sample_rate;
+    fmt.channels = si.channels;
+    fmt.planar = true;
+    static_cast<FLACDecoder*>(client_data)->output_format_ = fmt;
   }
 
   static auto write_callback(

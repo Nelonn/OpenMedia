@@ -847,6 +847,26 @@ inline void parseDops(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.extradata.assign(body.begin(), body.end());
 }
 
+inline void parseDfla(std::span<const uint8_t> body, BMFFTrack& track) {
+  // FLACSpecificBox: FullBox header followed by FLAC METADATA_BLOCKs, the first
+  // of which must be STREAMINFO. Extradata keeps the bare 34-byte STREAMINFO
+  // body, the same shape every other FLAC consumer here expects.
+  if (body.size() < 4 + 4 + 34) return;
+  const uint8_t block_type = body[4] & 0x7Fu;
+  if (block_type != 0 || load_u24_be(body.data() + 5) != 34) return;
+
+  const uint8_t* si = body.data() + 8;
+  track.track.extradata.assign(si, si + 34);
+
+  // STREAMINFO packs, after the block/frame size fields, 20 bits of sample
+  // rate, 3 bits of channels-1 and 5 bits of bits-per-sample-1.
+  const uint32_t packed = load_u32_be(si + 10);
+  const uint32_t sample_rate = packed >> 12;
+  if (sample_rate) track.track.format.audio.sample_rate = sample_rate;
+  track.track.format.audio.channels = ((packed >> 9) & 0x7u) + 1;
+  track.track.format.audio.bit_depth = ((packed >> 4) & 0x1Fu) + 1;
+}
+
 inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track) {
   ByteReader r(body);
   r.skip(4); // version + flags
@@ -1733,14 +1753,7 @@ private:
         }
         break;
 
-      case ATOM('d', 'f', 'L', 'a'):
-        if (current_track_) {
-          if (body.size() > 4) {
-            current_track_->track.extradata.assign(
-                body.begin() + 4, body.end());
-          }
-        }
-        break;
+      case ATOM('d', 'f', 'L', 'a'): parseDfla(body, track); break;
 
       case ATOM('s', 't', 's', 'd'):
         parseStsd(pos, size);
