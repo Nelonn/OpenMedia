@@ -11,6 +11,31 @@ namespace openmedia {
 
 auto nalToRbsp(std::span<const uint8_t> nal) -> std::vector<uint8_t>;
 
+// Reusable NAL -> RBSP conversion buffer.
+//
+// A slice header occupies only the first few hundred bytes of a NAL, so
+// `convert` can stop early and report whether it reached the end; callers that
+// run out of bits retry with a larger limit instead of unescaping the whole
+// slice payload up front. Reusing one buffer across NALs also keeps the parser
+// allocation-free once it is warm.
+class RbspBuffer {
+  std::vector<uint8_t> rbsp_;
+  std::vector<uint32_t> escapes_;
+  bool complete_ = false;
+
+public:
+  // Unescapes at most `max_bytes` of `nal`. Returns true if the whole NAL fit.
+  auto convert(std::span<const uint8_t> nal, size_t max_bytes = static_cast<size_t>(-1)) -> bool;
+
+  auto rbsp() const noexcept -> std::span<const uint8_t> { return rbsp_; }
+  auto complete() const noexcept -> bool { return complete_; }
+
+  // Offset in the source NAL of the byte that produced rbsp()[rbsp_index].
+  // Also valid for rbsp().size(), which yields the offset one past the last
+  // converted byte.
+  auto sourceOffset(size_t rbsp_index) const noexcept -> size_t;
+};
+
 // Bounds-checked MSB-first bit parser. Each read is O(1) via a 64-bit window.
 // Errors are sticky, same as ByteReader.
 class BitReader {

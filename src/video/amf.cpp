@@ -13,6 +13,8 @@
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
 #include <openmedia/hw_vulkan.h>
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wrl/client.h>
 #include <algorithm>

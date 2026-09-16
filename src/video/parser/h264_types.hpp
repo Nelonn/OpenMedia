@@ -3,6 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace openmedia {
+class RbspBuffer;
+}
+
 namespace h264 {
 
 enum NAL_REF_IDC {
@@ -210,6 +214,7 @@ struct SliceHeader {
   int disable_deblocking_filter_idc = 0;
   int slice_alpha_c0_offset_div2 = 0;
   int slice_beta_offset_div2 = 0;
+  int slice_group_change_cycle = 0;
   int mmco5 = 0;
   int header_bit_size = 0;
 };
@@ -242,8 +247,11 @@ struct Bitstream {
 
 auto find_next_nal(Bitstream& bs) -> bool;
 auto read_nal_header(NALHeader& nal, Bitstream& bs) -> bool;
-auto read_sps(SPS& sps, Bitstream& bs) -> bool;
-auto read_pps(PPS& pps, Bitstream& bs) -> bool;
-auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256], const SPS sps_table[32], Bitstream& bs) -> bool;
+
+// `scratch` is the caller's reusable NAL -> RBSP buffer; see openmedia::RbspBuffer.
+auto read_sps(SPS& sps, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
+// The SPS table is needed for the Table 7-2 fallback rule B scaling lists.
+auto read_pps(PPS& pps, const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
+auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256], const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
 
 } // namespace h264

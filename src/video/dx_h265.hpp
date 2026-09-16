@@ -7,6 +7,8 @@
 #include <vector>
 
 #ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dxva.h>
 #endif
@@ -88,25 +90,8 @@ static auto findNextStartCode(const std::vector<uint8_t>& data, size_t offset) n
 
 static auto buildSliceData(const ParsedFrame& frame) -> SliceData {
   SliceData out;
-  out.slices.reserve(frame.slice_nalus.empty() ? frame.slice_offsets.size() : frame.slice_nalus.size());
+  out.slices.reserve(frame.slice_offsets.size());
   out.bitstream.reserve(frame.bitstream.size());
-
-  if (!frame.slice_nalus.empty()) {
-    static constexpr uint8_t start_code[] = {0, 0, 1};
-    for (const auto& nalu : frame.slice_nalus) {
-      if (nalu.empty()) continue;
-      const uint32_t location = static_cast<uint32_t>(out.bitstream.size());
-      out.bitstream.insert(out.bitstream.end(), start_code, start_code + sizeof(start_code));
-      out.bitstream.insert(out.bitstream.end(), nalu.begin(), nalu.end());
-
-      DXVA_Slice_HEVC_Short slice = {};
-      slice.BSNALunitDataLocation = location;
-      slice.SliceBytesInBuffer = static_cast<UINT>(sizeof(start_code) + nalu.size());
-      slice.wBadSliceChopping = 0;
-      out.slices.push_back(slice);
-    }
-    return out;
-  }
 
   for (const uint32_t offset : frame.slice_offsets) {
     if (offset >= frame.bitstream.size()) continue;

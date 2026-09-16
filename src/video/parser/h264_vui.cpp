@@ -2,12 +2,15 @@
 
 namespace h264 {
 
-static void read_hrd(BitReader& br, HRDParameters& hrd) {
+static auto read_hrd(BitReader& br, HRDParameters& hrd) -> bool {
   hrd.cpb_cnt_minus1 = static_cast<int>(br.readUE());
+  // Reject rather than clamp: the loop below must consume exactly as many
+  // entries as the stream carries or every later field is read at the wrong
+  // bit position.
+  if (hrd.cpb_cnt_minus1 < 0 || hrd.cpb_cnt_minus1 > 31) return false;
   hrd.bit_rate_scale = static_cast<int>(br.readBits(4));
   hrd.cpb_size_scale = static_cast<int>(br.readBits(4));
-  const int count = hrd.cpb_cnt_minus1 < 31 ? hrd.cpb_cnt_minus1 + 1 : 32;
-  for (int i = 0; i < count; ++i) {
+  for (int i = 0; i <= hrd.cpb_cnt_minus1; ++i) {
     hrd.bit_rate_value_minus1[i] = static_cast<int>(br.readUE());
     hrd.cpb_size_value_minus1[i] = static_cast<int>(br.readUE());
     hrd.cbr_flag[i] = static_cast<int>(br.readBit());
@@ -16,9 +19,10 @@ static void read_hrd(BitReader& br, HRDParameters& hrd) {
   hrd.cpb_removal_delay_length_minus1 = static_cast<int>(br.readBits(5));
   hrd.dpb_output_delay_length_minus1 = static_cast<int>(br.readBits(5));
   hrd.time_offset_length = static_cast<int>(br.readBits(5));
+  return br.ok();
 }
 
-void h264ReadVui(BitReader& br, SPS& sps) {
+auto h264ReadVui(BitReader& br, SPS& sps) -> bool {
   auto& vui = sps.vui;
   vui.aspect_ratio_info_present_flag = static_cast<int>(br.readBit());
   if (vui.aspect_ratio_info_present_flag) {
@@ -45,6 +49,8 @@ void h264ReadVui(BitReader& br, SPS& sps) {
   if (vui.chroma_loc_info_present_flag) {
     vui.chroma_sample_loc_type_top_field = static_cast<int>(br.readUE());
     vui.chroma_sample_loc_type_bottom_field = static_cast<int>(br.readUE());
+    if (vui.chroma_sample_loc_type_top_field < 0 || vui.chroma_sample_loc_type_top_field > 5) return false;
+    if (vui.chroma_sample_loc_type_bottom_field < 0 || vui.chroma_sample_loc_type_bottom_field > 5) return false;
   }
   vui.timing_info_present_flag = static_cast<int>(br.readBit());
   if (vui.timing_info_present_flag) {
@@ -53,9 +59,15 @@ void h264ReadVui(BitReader& br, SPS& sps) {
     vui.fixed_frame_rate_flag = static_cast<int>(br.readBit());
   }
   vui.nal_hrd_parameters_present_flag = static_cast<int>(br.readBit());
-  if (vui.nal_hrd_parameters_present_flag) read_hrd(br, sps.hrd);
+  if (vui.nal_hrd_parameters_present_flag && !read_hrd(br, sps.hrd)) return false;
   vui.vcl_hrd_parameters_present_flag = static_cast<int>(br.readBit());
-  if (vui.vcl_hrd_parameters_present_flag) read_hrd(br, sps.hrd);
+  if (vui.vcl_hrd_parameters_present_flag) {
+    // SPS carries a single HRD for downstream consumers; the NAL HRD is the one
+    // they mean, so parse the VCL copy into scratch when both are present.
+    HRDParameters vcl = {};
+    HRDParameters& target = vui.nal_hrd_parameters_present_flag ? vcl : sps.hrd;
+    if (!read_hrd(br, target)) return false;
+  }
   if (vui.nal_hrd_parameters_present_flag || vui.vcl_hrd_parameters_present_flag) vui.low_delay_hrd_flag = static_cast<int>(br.readBit());
   vui.pic_struct_present_flag = static_cast<int>(br.readBit());
   vui.bitstream_restriction_flag = static_cast<int>(br.readBit());
@@ -67,7 +79,10 @@ void h264ReadVui(BitReader& br, SPS& sps) {
     vui.log2_max_mv_length_vertical = static_cast<int>(br.readUE());
     vui.num_reorder_frames = static_cast<int>(br.readUE());
     vui.max_dec_frame_buffering = static_cast<int>(br.readUE());
+    if (vui.num_reorder_frames < 0 || vui.num_reorder_frames > 32) return false;
+    if (vui.max_dec_frame_buffering < 0 || vui.max_dec_frame_buffering > 32) return false;
   }
+  return br.ok();
 }
 
 } // namespace h264

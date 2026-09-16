@@ -2,6 +2,44 @@
 
 namespace openmedia::video_parser {
 
+// VP9 6.2 uncompressed_header(), MSB first from byte 0:
+//   frame_marker      f(2)   bits 7..6
+//   profile_low_bit   f(1)   bit 5
+//   profile_high_bit  f(1)   bit 4
+//   reserved_zero     f(1)   bit 3, only when Profile == 3
+//   show_existing_frame f(1)
+//   frame_type        f(1)   absent when show_existing_frame is set
+namespace {
+
+struct FrameFlags {
+  uint8_t profile = 0;
+  bool key_frame = false;
+};
+
+auto readFrameFlags(const uint8_t* data, size_t size) -> FrameFlags {
+  FrameFlags flags;
+  if (size == 0) return flags;
+  const uint8_t byte = data[0];
+  const auto bit = [byte](int index) -> uint8_t { return static_cast<uint8_t>((byte >> index) & 1u); };
+
+  // profile_low_bit is read first and carries weight 1.
+  flags.profile = static_cast<uint8_t>(bit(5) | (bit(4) << 1u));
+  int next_bit = 3;
+  if (flags.profile == 3) {
+    flags.profile = static_cast<uint8_t>(flags.profile + bit(3));
+    --next_bit; // the reserved_zero_bit shifts the rest of the header along
+  }
+
+  const bool show_existing_frame = bit(next_bit) != 0;
+  // A show_existing_frame header stops before frame_type; it repeats a frame
+  // that is already in the reference pool, so it is never a key frame itself.
+  if (show_existing_frame) return flags;
+  flags.key_frame = bit(next_bit - 1) == 0;
+  return flags;
+}
+
+} // namespace
+
 auto VP9FrameParser::parse(std::span<const uint8_t> packet) -> std::vector<VP9ParsedFrame> {
   std::vector<VP9ParsedFrame> frames;
   if (packet.empty()) return frames;
@@ -19,29 +57,17 @@ auto VP9FrameParser::parse(std::span<const uint8_t> packet) -> std::vector<VP9Pa
         for (size_t j = 0; j < length_size; ++j) frame_size |= static_cast<size_t>(packet[pos++]) << (j * 8u);
         if (frame_size == 0 || frame_offset + frame_size > packet.size() - index_size) break;
         auto frame = packet.subspan(frame_offset, frame_size);
-        frames.push_back({frame, {}, isKeyFrame(frame.data(), frame.size()), parseProfile(frame.data(), frame.size())});
+        const FrameFlags flags = readFrameFlags(frame.data(), frame.size());
+        frames.push_back({frame, {}, flags.key_frame, flags.profile});
         frame_offset += frame_size;
       }
       if (!frames.empty()) return frames;
     }
   }
 
-  frames.push_back({packet, {}, isKeyFrame(packet.data(), packet.size()), parseProfile(packet.data(), packet.size())});
+  const FrameFlags flags = readFrameFlags(packet.data(), packet.size());
+  frames.push_back({packet, {}, flags.key_frame, flags.profile});
   return frames;
-}
-
-auto VP9FrameParser::parseProfile(const uint8_t* data, size_t size) -> uint8_t {
-  if (size == 0) return 0;
-  const uint8_t profile_low = (data[0] >> 4u) & 1u;
-  const uint8_t profile_high = (data[0] >> 5u) & 1u;
-  uint8_t profile = static_cast<uint8_t>(profile_low | (profile_high << 1u));
-  if (profile == 3 && size > 0) profile = static_cast<uint8_t>(profile + ((data[0] >> 6u) & 1u));
-  return profile;
-}
-
-auto VP9FrameParser::isKeyFrame(const uint8_t* data, size_t size) -> bool {
-  if (size == 0) return false;
-  return ((data[0] >> 2u) & 0x1u) == 0;
 }
 
 } // namespace openmedia::video_parser

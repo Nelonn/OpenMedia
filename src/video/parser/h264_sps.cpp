@@ -11,13 +11,37 @@ static auto isHighProfile(int profile) -> bool {
   }
 }
 
-auto read_sps(SPS& sps, Bitstream& bs) -> bool {
+static auto readScalingLists(BitReader& br, SPS& sps) -> bool {
+  for (int i = 0; i < 6; ++i) {
+    sps.seq_scaling_list_present_flag[i] = static_cast<int>(br.readBit());
+    if (!sps.seq_scaling_list_present_flag[i]) {
+      h264ApplySpsScalingFallback(sps, i);
+      continue;
+    }
+    if (!h264ReadScalingList(br, sps.ScalingList4x4[i], 16, sps.UseDefaultScalingMatrix4x4Flag[i])) return false;
+    if (sps.UseDefaultScalingMatrix4x4Flag[i]) h264DefaultScalingList4x4(i, sps.ScalingList4x4);
+  }
+  const int count_8x8 = sps.chroma_format_idc != 3 ? 2 : 6;
+  for (int i = 0; i < count_8x8; ++i) {
+    sps.seq_scaling_list_present_flag[6 + i] = static_cast<int>(br.readBit());
+    if (!sps.seq_scaling_list_present_flag[6 + i]) {
+      h264ApplySpsScalingFallback(sps, 6 + i);
+      continue;
+    }
+    if (!h264ReadScalingList(br, sps.ScalingList8x8[i], 64, sps.UseDefaultScalingMatrix8x8Flag[i])) return false;
+    if (sps.UseDefaultScalingMatrix8x8Flag[i]) h264DefaultScalingList8x8(i, sps.ScalingList8x8);
+  }
+  return true;
+}
+
+auto read_sps(SPS& sps, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool {
   if (!bs.valid() || bs.remaining() == 0) return false;
   sps = {};
-  h264FillDefaultScaling(sps);
-  auto rbsp = openmedia::nalToRbsp({bs.current(), bs.remaining()});
-  if (rbsp.empty()) return false;
-  BitReader br(rbsp);
+  h264FillFlatScaling(sps);
+  scratch.convert({bs.current(), bs.remaining()});
+  bs.finish();
+  if (scratch.rbsp().empty()) return false;
+  BitReader br(scratch.rbsp());
 
   sps.profile_idc = static_cast<int>(br.readBits(8));
   sps.constraint_set0_flag = static_cast<int>(br.readBit());
@@ -33,38 +57,41 @@ auto read_sps(SPS& sps, Bitstream& bs) -> bool {
 
   if (isHighProfile(sps.profile_idc)) {
     sps.chroma_format_idc = static_cast<int>(br.readUE());
+    if (sps.chroma_format_idc < 0 || sps.chroma_format_idc > 3) return false;
     if (sps.chroma_format_idc == 3) sps.separate_colour_plane_flag = static_cast<int>(br.readBit());
     sps.bit_depth_luma_minus8 = static_cast<int>(br.readUE());
+    if (sps.bit_depth_luma_minus8 < 0 || sps.bit_depth_luma_minus8 > 6) return false;
     sps.bit_depth_chroma_minus8 = static_cast<int>(br.readUE());
+    if (sps.bit_depth_chroma_minus8 < 0 || sps.bit_depth_chroma_minus8 > 6) return false;
     sps.qpprime_y_zero_transform_bypass_flag = static_cast<int>(br.readBit());
     sps.seq_scaling_matrix_present_flag = static_cast<int>(br.readBit());
-    if (sps.seq_scaling_matrix_present_flag) {
-      const int count = sps.chroma_format_idc != 3 ? 8 : 12;
-      for (int i = 0; i < count; ++i) {
-        sps.seq_scaling_list_present_flag[i] = static_cast<int>(br.readBit());
-        if (!sps.seq_scaling_list_present_flag[i]) continue;
-        if (i < 6) h264ReadScalingList(br, sps.ScalingList4x4[i], 16, sps.UseDefaultScalingMatrix4x4Flag[i]);
-        else h264ReadScalingList(br, sps.ScalingList8x8[i - 6], 64, sps.UseDefaultScalingMatrix8x8Flag[i - 6]);
-      }
-    }
+    if (sps.seq_scaling_matrix_present_flag && !readScalingLists(br, sps)) return false;
   }
 
   sps.log2_max_frame_num_minus4 = static_cast<int>(br.readUE());
+  if (sps.log2_max_frame_num_minus4 < 0 || sps.log2_max_frame_num_minus4 > 12) return false;
   sps.pic_order_cnt_type = static_cast<int>(br.readUE());
+  if (sps.pic_order_cnt_type < 0 || sps.pic_order_cnt_type > 2) return false;
   if (sps.pic_order_cnt_type == 0) {
     sps.log2_max_pic_order_cnt_lsb_minus4 = static_cast<int>(br.readUE());
+    if (sps.log2_max_pic_order_cnt_lsb_minus4 < 0 || sps.log2_max_pic_order_cnt_lsb_minus4 > 12) return false;
   } else if (sps.pic_order_cnt_type == 1) {
     sps.delta_pic_order_always_zero_flag = static_cast<int>(br.readBit());
     sps.offset_for_non_ref_pic = br.readSE();
     sps.offset_for_top_to_bottom_field = br.readSE();
     sps.num_ref_frames_in_pic_order_cnt_cycle = static_cast<int>(br.readUE());
-    const int count = sps.num_ref_frames_in_pic_order_cnt_cycle < 256 ? sps.num_ref_frames_in_pic_order_cnt_cycle : 256;
-    for (int i = 0; i < count; ++i) sps.offset_for_ref_frame[i] = br.readSE();
+    // Reject rather than clamp: reading fewer entries than the stream carries
+    // would silently desynchronise everything that follows.
+    if (sps.num_ref_frames_in_pic_order_cnt_cycle < 0 || sps.num_ref_frames_in_pic_order_cnt_cycle > 255) return false;
+    for (int i = 0; i < sps.num_ref_frames_in_pic_order_cnt_cycle; ++i) sps.offset_for_ref_frame[i] = br.readSE();
   }
   sps.num_ref_frames = static_cast<int>(br.readUE());
+  if (sps.num_ref_frames < 0 || sps.num_ref_frames > 32) return false;
   sps.gaps_in_frame_num_value_allowed_flag = static_cast<int>(br.readBit());
   sps.pic_width_in_mbs_minus1 = static_cast<int>(br.readUE());
   sps.pic_height_in_map_units_minus1 = static_cast<int>(br.readUE());
+  if (sps.pic_width_in_mbs_minus1 < 0 || sps.pic_width_in_mbs_minus1 > 0xffff) return false;
+  if (sps.pic_height_in_map_units_minus1 < 0 || sps.pic_height_in_map_units_minus1 > 0xffff) return false;
   sps.frame_mbs_only_flag = static_cast<int>(br.readBit());
   if (!sps.frame_mbs_only_flag) sps.mb_adaptive_frame_field_flag = static_cast<int>(br.readBit());
   sps.direct_8x8_inference_flag = static_cast<int>(br.readBit());
@@ -74,10 +101,13 @@ auto read_sps(SPS& sps, Bitstream& bs) -> bool {
     sps.frame_crop_right_offset = static_cast<int>(br.readUE());
     sps.frame_crop_top_offset = static_cast<int>(br.readUE());
     sps.frame_crop_bottom_offset = static_cast<int>(br.readUE());
+    if (sps.frame_crop_left_offset < 0 || sps.frame_crop_right_offset < 0 ||
+        sps.frame_crop_top_offset < 0 || sps.frame_crop_bottom_offset < 0) {
+      return false;
+    }
   }
   sps.vui_parameters_present_flag = static_cast<int>(br.readBit());
-  if (sps.vui_parameters_present_flag) h264ReadVui(br, sps);
-  bs.finish();
+  if (sps.vui_parameters_present_flag && !h264ReadVui(br, sps)) return false;
   return br.ok();
 }
 

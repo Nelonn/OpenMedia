@@ -911,7 +911,10 @@ public:
           slice_param.slice_data_size = slice_size;
           slice_param.slice_data_offset = 0;
           slice_param.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-          slice_param.slice_data_byte_offset = (sh.header_bit_size + 7) / 8;
+          // Parser-supplied offset: counts the start code, the two byte NAL
+          // header and any emulation prevention bytes inside the slice header,
+          // all of which are present in the buffer handed to VA-API.
+          slice_param.slice_data_byte_offset = sh.slice_data_byte_offset;
 
           std::memset(slice_param.RefPicList, 0xFF, sizeof(slice_param.RefPicList));
           if (sh.slice_type != 2 /* I */) {

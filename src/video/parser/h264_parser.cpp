@@ -5,6 +5,11 @@
 
 namespace openmedia::video_parser {
 
+// Upper bound on bytes held back between parse() calls while waiting for the
+// start code that terminates the trailing NAL. A stream that never produces one
+// is corrupt; dropping is better than growing without limit.
+static constexpr size_t MAX_PENDING_BYTES = 8u << 20;
+
 static auto isAnnexB(std::span<const uint8_t> data) noexcept -> bool {
   return data.size() >= 3 && data[0] == 0 && data[1] == 0 &&
          (data[2] == 1 || (data.size() >= 4 && data[2] == 0 && data[3] == 1));
@@ -16,14 +21,45 @@ static auto readNalSize(std::span<const uint8_t> input, size_t offset, uint8_t n
   return size;
 }
 
+static auto isVclNalType(h264::NAL_UNIT_TYPE type) noexcept -> bool {
+  return type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR;
+}
+
+// 7.4.1.2.3: the first of these after the last VCL NAL of a picture opens the
+// next access unit.
+static auto startsAccessUnit(h264::NAL_UNIT_TYPE type) noexcept -> bool {
+  switch (type) {
+    case h264::NAL_UNIT_TYPE_AUD:
+    case h264::NAL_UNIT_TYPE_SPS:
+    case h264::NAL_UNIT_TYPE_PPS:
+    case h264::NAL_UNIT_TYPE_SEI:
+    case h264::NAL_UNIT_TYPE_END_OF_SEQUENCE:
+    case h264::NAL_UNIT_TYPE_END_OF_STREAM:
+    case h264::NAL_UNIT_TYPE_SPS_EXT:
+    case h264::NAL_UNIT_TYPE_PREFIX:
+    case h264::NAL_UNIT_TYPE_SUBSET_SPS:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static auto isIntraSliceType(int slice_type) noexcept -> bool {
+  const int normalized = slice_type % 5;
+  return normalized == 2 || normalized == 4;
+}
+
 void H264AccessUnitParser::reset() {
   state_ = {};
   current_ = {};
   current_has_vcl_ = false;
   current_parameter_sets_changed_ = false;
+  current_all_intra_ = true;
   previous_slice_ = {};
   previous_nal_ = {};
   have_previous_slice_ = false;
+  pending_.clear();
+  work_.clear();
   scanner_.reset();
 }
 
@@ -44,9 +80,7 @@ void H264AccessUnitParser::parseExtradata(std::span<const uint8_t> extradata) {
       const size_t size = (static_cast<size_t>(extradata[offset]) << 8u) | extradata[offset + 1];
       offset += 2;
       if (offset + size > extradata.size()) return;
-      h264::NALHeader nal = {};
-      h264::SliceHeader slice = {};
-      if (parseNal(extradata.subspan(offset, size), nal, slice)) storeParameterSet(extradata.subspan(offset, size), nal);
+      storeParameterSetNal(extradata.subspan(offset, size));
       offset += size;
     }
     if (offset >= extradata.size()) return;
@@ -55,49 +89,69 @@ void H264AccessUnitParser::parseExtradata(std::span<const uint8_t> extradata) {
       const size_t size = (static_cast<size_t>(extradata[offset]) << 8u) | extradata[offset + 1];
       offset += 2;
       if (offset + size > extradata.size()) return;
-      h264::NALHeader nal = {};
-      h264::SliceHeader slice = {};
-      if (parseNal(extradata.subspan(offset, size), nal, slice)) storeParameterSet(extradata.subspan(offset, size), nal);
+      storeParameterSetNal(extradata.subspan(offset, size));
       offset += size;
     }
     return;
   }
 
-  auto packet = normalizePacket(extradata);
-  auto nals = findNalUnits(packet);
-  for (const auto& unit : nals) {
-    h264::NALHeader nal = {};
-    h264::SliceHeader slice = {};
-    const auto nal_data = std::span<const uint8_t>(packet.data() + unit.header, unit.end - unit.header);
-    if (parseNal(nal_data, nal, slice)) storeParameterSet(nal_data, nal);
+  std::vector<uint8_t> annex_b;
+  appendAnnexB(extradata, annex_b);
+  for (const auto& unit : findNalUnits(annex_b)) {
+    storeParameterSetNal({annex_b.data() + unit.header, unit.end - unit.header});
   }
 }
 
 auto H264AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_packet) -> std::vector<H264ParsedFrame> {
   std::vector<H264ParsedFrame> frames;
-  if (packet.empty()) return frames;
+  if (packet.empty() && pending_.empty()) return frames;
 
-  auto normalized = normalizePacket(packet);
-  auto nals = findNalUnits(normalized);
+  // Carry over the bytes of the NAL that the previous call could not terminate,
+  // so that a unit split across packets is parsed once, whole.
+  work_.assign(pending_.begin(), pending_.end());
+  pending_.clear();
+  appendAnnexB(packet, work_);
+
+  auto nals = findNalUnits(work_);
+  if (!end_of_packet) {
+    // A NAL only ends where the next start code begins, so the trailing unit is
+    // still open; hold it (or the whole buffer, if no start code arrived yet).
+    const size_t keep_from = nals.empty() ? 0 : nals.back().start;
+    if (!nals.empty()) nals.pop_back();
+    if (work_.size() - keep_from <= MAX_PENDING_BYTES) {
+      pending_.assign(work_.begin() + static_cast<ptrdiff_t>(keep_from), work_.end());
+    }
+  }
+
   for (const auto& unit : nals) {
-    auto nal_data = std::span<const uint8_t>(normalized.data() + unit.header, unit.end - unit.header);
+    auto nal_data = std::span<const uint8_t>(work_.data() + unit.header, unit.end - unit.header);
     h264::NALHeader nal = {};
     h264::SliceHeader slice = {};
     if (!parseNal(nal_data, nal, slice)) continue;
 
-    const bool is_vcl = nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR;
+    const bool is_vcl = isVclNalType(nal.type);
+    // Redundant coded pictures exist only for error recovery; feeding them to a
+    // hardware decoder alongside the primary slices corrupts the picture.
+    const bool is_redundant = is_vcl && slice.redundant_pic_cnt > 0;
+    if (is_redundant) continue;
+
     if (startsNewAccessUnit(nal, slice, is_vcl) && current_has_vcl_) {
       frames.push_back(finishCurrentFrame());
     }
 
     const uint32_t output_offset = static_cast<uint32_t>(current_.bitstream.size());
-    current_.bitstream.insert(current_.bitstream.end(), normalized.begin() + static_cast<ptrdiff_t>(unit.start), normalized.begin() + static_cast<ptrdiff_t>(unit.end));
+    current_.bitstream.insert(current_.bitstream.end(), work_.begin() + static_cast<ptrdiff_t>(unit.start), work_.begin() + static_cast<ptrdiff_t>(unit.end));
 
     if (storeParameterSet(nal_data, nal)) current_parameter_sets_changed_ = true;
     if (is_vcl && state_.has_sps && state_.has_pps) {
       current_.slice_offsets.push_back(output_offset);
-      current_.nal = nal;
-      current_.slice = slice;
+      if (!current_has_vcl_) {
+        // Keep the first slice of the picture: all slices agree on the fields
+        // POC is derived from, and the first one is what consumers expect.
+        current_.nal = nal;
+        current_.slice = slice;
+      }
+      current_all_intra_ = current_all_intra_ && isIntraSliceType(slice.slice_type);
       current_has_vcl_ = true;
       previous_slice_ = slice;
       previous_nal_ = nal;
@@ -109,12 +163,14 @@ auto H264AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
   return frames;
 }
 
-auto H264AccessUnitParser::normalizePacket(std::span<const uint8_t> packet) const -> std::vector<uint8_t> {
-  if (packet.empty()) return {};
-  if (isAnnexB(packet) || state_.nal_length_size == 0) return {packet.begin(), packet.end()};
+void H264AccessUnitParser::appendAnnexB(std::span<const uint8_t> packet, std::vector<uint8_t>& out) const {
+  if (packet.empty()) return;
+  if (isAnnexB(packet) || state_.nal_length_size == 0) {
+    out.insert(out.end(), packet.begin(), packet.end());
+    return;
+  }
 
-  std::vector<uint8_t> out;
-  out.reserve(packet.size() + 16);
+  const size_t out_start = out.size();
   size_t offset = 0;
   while (offset + state_.nal_length_size <= packet.size()) {
     const uint32_t nal_size = readNalSize(packet, offset, state_.nal_length_size);
@@ -124,12 +180,13 @@ auto H264AccessUnitParser::normalizePacket(std::span<const uint8_t> packet) cons
     out.insert(out.end(), packet.begin() + static_cast<ptrdiff_t>(offset), packet.begin() + static_cast<ptrdiff_t>(offset + nal_size));
     offset += nal_size;
   }
-  if (out.empty()) return {packet.begin(), packet.end()};
-  return out;
+  if (out.size() == out_start) out.insert(out.end(), packet.begin(), packet.end());
 }
 
 auto H264AccessUnitParser::findNalUnits(std::span<const uint8_t> packet) -> std::vector<NalUnit> {
   std::vector<size_t> starts;
+  // `packet` is one contiguous buffer that already carries whatever was held
+  // over from the previous call, so the scanner starts from a clean window.
   scanner_.reset();
   size_t offset = 0;
   while (offset < packet.size()) {
@@ -140,6 +197,7 @@ auto H264AccessUnitParser::findNalUnits(std::span<const uint8_t> packet) -> std:
   }
 
   std::vector<NalUnit> nals;
+  nals.reserve(starts.size());
   for (size_t i = 0; i < starts.size(); ++i) {
     const size_t start = starts[i];
     const size_t header = start + 3;
@@ -154,42 +212,45 @@ auto H264AccessUnitParser::parseNal(std::span<const uint8_t> nal_data, h264::NAL
   h264::Bitstream bs;
   bs.init(nal_data.data(), nal_data.size());
   if (!h264::read_nal_header(nal, bs)) return false;
-  if ((nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) && state_.has_sps && state_.has_pps) {
-    return h264::read_slice_header(slice, nal, state_.pps, state_.sps, bs);
+  if (isVclNalType(nal.type) && state_.has_sps && state_.has_pps) {
+    return h264::read_slice_header(slice, nal, state_.pps, state_.sps, bs, rbsp_scratch_);
   }
   return true;
 }
 
+auto H264AccessUnitParser::storeParameterSetNal(std::span<const uint8_t> nal_data) -> bool {
+  h264::Bitstream probe;
+  probe.init(nal_data.data(), nal_data.size());
+  h264::NALHeader nal = {};
+  if (!h264::read_nal_header(nal, probe)) return false;
+  return storeParameterSet(nal_data, nal);
+}
+
 auto H264AccessUnitParser::storeParameterSet(std::span<const uint8_t> nal_data, const h264::NALHeader& nal) -> bool {
+  if (nal.type != h264::NAL_UNIT_TYPE_SPS && nal.type != h264::NAL_UNIT_TYPE_PPS) return false;
   h264::Bitstream bs;
   bs.init(nal_data.data(), nal_data.size());
   h264::NALHeader ignored = {};
   if (!h264::read_nal_header(ignored, bs)) return false;
   if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
     h264::SPS parsed = {};
-    h264::read_sps(parsed, bs);
-    if (parsed.seq_parameter_set_id >= 0 && parsed.seq_parameter_set_id < 32) {
-      state_.sps[parsed.seq_parameter_set_id] = parsed;
-      state_.sps_valid[parsed.seq_parameter_set_id] = true;
-      state_.has_sps = true;
-      return true;
-    }
-  } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
-    h264::PPS parsed = {};
-    h264::read_pps(parsed, bs);
-    if (parsed.pic_parameter_set_id >= 0 && parsed.pic_parameter_set_id < 256) {
-      state_.pps[parsed.pic_parameter_set_id] = parsed;
-      state_.pps_valid[parsed.pic_parameter_set_id] = true;
-      state_.has_pps = true;
-      return true;
-    }
+    if (!h264::read_sps(parsed, bs, rbsp_scratch_)) return false;
+    state_.sps[parsed.seq_parameter_set_id] = parsed;
+    state_.sps_valid[parsed.seq_parameter_set_id] = true;
+    state_.has_sps = true;
+    return true;
   }
-  return false;
+  h264::PPS parsed = {};
+  if (!h264::read_pps(parsed, state_.sps, bs, rbsp_scratch_)) return false;
+  state_.pps[parsed.pic_parameter_set_id] = parsed;
+  state_.pps_valid[parsed.pic_parameter_set_id] = true;
+  state_.has_pps = true;
+  return true;
 }
 
 auto H264AccessUnitParser::startsNewAccessUnit(const h264::NALHeader& nal, const h264::SliceHeader& slice, bool is_vcl) const -> bool {
   if (!current_has_vcl_) return false;
-  if (nal.type == h264::NAL_UNIT_TYPE_AUD || nal.type == h264::NAL_UNIT_TYPE_SPS || nal.type == h264::NAL_UNIT_TYPE_PPS) return true;
+  if (startsAccessUnit(nal.type)) return true;
   if (!is_vcl || !have_previous_slice_) return false;
   if ((previous_nal_.idc == 0) != (nal.idc == 0)) return true;
   if ((previous_nal_.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR) != (nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR)) return true;
@@ -291,9 +352,12 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
 }
 
 auto H264AccessUnitParser::finishCurrentFrame() -> H264ParsedFrame {
-  current_.is_intra = current_.nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
+  const bool is_idr = current_.nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
+  // An all-I non-IDR picture is still a valid resume point, which matters for
+  // open-GOP streams that only signal recovery through I slices.
+  current_.is_intra = is_idr || current_all_intra_;
   current_.is_reference = current_.nal.idc != h264::NAL_REF_IDC_PRIORITY_DISPOSABLE;
-  if (current_.is_intra) resetPoc();
+  if (is_idr) resetPoc();
   current_.poc = computePoc(current_.slice);
   current_.parameter_sets_changed = current_parameter_sets_changed_;
 
@@ -301,6 +365,7 @@ auto H264AccessUnitParser::finishCurrentFrame() -> H264ParsedFrame {
   current_ = {};
   current_has_vcl_ = false;
   current_parameter_sets_changed_ = false;
+  current_all_intra_ = true;
   have_previous_slice_ = false;
   previous_slice_ = {};
   previous_nal_ = {};

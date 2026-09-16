@@ -8,10 +8,13 @@
 #include <vector>
 
 #ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dxva.h>
 #endif
 
+#include <util/bit_reader.hpp>
 #include <video/parser/h264_types.hpp>
 
 namespace openmedia::dx_h264 {
@@ -49,6 +52,7 @@ struct State {
   int prev_pic_order_cnt_lsb = 0;
   int prev_pic_order_cnt_msb = 0;
   bool have_prev_poc = false;
+  openmedia::RbspBuffer rbsp_scratch;
 
   void resetPoc() {
     prev_pic_order_cnt_lsb = 0;
@@ -56,6 +60,9 @@ struct State {
     have_prev_poc = false;
   }
 
+  // `nal_data` must cover exactly one NAL unit starting at its header byte:
+  // read_pps uses more_rbsp_data(), which needs the rbsp_stop_one_bit of this
+  // unit and not of whatever follows it in the packet.
   void storeNal(std::span<const uint8_t> nal_data) {
     if (nal_data.empty()) return;
     h264::Bitstream bs;
@@ -64,20 +71,16 @@ struct State {
     if (!h264::read_nal_header(nal, bs)) return;
     if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
       h264::SPS parsed = {};
-      h264::read_sps(parsed, bs);
-      if (parsed.seq_parameter_set_id >= 0 && parsed.seq_parameter_set_id < 32) {
-        sps[parsed.seq_parameter_set_id] = parsed;
-        sps_valid[parsed.seq_parameter_set_id] = true;
-        has_sps = true;
-      }
+      if (!h264::read_sps(parsed, bs, rbsp_scratch)) return;
+      sps[parsed.seq_parameter_set_id] = parsed;
+      sps_valid[parsed.seq_parameter_set_id] = true;
+      has_sps = true;
     } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
       h264::PPS parsed = {};
-      h264::read_pps(parsed, bs);
-      if (parsed.pic_parameter_set_id >= 0 && parsed.pic_parameter_set_id < 256) {
-        pps[parsed.pic_parameter_set_id] = parsed;
-        pps_valid[parsed.pic_parameter_set_id] = true;
-        has_pps = true;
-      }
+      if (!h264::read_pps(parsed, sps, bs, rbsp_scratch)) return;
+      pps[parsed.pic_parameter_set_id] = parsed;
+      pps_valid[parsed.pic_parameter_set_id] = true;
+      has_pps = true;
     }
   }
 
@@ -160,19 +163,31 @@ struct State {
     ParsedFrame frame;
     frame.bitstream = packet;
 
-    h264::Bitstream bs;
-    bs.init(frame.bitstream.data(), frame.bitstream.size());
-    while (h264::find_next_nal(bs)) {
-      const uint32_t nal_offset = static_cast<uint32_t>(bs.byte_offset()) - 3;
+    // Collect the NAL boundaries up front so each unit can be parsed within its
+    // own extent instead of running to the end of the packet.
+    std::vector<size_t> headers;
+    {
+      h264::Bitstream scan;
+      scan.init(frame.bitstream.data(), frame.bitstream.size());
+      while (h264::find_next_nal(scan)) headers.push_back(scan.byte_offset());
+    }
+
+    for (size_t i = 0; i < headers.size(); ++i) {
+      const size_t header_pos = headers[i];
+      const size_t end = (i + 1 < headers.size()) ? headers[i + 1] - 3 : frame.bitstream.size();
+      if (header_pos >= end) continue;
+      const auto nal_unit = frame.bitstream.subspan(header_pos, end - header_pos);
+
+      h264::Bitstream bs;
+      bs.init(nal_unit.data(), nal_unit.size());
       h264::NALHeader nal;
       if (!h264::read_nal_header(nal, bs)) continue;
       if (nal.type == h264::NAL_UNIT_TYPE_SPS || nal.type == h264::NAL_UNIT_TYPE_PPS) {
-        const size_t start = static_cast<size_t>(bs.byte_offset()) - 1;
-        storeNal(frame.bitstream.subspan(start));
+        storeNal(nal_unit);
       } else if (nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) {
         if (!has_sps || !has_pps) continue;
-        h264::read_slice_header(frame.slice, nal, pps, sps, bs);
-        frame.slice_offsets.push_back(nal_offset);
+        if (!h264::read_slice_header(frame.slice, nal, pps, sps, bs, rbsp_scratch)) continue;
+        frame.slice_offsets.push_back(static_cast<uint32_t>(header_pos) - 3);
         frame.nal = nal;
       }
     }

@@ -2,6 +2,8 @@
 
 #include "start_code.hpp"
 
+#include <util/bit_reader.hpp>
+
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -58,13 +60,21 @@ private:
   H264ParsedFrame current_ = {};
   bool current_has_vcl_ = false;
   bool current_parameter_sets_changed_ = false;
+  bool current_all_intra_ = true;
   h264::SliceHeader previous_slice_ = {};
   h264::NALHeader previous_nal_ = {};
   bool have_previous_slice_ = false;
+  // Tail of a NAL that the previous parse() call could not terminate yet.
+  std::vector<uint8_t> pending_;
+  // pending_ followed by the current packet, in Annex B form. Reused so that a
+  // steady-state parse does not allocate.
+  std::vector<uint8_t> work_;
+  openmedia::RbspBuffer rbsp_scratch_;
 
-  auto normalizePacket(std::span<const uint8_t> packet) const -> std::vector<uint8_t>;
+  void appendAnnexB(std::span<const uint8_t> packet, std::vector<uint8_t>& out) const;
   auto findNalUnits(std::span<const uint8_t> packet) -> std::vector<NalUnit>;
   auto parseNal(std::span<const uint8_t> nal_data, h264::NALHeader& nal, h264::SliceHeader& slice) -> bool;
+  auto storeParameterSetNal(std::span<const uint8_t> nal_data) -> bool;
   auto storeParameterSet(std::span<const uint8_t> nal_data, const h264::NALHeader& nal) -> bool;
   auto startsNewAccessUnit(const h264::NALHeader& nal, const h264::SliceHeader& slice, bool is_vcl) const -> bool;
   auto computePoc(const h264::SliceHeader& slice) -> int32_t;

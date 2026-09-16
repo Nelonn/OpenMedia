@@ -2,13 +2,11 @@
 
 #include "start_code.hpp"
 
+#include <util/bit_reader.hpp>
+
 #include <cstdint>
 #include <span>
 #include <vector>
-
-namespace openmedia {
-class BitReader;
-}
 
 namespace openmedia::video_parser {
 
@@ -40,6 +38,18 @@ enum NalUnitType {
   NAL_SUFFIX_SEI = 40,
 };
 
+// 7.4.3.2.1: num_short_term_ref_pic_sets <= 64, num_long_term_ref_pics_sps <= 32,
+// and a short term set holds at most sps_max_dec_pic_buffering_minus1 <= 15
+// pictures per direction. These bound every fixed-size array below, so the
+// parser rejects anything larger rather than clamping it.
+inline constexpr int H265_MAX_SHORT_TERM_REF_PIC_SETS = 64;
+inline constexpr int H265_MAX_LONG_TERM_REF_PICS_SPS = 32;
+inline constexpr int H265_MAX_REF_PICS_PER_DIRECTION = 16;
+inline constexpr int H265_MAX_DELTA_POCS = H265_MAX_REF_PICS_PER_DIRECTION * 2;
+inline constexpr int H265_MAX_REF_IDX_ACTIVE = 15;
+inline constexpr int H265_MAX_TILE_COLUMNS = 20;
+inline constexpr int H265_MAX_TILE_ROWS = 22;
+
 struct H265StRefPicSet {
   bool inter_ref_pic_set_prediction_flag = false;
   int delta_idx_minus1 = 0;
@@ -48,12 +58,13 @@ struct H265StRefPicSet {
   int num_negative_pics = 0;
   int num_positive_pics = 0;
   int num_delta_pocs = 0;
-  int delta_poc_s0[16] = {};
-  bool used_by_curr_pic_s0_flag[16] = {};
-  int delta_poc_s1[16] = {};
-  bool used_by_curr_pic_s1_flag[16] = {};
-  bool used_by_curr_pic_flag[32] = {};
-  bool use_delta_flag[32] = {};
+  int delta_poc_s0[H265_MAX_REF_PICS_PER_DIRECTION] = {};
+  bool used_by_curr_pic_s0_flag[H265_MAX_REF_PICS_PER_DIRECTION] = {};
+  int delta_poc_s1[H265_MAX_REF_PICS_PER_DIRECTION] = {};
+  bool used_by_curr_pic_s1_flag[H265_MAX_REF_PICS_PER_DIRECTION] = {};
+  // Indexed by j in [0, num_delta_pocs], hence one more than MAX_DELTA_POCS.
+  bool used_by_curr_pic_flag[H265_MAX_DELTA_POCS + 1] = {};
+  bool use_delta_flag[H265_MAX_DELTA_POCS + 1] = {};
 };
 
 struct H265ScalingListData {
@@ -68,14 +79,14 @@ struct H265ScalingListData {
 struct H265PredWeightTable {
   int luma_log2_weight_denom = 0;
   int delta_chroma_log2_weight_denom = 0;
-  int delta_luma_weight_l0[15] = {};
-  int luma_offset_l0[15] = {};
-  int delta_chroma_weight_l0[15][2] = {};
-  int delta_chroma_offset_l0[15][2] = {};
-  int delta_luma_weight_l1[15] = {};
-  int luma_offset_l1[15] = {};
-  int delta_chroma_weight_l1[15][2] = {};
-  int delta_chroma_offset_l1[15][2] = {};
+  int delta_luma_weight_l0[H265_MAX_REF_IDX_ACTIVE] = {};
+  int luma_offset_l0[H265_MAX_REF_IDX_ACTIVE] = {};
+  int delta_chroma_weight_l0[H265_MAX_REF_IDX_ACTIVE][2] = {};
+  int delta_chroma_offset_l0[H265_MAX_REF_IDX_ACTIVE][2] = {};
+  int delta_luma_weight_l1[H265_MAX_REF_IDX_ACTIVE] = {};
+  int luma_offset_l1[H265_MAX_REF_IDX_ACTIVE] = {};
+  int delta_chroma_weight_l1[H265_MAX_REF_IDX_ACTIVE][2] = {};
+  int delta_chroma_offset_l1[H265_MAX_REF_IDX_ACTIVE][2] = {};
 };
 
 struct H265SliceHeader {
@@ -107,13 +118,18 @@ struct H265SliceHeader {
   int slice_tc_offset_div2 = 0;
   bool slice_loop_filter_across_slices_enabled_flag = false;
   int five_minus_max_num_merge_cand = 0;
+  // Bit position of the end of the slice header within the RBSP.
   uint32_t header_bit_size = 0;
+  // Byte offset from the start of the NAL unit *including its start code* to
+  // the first byte of slice data. Accounts for the start code, the two byte NAL
+  // header and any emulation prevention bytes inside the header, which is what
+  // VA-API and DXVA want for slice_data_byte_offset.
+  uint32_t slice_data_byte_offset = 0;
 };
 
 struct H265ParsedFrame {
   std::vector<uint8_t> bitstream;
   std::vector<uint32_t> slice_offsets;
-  std::vector<std::vector<uint8_t>> slice_nalus;
   std::vector<H265SliceHeader> slice_headers;
   int nal_unit_type = 0;
   int poc = 0;
@@ -180,11 +196,11 @@ public:
     int log2_diff_max_min_pcm_luma_coding_block_size = 0;
     bool pcm_loop_filter_disabled_flag = false;
     int num_short_term_ref_pic_sets = 0;
-    H265StRefPicSet st_ref_pic_set[64] = {};
+    H265StRefPicSet st_ref_pic_set[H265_MAX_SHORT_TERM_REF_PIC_SETS] = {};
     bool long_term_ref_pics_present_flag = false;
     int num_long_term_ref_pics_sps = 0;
-    int lt_ref_pic_poc_lsb_sps[32] = {};
-    bool used_by_curr_pic_lt_sps_flag[32] = {};
+    int lt_ref_pic_poc_lsb_sps[H265_MAX_LONG_TERM_REF_PICS_SPS] = {};
+    bool used_by_curr_pic_lt_sps_flag[H265_MAX_LONG_TERM_REF_PICS_SPS] = {};
     bool sps_temporal_mvp_enabled_flag = false;
     bool strong_intra_smoothing_enabled_flag = false;
     bool vui_parameters_present_flag = false;
@@ -258,8 +274,8 @@ public:
     int num_tile_columns_minus1 = 0;
     int num_tile_rows_minus1 = 0;
     bool uniform_spacing_flag = false;
-    int column_width_minus1[20] = {};
-    int row_height_minus1[20] = {};
+    int column_width_minus1[H265_MAX_TILE_COLUMNS] = {};
+    int row_height_minus1[H265_MAX_TILE_ROWS] = {};
     bool loop_filter_across_tiles_enabled_flag = false;
     bool pps_loop_filter_across_slices_enabled_flag = false;
     bool deblocking_filter_control_present_flag = false;
@@ -305,14 +321,28 @@ private:
   int ref_pic_order_cnt_msb_ = 0;
   int ref_pic_order_cnt_lsb_ = 0;
   bool first_picture_ = true;
+  // Tail of a NAL that the previous parse() call could not terminate yet.
+  std::vector<uint8_t> pending_;
+  // pending_ followed by the current packet, in Annex B form. Reused so that a
+  // steady-state parse does not allocate.
+  std::vector<uint8_t> work_;
+  openmedia::RbspBuffer rbsp_scratch_;
+  // Start code length of the NAL currently being parsed, needed to express
+  // slice_data_byte_offset relative to the emitted bitstream.
+  uint32_t nal_prefix_size_ = 3;
 
-  auto normalizePacket(std::span<const uint8_t> packet) const -> std::vector<uint8_t>;
+  void appendAnnexB(std::span<const uint8_t> packet, std::vector<uint8_t>& out) const;
   auto findNalUnits(std::span<const uint8_t> packet) -> std::vector<NalUnit>;
-  auto parseNal(std::span<const uint8_t> nal_data) -> bool;
+  auto parseNal(std::span<const uint8_t> nal_data, H265SliceHeader& slice, bool& has_slice) -> bool;
   auto startsNewAccessUnit(int nal_type) const -> bool;
   auto computePoc(const Sps& sps, const H265SliceHeader& sh, int nal_type) -> int;
   auto finishCurrentFrame() -> H265ParsedFrame;
 
+  auto parseVps(BitReader& br) -> bool;
+  auto parseSps(BitReader& br) -> bool;
+  auto parsePps(BitReader& br) -> bool;
+  // Returns a HevcParse value; int keeps the enum private to the .cpp.
+  auto parseSliceHeader(BitReader& br, H265SliceHeader& sh) -> int;
   auto parseVui(BitReader& br, Sps& sps) -> bool;
   auto parseStRefPicSet(BitReader& br, H265StRefPicSet& st, int idx, int num_sets, const H265StRefPicSet* sets) -> bool;
   auto parseScalingListData(BitReader& br, H265ScalingListData& sl) -> bool;

@@ -1,5 +1,7 @@
 #include <codecs.hpp>
 #include <openmedia/audio.hpp>
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mfapi.h>
 #include <mftransform.h>

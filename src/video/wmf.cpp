@@ -3,6 +3,8 @@
 #include <mferror.h>
 #include <mfobjects.h>
 #include <mftransform.h>
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wrl/client.h>
 #include <codecs.hpp>
