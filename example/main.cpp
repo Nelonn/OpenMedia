@@ -9,21 +9,65 @@
 
 namespace {
 
-auto isVideoDecoderArg(std::string_view arg) -> bool {
-  return arg == "vulkan_h264" || arg == "vulkan_h265" || arg == "vulkan_av1" ||
-         arg == "dx11_h264" || arg == "dx11_h265" || arg == "dx12_h264" || arg == "dx12_h265" ||
-         arg == "nvdec_h264" || arg == "nvdec_h265" || arg == "nvdec_av1" || arg == "nvdec_vp9" ||
-         arg == "amf_h264" || arg == "amf_h265" || arg == "amf_av1" || arg == "amf_vp9" ||
-         arg == "vaapi_h264" || arg == "vaapi_h265" || arg == "vaapi_av1" || arg == "vaapi_vp9";
+// ---------------------------------------------------------------------------
+// Backend selection
+//
+// The optional first argument picks a hardware *backend*, not an individual
+// codec.  Passing "vulkan" means "use the Vulkan decoders for whatever this
+// clip happens to contain"; the player prefers every decoder registered under
+// that backend and falls back to software when the clip's codec is not one of
+// them.  Pinning a single codec (vulkan_h264, vulkan_h265, dx12_av1, ...) is
+// deliberately not accepted — the backend decides which codec it can handle.
+// ---------------------------------------------------------------------------
+struct BackendOption {
+  const char* name;        // what the user types
+  const char* prefix;      // codec-name prefix this backend registers under
+  const char* description;
+};
+
+constexpr BackendOption kBackends[] = {
+    {"vulkan", "vulkan_", "Vulkan Video"},
+    {"dx11",   "dx11_",   "Direct3D 11 (DXVA2)"},
+    {"dx12",   "dx12_",   "Direct3D 12 Video"},
+    {"amf",    "amf_",    "AMD Advanced Media Framework"},
+    {"nv",     "nvdec_",  "NVIDIA NVDEC"},
+    {"vaapi",  "vaapi_",  "VA-API"},
+};
+
+auto findBackend(std::string_view arg) -> const BackendOption* {
+  for (const auto& backend : kBackends) {
+    if (arg == backend.name) return &backend;
+  }
+  return nullptr;
 }
 
-auto enableRequestedBackend(MediaPlayer& player, std::string_view decoder) -> bool {
-  if (decoder.starts_with("amf_")) return player.enableDX11();
-  if (decoder.starts_with("nvdec_")) return player.enableCuda();
-  if (decoder.starts_with("dx11_")) return player.enableDX11();
-  if (decoder.starts_with("dx12_")) return player.enableDX12();
-  if (decoder.starts_with("vaapi_")) return player.enableVAAPI();
-  if (decoder.starts_with("vulkan_")) return player.enableVulkan();
+// Detects "vulkan_h264" and friends so we can tell the user what to pass
+// instead of silently treating it as a file name.
+auto findBackendByCodecName(std::string_view arg) -> const BackendOption* {
+  for (const auto& backend : kBackends) {
+    if (arg.starts_with(backend.prefix)) return &backend;
+  }
+  return nullptr;
+}
+
+void logUsage() {
+  SDL_Log("Usage: OpenMediaExample [backend] [file]");
+  SDL_Log("Backends (optional, first argument):");
+  for (const auto& backend : kBackends) {
+    SDL_Log("  %-7s %s", backend.name, backend.description);
+  }
+  SDL_Log("Without a backend the player uses software decoding.");
+}
+
+// Creates the hardware device the chosen backend decodes onto.
+// AMF binds to a D3D11 device, NVDEC to a CUDA context, and so on.
+auto enableBackend(MediaPlayer& player, std::string_view backend) -> bool {
+  if (backend == "vulkan") return player.enableVulkan();
+  if (backend == "dx11")   return player.enableDX11();
+  if (backend == "dx12")   return player.enableDX12();
+  if (backend == "amf")    return player.enableDX11();
+  if (backend == "nv")     return player.enableCuda();
+  if (backend == "vaapi")  return player.enableVAAPI();
   return false;
 }
 
@@ -41,9 +85,6 @@ int main(int argc, char* argv[]) {
   }
 
   SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
-  //SDL_Renderer* renderer = SDL_CreateRenderer(window, "direct3d11");
-  //SDL_Renderer* renderer = SDL_CreateRenderer(window, "direct3d12");
-  //SDL_Renderer* renderer = SDL_CreateRenderer(window, "vulkan");
   if (!renderer) {
     SDL_Log("[Error] %s", SDL_GetError());
     SDL_DestroyWindow(window);
@@ -56,23 +97,38 @@ int main(int argc, char* argv[]) {
   MediaPlayer player;
   player.setRenderer(renderer);
 
-  std::string requested_decoder;
-  std::string initial_file;
+  // ---- argument parsing -------------------------------------------------
+  const BackendOption* backend = nullptr;
   int path_arg = 1;
-  if (argc > 1 && isVideoDecoderArg(argv[1])) {
-    requested_decoder = argv[1];
-    player.setRequestedVideoDecoder(requested_decoder);
-    path_arg = 2;
-  }
-  if (argc > path_arg) {
-    initial_file = argv[path_arg];
+
+  if (argc > 1) {
+    const std::string_view first = argv[1];
+    if (const auto* selected = findBackend(first)) {
+      backend = selected;
+      path_arg = 2;
+    } else if (const auto* by_codec = findBackendByCodecName(first)) {
+      // The user asked for one specific codec; point them at the backend.
+      SDL_Log("[Player] '%s' names a single codec. Pass the backend '%s' instead.",
+              argv[1], by_codec->name);
+      logUsage();
+      SDL_DestroyRenderer(renderer);
+      SDL_DestroyWindow(window);
+      SDL_Quit();
+      return 1;
+    }
   }
 
-  if (!requested_decoder.empty()) {
-    if (enableRequestedBackend(player, requested_decoder)) {
-      SDL_Log("[Player] %s acceleration enabled.", requested_decoder.c_str());
+  const std::string initial_file = (argc > path_arg) ? argv[path_arg] : std::string();
+
+  if (backend) {
+    // Prefer this backend's decoders for video; software stays as the fallback
+    // when the backend has no decoder for the clip's codec.
+    if (enableBackend(player, backend->name)) {
+      player.setPreferredDecoderPrefix(backend->prefix);
+      SDL_Log("[Player] %s acceleration enabled.", backend->description);
     } else {
-      SDL_Log("[Player] %s acceleration NOT available.", requested_decoder.c_str());
+      SDL_Log("[Player] %s acceleration NOT available, falling back to software.",
+              backend->description);
     }
   } else {
     SDL_Log("[Player] Software decoding selected.");

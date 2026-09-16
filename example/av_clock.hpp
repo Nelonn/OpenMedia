@@ -48,6 +48,18 @@ public:
     paused_ = false;
   }
 
+  // Re-base WALL playback onto `seconds` starting now.
+  //
+  // Used twice: once when the first frame after a start/seek finally comes out
+  // of the decoder (so playback begins at that frame instead of at whatever the
+  // wall clock drifted to while the decoder was warming up), and again whenever
+  // the decoder falls so far behind that catching up by dropping is hopeless.
+  void setWallAnchor(double seconds) noexcept {
+    wall_ref_pts_sec_ = seconds;
+    wall_ref_time_ = SteadyClock::now();
+    pts_sec_.store(seconds, std::memory_order_release);
+  }
+
   void pause() noexcept {
     if (paused_) return;
     pts_sec_.store(masterSeconds(), std::memory_order_release);
@@ -102,6 +114,8 @@ public:
     }
     return pts_sec_.load(std::memory_order_acquire);
   }
+
+  bool paused() const noexcept { return paused_; }
 
 private:
   std::atomic<double> pts_sec_ {0.0};

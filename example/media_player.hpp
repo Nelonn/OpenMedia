@@ -266,8 +266,12 @@ public:
         video_renderer_.setRenderer(r);
     }
 
-    void setRequestedVideoDecoder(std::string name) {
-        requested_video_decoder_ = std::move(name);
+    // Name prefix of the decoders this player should prefer for video, e.g.
+    // "dx12_" or "nvdec_". Every decoder registered under that prefix is tried
+    // first, in registration order; anything else (software) remains as the
+    // fallback for codecs the backend cannot handle. Empty = no preference.
+    void setPreferredDecoderPrefix(std::string prefix) {
+        preferred_decoder_prefix_ = std::move(prefix);
     }
 
 #ifndef __APPLE__
@@ -488,6 +492,8 @@ public:
         
         hw_device_ = HWDevice{HWDeviceType::VULKAN, ctx};
         return true;
+#else
+        return false;
 #endif
     }
 
@@ -568,18 +574,10 @@ public:
     // -----------------------------------------------------------------------
 
     void stop() {
-        // 1. Signal all threads and queues before joining.
-        stop_requested_ = true;
-        audio_packet_queue_.abort();
-        video_packet_queue_.abort();
-        video_frame_queue_.abort();
+        // 1. Signal all threads and queues, then join them.
+        stopThreads();
 
-        // 2. Join all worker threads.
-        if (demux_thread_.joinable())        demux_thread_.join();
-        if (audio_decoder_thread_.joinable()) audio_decoder_thread_.join();
-        if (video_decoder_thread_.joinable()) video_decoder_thread_.join();
-
-        // 3. Tear down A/V resources.
+        // 2. Tear down A/V resources.
         audio_sink_.close();
         video_renderer_.reset();
 
@@ -595,6 +593,7 @@ public:
             image_texture_ = nullptr;
         }
 
+        clock_.setMode(AVClock::Mode::WALL);
         clock_.reset(0);
         has_image_          = false;
         has_video_          = false;
@@ -605,6 +604,12 @@ public:
         image_stream_index_ = -1;
         total_duration_secs_ = 0;
         stop_requested_     = false;
+        seek_pending_       = false;
+        demux_eof_          = false;
+        drain_sent_         = false;
+        finished_           = false;
+        last_video_error_   = OM_SUCCESS;
+        last_audio_error_   = OM_SUCCESS;
     }
 
     auto play(const std::string& path) -> bool {
@@ -651,15 +656,13 @@ public:
         audio_sink_.setGain(volume_);
     }
 
+    // Records the request; the seek itself happens in tickVideo() once the
+    // user has stopped dragging the scrub bar.
     void seek(float progress) {
         if (!demuxer_ || total_duration_secs_ <= 0) return;
-        {
-            std::lock_guard<std::mutex> lock(seek_mutex_);
-            pending_seek_progress_ = std::clamp(progress, 0.0f, 1.0f);
-            seek_pending_          = true;
-            last_seek_time_        = SteadyClock::now();
-        }
-        seek_cv_.notify_one();
+        pending_seek_progress_ = std::clamp(progress, 0.0f, 1.0f);
+        seek_pending_          = true;
+        last_seek_time_        = SteadyClock::now();
     }
 
     // -----------------------------------------------------------------------
@@ -667,8 +670,10 @@ public:
     // -----------------------------------------------------------------------
 
     void tickVideo() {
-        if (!audio_sink_.started()) clock_.wallTick();
+        processPendingSeek();
+        promoteClockToAudio();
         video_renderer_.tick(video_frame_queue_, clock_);
+        updateFinishedState();
     }
 
     // -----------------------------------------------------------------------
@@ -687,8 +692,8 @@ public:
 
     auto getProgress() const -> float {
         if (total_duration_secs_ <= 0) return 0.0f;
-        return static_cast<float>(clock_.masterSeconds()) /
-               static_cast<float>(total_duration_secs_);
+        return std::clamp(static_cast<float>(clock_.masterSeconds()) /
+                          static_cast<float>(total_duration_secs_), 0.0f, 1.0f);
     }
 
     auto getProgressString() const -> std::string {
@@ -720,7 +725,7 @@ private:
     CodecRegistry  codec_registry_;
     FormatRegistry format_registry_;
     std::optional<HWDevice> hw_device_;
-    std::string requested_video_decoder_;
+    std::string preferred_decoder_prefix_;
 #ifndef __APPLE__
     bool vulkan_library_loaded_ = false;
     PFN_vkGetInstanceProcAddr vulkan_get_instance_proc_addr_ = nullptr;
@@ -763,7 +768,11 @@ private:
 
     // Video state
     bool has_video_ = false;
-    bool video_drain_sent_ = false;
+    bool drain_sent_ = false;
+    std::atomic<bool> demux_eof_ {false};
+    bool finished_ = false;
+    OMError last_video_error_ = OM_SUCCESS;
+    OMError last_audio_error_ = OM_SUCCESS;
 
     // Image state
     SDL_Texture*       image_texture_ = nullptr;
@@ -782,29 +791,18 @@ private:
     std::thread       video_decoder_thread_;
     std::atomic<bool> stop_requested_ {false};
 
-    // Seek coordination (used only by demux thread and seek() caller)
-    std::mutex              seek_mutex_;
-    std::condition_variable seek_cv_;
+    // Seek coordination. seek() and the seek itself both run on the main
+    // thread (UI events and the render loop), so no lock is needed here — and,
+    // more importantly, only one thread ever joins the worker threads.
     bool                    seek_pending_          = false;
     float                   pending_seek_progress_ = 0.0f;
     TimePoint               last_seek_time_;
 
-    static constexpr auto kSeekSettle = std::chrono::milliseconds(100);
+    // Lets stop() wake the demux thread out of its EOF/backpressure wait.
+    std::mutex              wake_mutex_;
+    std::condition_variable wake_cv_;
 
-    static auto decoderMatchesHardware(const CodecDescriptor& descriptor,
-                                       HWDeviceType type) -> bool {
-        const std::string_view name = descriptor.name;
-        switch (type) {
-            case HWDeviceType::VULKAN:
-                    return name.starts_with("vulkan_");
-            case HWDeviceType::CUDA:
-                    return name.starts_with("nvdec_");
-            case HWDeviceType::DX11:
-            case HWDeviceType::DX12:   return name.starts_with("dx12_");
-            case HWDeviceType::VAAPI:  return name.starts_with("vaapi_");
-            default:                   return false;
-        }
-    }
+    static constexpr auto kSeekSettle = std::chrono::milliseconds(100);
 
     auto fail(std::string message) -> bool {
         last_error_message_ = std::move(message);
@@ -912,8 +910,28 @@ private:
         }
     }
 
+    // Orders the decoders registered for this codec so the preferred backend's
+    // ones come first, keeping registration order within each group. Nothing is
+    // filtered out: a backend that has no decoder for this codec (or whose
+    // decoder fails to configure) just falls through to the next candidate.
+    auto orderCandidates(const Track& track) const -> std::vector<const CodecDescriptor*> {
+        std::vector<const CodecDescriptor*> candidates;
+        for (const auto* descriptor : codec_registry_.getCodecsByCodecId(track.format.codec_id)) {
+            if (descriptor->isDecoding()) candidates.push_back(descriptor);
+        }
+
+        if (track.format.type == OM_MEDIA_VIDEO && !preferred_decoder_prefix_.empty()) {
+            std::stable_partition(
+                candidates.begin(), candidates.end(),
+                [this](const CodecDescriptor* descriptor) {
+                    return descriptor->name.starts_with(preferred_decoder_prefix_);
+                });
+        }
+        return candidates;
+    }
+
     auto makeDecoder(const Track& track, std::unique_ptr<Decoder>& dec) -> const CodecDescriptor* {
-        auto descriptors = codec_registry_.getCodecsByCodecId(track.format.codec_id);
+        const auto descriptors = orderCandidates(track);
         if (descriptors.empty()) {
             SDL_Log("[Player] No decoders for codec %d", int(track.format.codec_id));
             return nullptr;
@@ -923,26 +941,31 @@ private:
         opts.format    = track.format;
         opts.time_base = track.time_base;
         opts.extradata = track.extradata;
-        if (track.format.type == OM_MEDIA_VIDEO && hw_device_) {
-            opts.hw_device = *hw_device_;
-        }
 
         for (const auto* descriptor : descriptors) {
-            if (!descriptor->isDecoding()) continue;
-            if (track.format.type == OM_MEDIA_VIDEO) {
-                if (!requested_video_decoder_.empty() && descriptor->name != requested_video_decoder_) {
-                    continue;
-                }
-                if (requested_video_decoder_.empty() && hw_device_ && !decoderMatchesHardware(*descriptor, hw_device_->type)) {
-                    continue;
-                }
+            // Only hand the hardware device to decoders that belong to the
+            // selected backend — a software decoder has no use for it, and the
+            // fallback path must stay a genuinely software one.
+            const bool is_preferred =
+                !preferred_decoder_prefix_.empty() &&
+                descriptor->name.starts_with(preferred_decoder_prefix_);
+            opts.hw_device.reset();
+            if (track.format.type == OM_MEDIA_VIDEO && hw_device_ && is_preferred) {
+                opts.hw_device = *hw_device_;
             }
-            
+
             dec = descriptor->decoder_factory();
             if (!dec) continue;
 
             const OMError err = dec->configure(opts);
             if (err == OM_SUCCESS) {
+                if (track.format.type == OM_MEDIA_VIDEO &&
+                    !preferred_decoder_prefix_.empty() && !is_preferred) {
+                    SDL_Log("[Player] No '%s*' decoder for codec %d, using %s instead",
+                            preferred_decoder_prefix_.c_str(),
+                            int(track.format.codec_id),
+                            descriptor->name.data());
+                }
                 return descriptor;
             }
 
@@ -972,12 +995,7 @@ private:
             dec.reset();
         }
 
-        if (track.format.type == OM_MEDIA_VIDEO && !requested_video_decoder_.empty()) {
-            SDL_Log("[Player] Requested decoder %s for codec %d failed or was not found",
-                    requested_video_decoder_.c_str(), int(track.format.codec_id));
-        } else {
-            SDL_Log("[Player] All decoders for codec %d failed", int(track.format.codec_id));
-        }
+        SDL_Log("[Player] All decoders for codec %d failed", int(track.format.codec_id));
         return nullptr;
     }
 
@@ -999,8 +1017,11 @@ private:
     void setupAudioDecoder(const Track& track) {
         const auto* desc = makeDecoder(track, audio_decoder_);
         if (!desc) return;
-        clock_.setMode(AVClock::Mode::AUDIO);
-        clock_.reset(0.0);
+        // Stay on the wall clock for now. Switching to the audio clock here
+        // would freeze the picture on the first frame whenever the audio device
+        // fails to open or the audio track decodes to nothing: the master clock
+        // would sit at zero forever and no video frame would ever come due.
+        // promoteClockToAudio() takes over once audio is actually playing.
         audio_time_base_ = track.time_base;
         if (video_stream_index_ < 0) {
             total_duration_secs_ = static_cast<double>(track.duration) *
@@ -1024,12 +1045,43 @@ private:
     // Thread management
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Main-thread housekeeping, driven by tickVideo()
+    // -----------------------------------------------------------------------
+
+    void processPendingSeek() {
+        if (!seek_pending_) return;
+        if ((SteadyClock::now() - last_seek_time_) < kSeekSettle) return;
+        seek_pending_ = false;
+        doSeek(pending_seek_progress_);
+    }
+
+    // Hand the master clock over to audio the moment the device actually starts
+    // consuming samples. Until then the wall clock keeps the picture moving.
+    void promoteClockToAudio() {
+        if (clock_.mode() == AVClock::Mode::AUDIO) return;
+        if (!has_audio_ || !audio_sink_.started()) return;
+        clock_.setMode(AVClock::Mode::AUDIO);
+    }
+
+    void updateFinishedState() {
+        if (finished_ || !demux_eof_.load(std::memory_order_acquire)) return;
+        if (!video_frame_queue_.empty()) return;
+        if (has_audio_ && audio_sink_.fillRatio() > 0.01) return;
+        finished_ = true;
+        clock_.pause();
+        audio_sink_.pause();
+        SDL_Log("[Player] Playback finished");
+    }
+
     void startThreads() {
         audio_packet_queue_.reset();
         video_packet_queue_.reset();
         video_frame_queue_.reset();
         stop_requested_ = false;
-        video_drain_sent_ = false;
+        drain_sent_ = false;
+        demux_eof_ = false;
+        finished_ = false;
 
         // Demux thread feeds the per-stream packet queues.
         demux_thread_ = std::thread([this] { demuxLoop(); });
@@ -1043,12 +1095,12 @@ private:
 
     void stopThreads() {
         stop_requested_ = true;
-        seek_cv_.notify_all();          // wake demux from seek-settle wait
+        wake_cv_.notify_all();          // wake demux from its EOF/backpressure wait
         audio_packet_queue_.abort();
         video_packet_queue_.abort();
         video_frame_queue_.abort();
 
-        if (demux_thread_.joinable())        demux_thread_.join();
+        if (demux_thread_.joinable())         demux_thread_.join();
         if (audio_decoder_thread_.joinable()) audio_decoder_thread_.join();
         if (video_decoder_thread_.joinable()) video_decoder_thread_.join();
     }
@@ -1066,17 +1118,15 @@ private:
 
         while (!stop_requested_) {
 
-            // ---- seek handling (ffplay: check seek_req flag) ----
-            {
-                std::unique_lock<std::mutex> lock(seek_mutex_);
-                if (seek_pending_ &&
-                    (SteadyClock::now() - last_seek_time_) >= kSeekSettle) {
-                    const float p = pending_seek_progress_;
-                    seek_pending_ = false;
-                    lock.unlock();
-                    doSeek(p);
-                    continue;
-                }
+            // Once the file is exhausted there is nothing left to do but wait
+            // for stop() or a seek. Continuing to read here used to be fatal:
+            // the decoder threads had already shut down on the drain packet, so
+            // anything read afterwards piled up in a queue nobody was draining
+            // until the demux thread wedged inside blockingPush() — the picture
+            // froze and the audio ran on until its ring buffer emptied.
+            if (demux_eof_.load(std::memory_order_acquire)) {
+                idleWait(200ms);
+                continue;
             }
 
             // ---- back-pressure (ffplay: infinite_buffer check) ----
@@ -1087,26 +1137,23 @@ private:
                 video_packet_queue_.size() < kPacketQueueCapacity * 3 / 4;
 
             if (!audio_ok && !video_ok) {
-                std::unique_lock<std::mutex> lock(seek_mutex_);
-                seek_cv_.wait_for(lock, 10ms, [&] {
-                    return stop_requested_.load() || seek_pending_;
-                });
+                idleWait(10ms);
                 continue;
             }
 
             // ---- read one packet ----
             auto res = demuxer_->readPacket();
             if (res.isErr()) {
-                if (has_video_ && !video_drain_sent_) {
-                    video_drain_sent_ = true;
-                    video_packet_queue_.blockingPush(Packet {});
+                const OMError err = std::move(res).unwrapErr();
+                const bool eof = (err == OM_FORMAT_END_OF_FILE ||
+                                  err == OM_IO_END_OF_STREAM);
+                if (!eof) {
+                    // Not the end of the file — the demuxer genuinely failed.
+                    // Report it instead of silently pretending we reached EOF.
+                    SDL_Log("[Demux] readPacket failed: %s (%d)",
+                            detail::describeError(err), int(err));
                 }
-
-                // EOF — wait; a seek may restart things.
-                std::unique_lock<std::mutex> lock(seek_mutex_);
-                seek_cv_.wait_for(lock, 200ms, [&] {
-                    return stop_requested_.load() || seek_pending_;
-                });
+                sendDrain();
                 continue;
             }
 
@@ -1119,67 +1166,110 @@ private:
         }
     }
 
+    // Flush the decoders' internal delay so the tail of the file is displayed,
+    // then stop reading. Both streams get the drain, not just video — the audio
+    // thread otherwise sits on the last packets it never got told to finish.
+    void sendDrain() {
+        if (!drain_sent_) {
+            drain_sent_ = true;
+            if (has_video_) video_packet_queue_.blockingPush(Packet {});
+            if (has_audio_) audio_packet_queue_.blockingPush(Packet {});
+        }
+        demux_eof_.store(true, std::memory_order_release);
+    }
+
+    template<typename Duration>
+    void idleWait(Duration d) {
+        std::unique_lock<std::mutex> lock(wake_mutex_);
+        wake_cv_.wait_for(lock, d, [&] { return stop_requested_.load(); });
+    }
+
     // -----------------------------------------------------------------------
     // Audio decoder thread — mirrors ffplay's audio_thread()
     // -----------------------------------------------------------------------
     void audioDecodeLoop() {
+        // Timestamp of the oldest sample still sitting in the sink's ring
+        // buffer, i.e. the one the device is about to play.
+        std::optional<double> ring_head_pts;
+
         while (!stop_requested_) {
             auto maybe_pkt = audio_packet_queue_.blockingPop();
             if (!maybe_pkt) break; // aborted
 
-            const OMError send_err = maybe_pkt->bytes.empty()
-                ? audio_decoder_->sendEndOfStream()
-                : audio_decoder_->sendPacket(*maybe_pkt);
-            if (send_err != OM_SUCCESS) continue;
-
-            while (!stop_requested_) {
-                auto result = audio_decoder_->receiveFrame();
-                if (result.isErr()) break;
-                auto received = std::move(result).unwrap();
-                if (received.status == ReceivedFrame::Status::NeedInput) break;
-                if (received.status == ReceivedFrame::Status::EndOfStream) return;
-
-                auto& frame = received.frame;
-                if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
-                const AudioSamples& s = std::get<AudioSamples>(frame.data);
-                if (s.nb_samples == 0) continue;
-
-                bool need_reopen = !audio_sink_.isOpen();
-                if (audio_sink_.isOpen()) {
-                    if (audio_sink_.sampleRate() != static_cast<int>(s.format.sample_rate) ||
-                        audio_sink_.channels() != static_cast<int>(s.format.channels)) {
-                        need_reopen = true;
-                    }
-                }
-
-                if (need_reopen) {
-                    const size_t bps = getBytesPerSample(s.format.sample_format);
-                    if (!audio_sink_.open(
-                            detail::toSdlFormat(s.format.sample_format),
-                            int(s.format.channels),
-                            int(s.format.sample_rate),
-                            bps, &clock_))
-                        continue;
-                    SDL_Log("[Player] Audio sink opened/re-opened: %u Hz, %u channels", s.format.sample_rate, s.format.channels);
-                }
-
-                auto pcm = detail::normaliseBits(
-                    detail::interleave(s), s.format.bits_per_sample);
-
-                // Push PCM to the sink.  The sink's own ringbuffer provides
-                // back-pressure; check stop_requested_ between partial writes.
-                size_t written = 0;
-                while (written < pcm.size() && !stop_requested_) {
-                    written += audio_sink_.pushPcm(
-                        pcm.data() + written, pcm.size() - written);
-                    if (written < pcm.size())
-                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                }
-
-                const double pts_sec = static_cast<double>(frame.pts) * 
-                                       audio_time_base_.num / audio_time_base_.den;
-                audio_sink_.tickBuffering(pts_sec);
+            const bool eos = maybe_pkt->bytes.empty();
+            OMError send_err = sendToDecoder(*audio_decoder_, *maybe_pkt, eos);
+            if (send_err == OM_CODEC_NEED_MORE_DATA) {
+                drainAudioFrames(ring_head_pts);
+                send_err = sendToDecoder(*audio_decoder_, *maybe_pkt, eos);
             }
+            if (send_err != OM_SUCCESS) {
+                logDecodeFailure("Audio", send_err);
+                continue;
+            }
+            drainAudioFrames(ring_head_pts);
+        }
+    }
+
+    void drainAudioFrames(std::optional<double>& ring_head_pts) {
+        while (!stop_requested_) {
+            auto result = audio_decoder_->receiveFrame();
+            if (result.isErr()) return;
+            auto received = std::move(result).unwrap();
+            if (received.status == ReceivedFrame::Status::NeedInput) return;
+            if (received.status == ReceivedFrame::Status::EndOfStream) return;
+
+            auto& frame = received.frame;
+            if (!std::holds_alternative<AudioSamples>(frame.data)) continue;
+            const AudioSamples& s = std::get<AudioSamples>(frame.data);
+            if (s.nb_samples == 0) continue;
+
+            bool need_reopen = !audio_sink_.isOpen();
+            if (audio_sink_.isOpen()) {
+                if (audio_sink_.sampleRate() != static_cast<int>(s.format.sample_rate) ||
+                    audio_sink_.channels() != static_cast<int>(s.format.channels)) {
+                    need_reopen = true;
+                }
+            }
+
+            if (need_reopen) {
+                const size_t bps = getBytesPerSample(s.format.sample_format);
+                if (!audio_sink_.open(
+                        detail::toSdlFormat(s.format.sample_format),
+                        int(s.format.channels),
+                        int(s.format.sample_rate),
+                        bps, &clock_)) {
+                    SDL_Log("[Player] Audio sink failed to open (%u Hz, %u channels); "
+                            "continuing without sound",
+                            s.format.sample_rate, s.format.channels);
+                    continue;
+                }
+                ring_head_pts.reset();
+                SDL_Log("[Player] Audio sink opened/re-opened: %u Hz, %u channels", s.format.sample_rate, s.format.channels);
+            }
+
+            const double pts_sec = static_cast<double>(frame.pts) *
+                                   audio_time_base_.num / audio_time_base_.den;
+            if (!ring_head_pts) ring_head_pts = pts_sec;
+
+            auto pcm = detail::normaliseBits(
+                detail::interleave(s), s.format.bits_per_sample);
+
+            // Push PCM to the sink.  The sink's own ringbuffer provides
+            // back-pressure; check stop_requested_ between partial writes.
+            size_t written = 0;
+            while (written < pcm.size() && !stop_requested_) {
+                written += audio_sink_.pushPcm(
+                    pcm.data() + written, pcm.size() - written);
+                if (written < pcm.size())
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+
+            // Start the clock at the *head* of the ring buffer, not at the
+            // frame we just queued. The sink primes ~0.6 s of audio before it
+            // unpauses, so anchoring on the newest frame put the master clock
+            // that far ahead of what was actually audible and left every video
+            // frame permanently "late" — the picture froze while sound played.
+            audio_sink_.tickBuffering(*ring_head_pts);
         }
     }
 
@@ -1200,17 +1290,30 @@ private:
             auto maybe_pkt = video_packet_queue_.blockingPop();
             if (!maybe_pkt) break; // aborted
 
-            const OMError send_err = maybe_pkt->bytes.empty()
-                ? video_decoder_->sendEndOfStream()
-                : video_decoder_->sendPacket(*maybe_pkt);
-            if (send_err != OM_SUCCESS) continue;
+            const bool eos = maybe_pkt->bytes.empty();
+            OMError send_err = sendToDecoder(*video_decoder_, *maybe_pkt, eos);
+            if (send_err == OM_CODEC_NEED_MORE_DATA) {
+                if (!drainVideoFrames()) return;
+                send_err = sendToDecoder(*video_decoder_, *maybe_pkt, eos);
+            }
+            if (send_err != OM_SUCCESS) {
+                logDecodeFailure("Video", send_err);
+                continue;
+            }
+            if (!drainVideoFrames()) return;
+        }
+    }
 
+    // Returns false only when the frame queue was aborted, i.e. the thread
+    // should exit. Reaching end-of-stream just stops the drain: the thread goes
+    // back to waiting for packets so a later seek can revive it.
+    auto drainVideoFrames() -> bool {
             while (!stop_requested_) {
                 auto result = video_decoder_->receiveFrame();
-                if (result.isErr()) break;
+                if (result.isErr()) return true;
                 auto received = std::move(result).unwrap();
-                if (received.status == ReceivedFrame::Status::NeedInput) break;
-                if (received.status == ReceivedFrame::Status::EndOfStream) return;
+                if (received.status == ReceivedFrame::Status::NeedInput) return true;
+                if (received.status == ReceivedFrame::Status::EndOfStream) return true;
 
                 auto& frame = received.frame;
                 if (!std::holds_alternative<Picture>(frame.data)) continue;
@@ -1225,6 +1328,8 @@ private:
                 vf.pts_sec = static_cast<double>(vf.pts) *
                              video_time_base_.num / video_time_base_.den;
                 vf.bits_per_component = detail::getBitsPerComponent(pic.format);
+                vf.color_space = pic.color_space;
+                vf.color_range = pic.color_range;
 
                 if (std::holds_alternative<std::shared_ptr<HardwarePicture>>(pic.buffer)) {
                   const auto& hw = std::get<std::shared_ptr<HardwarePicture>>(pic.buffer);
@@ -1234,12 +1339,13 @@ private:
 
                     // For this example's software renderer, we MUST resolve/download to host memory.
                     // In a real player, we'd keep it on GPU and use a Vulkan renderer.
-                    vf.y_stride = (pic.width + 15) & ~15;
-                    vf.u_stride = (pic.width + 15) & ~15; // Interleaved UV pitch for NV12.
+                    const int vk_bpp = (vf.bits_per_component > 8 ? 2 : 1);
+                    vf.y_stride = (pic.width * vk_bpp + 15) & ~15;
+                    vf.u_stride = (pic.width * vk_bpp + 15) & ~15; // Interleaved UV pitch for NV12.
                     vf.v_stride = 0;
 
-                    vf.y_plane.resize(vf.y_stride * pic.height);
-                    vf.u_plane.resize(vf.u_stride * ((pic.height + 1) / 2));
+                    vf.y_plane.resize(size_t(vf.y_stride) * pic.height);
+                    vf.u_plane.resize(size_t(vf.u_stride) * ((pic.height + 1) / 2));
 
                     if (!hw_device_ || hw_device_->type != HWDeviceType::VULKAN)
                         continue;
@@ -1253,11 +1359,12 @@ private:
                   } else if (hw && hw->getType() == HWDeviceType::CUDA) {
 #ifdef _WIN32
                     auto c_pic = std::static_pointer_cast<openmedia::CudaHardwarePicture>(std::get<std::shared_ptr<openmedia::HardwarePicture>>(pic.buffer));
-                    vf.y_stride = (pic.width + 15) & ~15;
-                    vf.u_stride = (pic.width + 15) & ~15;
+                    const int cu_bpp = (vf.bits_per_component > 8 ? 2 : 1);
+                    vf.y_stride = (pic.width * cu_bpp + 15) & ~15;
+                    vf.u_stride = (pic.width * cu_bpp + 15) & ~15;
                     vf.v_stride = 0;
-                    vf.y_plane.resize(vf.y_stride * pic.height);
-                    vf.u_plane.resize(vf.u_stride * ((pic.height + 1) / 2));
+                    vf.y_plane.resize(size_t(vf.y_stride) * pic.height);
+                    vf.u_plane.resize(size_t(vf.u_stride) * ((pic.height + 1) / 2));
 
                     HWCudaContext_copyToHost(static_cast<OMCudaContext*>(hw_device_->context),
                                              c_pic->getOMPicture(),
@@ -1306,77 +1413,54 @@ private:
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
-                if (!video_frame_queue_.blockingPush(std::move(vf))) return;
+                if (!video_frame_queue_.blockingPush(std::move(vf))) return false;
             }
-            
-            // For hardware decoders like VideoToolbox, we might need to flush 
-            // periodically or ensure asynchronous frames are pushed out.
-            if (video_decoder_->getInfo() && video_decoder_->getInfo()->media_type == OM_MEDIA_VIDEO) {
-                // Potential flush here if needed, but blockingPop/decode should be enough 
-                // if the decoder doesn't have internal delay beyond one frame.
-            }
-            
-            // For hardware decoders like VideoToolbox, we might need to flush 
-            // periodically or ensure asynchronous frames are pushed out.
-            if (video_decoder_->getInfo() && video_decoder_->getInfo()->media_type == OM_MEDIA_VIDEO) {
-                // Potential flush here if needed, but blockingPop/decode should be enough 
-                // if the decoder doesn't have internal delay beyond one frame.
-            }
-        }
+        return true;
+    }
+
+    static auto sendToDecoder(Decoder& decoder, const Packet& packet, bool eos) -> OMError {
+        return eos ? decoder.sendEndOfStream() : decoder.sendPacket(packet);
+    }
+
+    // Decode failures used to be swallowed by a bare `continue`, so a stream
+    // that stopped producing pictures looked identical to one that was simply
+    // slow. Report each distinct error once per stream.
+    void logDecodeFailure(const char* what, OMError err) {
+        auto& last = (std::string_view(what) == "Video") ? last_video_error_ : last_audio_error_;
+        if (last == err) return;
+        last = err;
+        SDL_Log("[Player] %s decode failed: %s (%d)", what, detail::describeError(err), int(err));
     }
 
     // -----------------------------------------------------------------------
     // Seek — called from demux thread only (no cross-thread decoder access)
     // -----------------------------------------------------------------------
     void doSeek(float progress) {
-        // 1. Abort decoder threads so they drain immediately.
-        audio_packet_queue_.abort();
-        video_packet_queue_.abort();
-        video_frame_queue_.abort();
+        // 1. Bring every worker down. Doing this from the main thread (rather
+        //    than from the demux thread, as before) means stop() and doSeek()
+        //    never race to join the same std::thread.
+        stopThreads();
 
-        // 2. Flush codec internal state.
+        // 2. Flush codec and sink state while nothing else touches them.
         audio_sink_.pause();
         audio_sink_.clearBuffer();
         if (audio_decoder_) audio_decoder_->flush();
         if (video_decoder_) video_decoder_->flush();
 
-        // 3. Reset queues for reuse.
-        audio_packet_queue_.reset();
-        video_packet_queue_.reset();
-        video_frame_queue_.reset();
-        video_drain_sent_ = false;
-
-        // 4. Seek the demuxer.
+        // 3. Seek the demuxer.
         const double target_secs = static_cast<double>(progress) * total_duration_secs_;
-        
-        const int64_t target_us = static_cast<int64_t>(target_secs * 1e9) / 1000;
+        const int64_t target_us = static_cast<int64_t>(target_secs * 1'000'000.0);
 
-        if (demuxer_->seek(-1, target_us) == OM_SUCCESS)
-            clock_.reset(target_secs);
-
-        if (audio_decoder_thread_.joinable()) {
-          audio_decoder_thread_.join();
+        if (const OMError err = demuxer_->seek(-1, target_us); err != OM_SUCCESS) {
+            SDL_Log("[Player] Seek to %.2fs failed: %s (%d)",
+                    target_secs, detail::describeError(err), int(err));
         }
-        if (video_decoder_thread_.joinable()) {
-          video_decoder_thread_.join();
-        }
+        clock_.setMode(AVClock::Mode::WALL);
+        clock_.reset(target_secs);
+        video_renderer_.resetSync();
 
-        // 5. Re-launch decoder threads (they had exited after abort).
-        if (has_audio_)
-            audio_decoder_thread_ = std::thread([this] { audioDecodeLoop(); });
-        if (has_video_)
-            video_decoder_thread_ = std::thread([this] { videoDecodeLoop(); });
-
-        // 6. Prime the pipeline by pushing a few packets before returning.
-        for (int i = 0; i < 12 && !stop_requested_; ++i) {
-            auto res = demuxer_->readPacket();
-            if (res.isErr()) break;
-            Packet pkt = res.unwrap();
-            if (pkt.stream_index == audio_stream_index_)
-                audio_packet_queue_.blockingPush(std::move(pkt));
-            else if (pkt.stream_index == video_stream_index_)
-                video_packet_queue_.blockingPush(std::move(pkt));
-        }
+        // 4. Back up and running; startThreads() clears the EOF/drain flags.
+        startThreads();
     }
 
     // -----------------------------------------------------------------------

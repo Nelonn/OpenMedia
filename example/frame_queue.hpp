@@ -25,6 +25,12 @@ struct VideoFrame {
     double   pts_sec  = 0.0;    // pre-computed seconds (set by decoder)
     uint8_t  bits_per_component = 8; // 8, 10, 12, or 16
 
+    // Colorimetry of the decoded picture.  The renderer needs this to pick the
+    // right YUV→RGB matrix; without it SDL falls back to BT.601 full range,
+    // which visibly washes out ordinary BT.709 limited-range video.
+    OMColorSpace color_space = OM_COLOR_SPACE_UNKNOWN;
+    OMColorRange color_range = OM_COLOR_RANGE_UNSPECIFIED;
+
     std::shared_ptr<openmedia::HardwarePicture> hw_picture;
 };
 

@@ -9,7 +9,7 @@ add_executable(OpenMediaExample WIN32
         ui.hpp
         video_renderer.hpp
 )
-target_link_libraries(OpenMediaExample PRIVATE SDL3::SDL3 OpenMedia::OpenMedia)
+target_link_libraries(OpenMediaExample PRIVATE SDL3::SDL3 OpenMedia::OpenMedia libyuv::libyuv)
 if (WIN32 OR LINUX)
     target_link_libraries(OpenMediaExample PRIVATE Vulkan::Headers)
 endif ()
