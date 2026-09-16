@@ -14,7 +14,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
       vkGetInstanceProcAddr(init.proc) {
   
 #define GET_INST_FN(name) name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(vk_instance, #name))
-#define GET_DEV_FN(name) name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(vk_device, #name))
+#define GET_DEV_FN(name) do { name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(vk_device, #name)); if (!name && vkGetInstanceProcAddr && vk_instance) name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(vk_instance, #name)); } while(0)
 
   GET_INST_FN(vkGetDeviceProcAddr);
   GET_INST_FN(vkGetPhysicalDeviceMemoryProperties);
@@ -125,7 +125,10 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   uint32_t dst_family = context->queue_family_index;
   const bool same_family = src_family == dst_family;
 
-  size_t size = (size_t)width * height * 3 / 2;
+  const uint32_t bpp = (src->format == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 ||
+                        src->format == VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16 ||
+                        src->format == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM) ? 2 : 1;
+  size_t size = (size_t)width * height * 3 / 2 * bpp;
   VkBuffer staging_buffer;
   VkDeviceMemory staging_memory;
 
@@ -216,13 +219,12 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   regions[0].bufferOffset = 0;
   regions[0].imageSubresource = {VK_IMAGE_ASPECT_PLANE_0_BIT, 0, src->layer, 1};
   regions[0].imageExtent = {width, height, 1};
-  regions[1].bufferOffset = (size_t)width * height;
+  regions[1].bufferOffset = (size_t)width * height * bpp;
   regions[1].imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, src->layer, 1};
   regions[1].imageExtent = {width / 2, height / 2, 1};
   
   context->vkCmdCopyImageToBuffer(graphics_cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_buffer, 2, regions);
 
-  // 3. Release from graphics queue back to decode
   release_barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
   release_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
   release_barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
@@ -240,7 +242,6 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkWaitForFences(context->vk_device, 1, &fence, VK_TRUE, UINT64_MAX);
   context->vkResetFences(context->vk_device, 1, &fence);
 
-  // 4. Acquire back on decode queue
   context->vkBeginCommandBuffer(decode_cb, &begin_info);
   acquire_barrier = release_barrier;
   acquire_barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
@@ -268,13 +269,13 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   uint8_t* src_ptr = (uint8_t*)data;
   uint8_t* d_y = (uint8_t*)dst_y;
   for (uint32_t i = 0; i < height; ++i) {
-    std::memcpy(d_y + (size_t)i * stride_y, src_ptr + (size_t)i * width, width);
+    memcpy(d_y + (size_t)i * stride_y, src_ptr + (size_t)i * width * bpp, (size_t)width * bpp);
   }
   
-  uint8_t* src_uv = src_ptr + (size_t)width * height;
+  uint8_t* src_uv = src_ptr + (size_t)width * height * bpp;
   uint8_t* d_uv = (uint8_t*)dst_uv;
   for (uint32_t i = 0; i < height / 2; ++i) {
-    std::memcpy(d_uv + (size_t)i * stride_uv, src_uv + (size_t)i * width, width);
+    memcpy(d_uv + (size_t)i * stride_uv, src_uv + (size_t)i * width * bpp, (size_t)width * bpp);
   }
 
   context->vkUnmapMemory(context->vk_device, staging_memory);

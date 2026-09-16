@@ -178,6 +178,7 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #if defined(OPENMEDIA_DX11_VIDEO)
   registry->registerCodec(&CODEC_DX11_H264);
   registry->registerCodec(&CODEC_DX11_H265);
+  registry->registerCodec(&CODEC_DX11_AV1);
   registry->registerCodec(&CODEC_DX11_ENC_H264);
 #endif
 
@@ -209,8 +210,8 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
 #if defined(OPENMEDIA_VULKAN)
   registry->registerCodec(&CODEC_VULKAN_H264);
   registry->registerCodec(&CODEC_VULKAN_H265);
-  //registry->registerCodec(&CODEC_VULKAN_AV1);
-  //registry->registerCodec(&CODEC_VULKAN_VP9);
+  registry->registerCodec(&CODEC_VULKAN_AV1);
+  registry->registerCodec(&CODEC_VULKAN_VP9);
 #endif
 
 #if defined(OPENMEDIA_NVIDIA)

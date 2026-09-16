@@ -1036,14 +1036,10 @@ private:
     pp.cdef.damping = h.cdef.damping >= 3 ? (h.cdef.damping - 3) : 0;
     pp.cdef.bits = h.cdef.bits;
     for (uint32_t i = 0; i < 8; ++i) {
-      // The parser stores the decoded secondary strength, where the coded
-      // value 3 becomes 4. DXVA wants the two-bit coded form back.
-      uint8_t y_sec = h.cdef.y_sec_strength[i];
-      uint8_t uv_sec = h.cdef.uv_sec_strength[i];
       pp.cdef.y_strengths[i].primary = h.cdef.y_pri_strength[i];
-      pp.cdef.y_strengths[i].secondary = (y_sec == 4) ? 3 : y_sec;
+      pp.cdef.y_strengths[i].secondary = h.cdef.y_sec_strength[i];
       pp.cdef.uv_strengths[i].primary = h.cdef.uv_pri_strength[i];
-      pp.cdef.uv_strengths[i].secondary = (uv_sec == 4) ? 3 : uv_sec;
+      pp.cdef.uv_strengths[i].secondary = h.cdef.uv_sec_strength[i];
     }
 
     pp.interp_filter = h.interpolation_filter;

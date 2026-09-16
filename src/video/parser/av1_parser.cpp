@@ -888,13 +888,15 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
       cdef.damping = static_cast<uint8_t>(r.f(2)) + 3;
       cdef.bits = static_cast<uint8_t>(r.f(2));
       for (uint32_t i = 0; i < (1u << cdef.bits); ++i) {
+        // These are kept as the coded syntax elements (0..3). The spec turns a
+        // coded 3 into a strength of 4, but that is a decoder-internal
+        // derivation: DXVA and the Vulkan StdVideo structures both want the
+        // two-bit value straight from the bitstream.
         cdef.y_pri_strength[i] = static_cast<uint8_t>(r.f(4));
         cdef.y_sec_strength[i] = static_cast<uint8_t>(r.f(2));
-        if (cdef.y_sec_strength[i] == 3) cdef.y_sec_strength[i] += 1;
         if (cc.num_planes > 1) {
           cdef.uv_pri_strength[i] = static_cast<uint8_t>(r.f(4));
           cdef.uv_sec_strength[i] = static_cast<uint8_t>(r.f(2));
-          if (cdef.uv_sec_strength[i] == 3) cdef.uv_sec_strength[i] += 1;
         }
       }
     }
