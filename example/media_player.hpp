@@ -1340,12 +1340,15 @@ private:
                     // For this example's software renderer, we MUST resolve/download to host memory.
                     // In a real player, we'd keep it on GPU and use a Vulkan renderer.
                     const int vk_bpp = (vf.bits_per_component > 8 ? 2 : 1);
+                    // Chroma geometry comes from the picture format: 4:2:2 and
+                    // 4:4:4 surfaces have taller and wider chroma than 4:2:0.
+                    const auto vk_chroma = pic.getPlaneDimensions(1);
                     vf.y_stride = (pic.width * vk_bpp + 15) & ~15;
-                    vf.u_stride = (pic.width * vk_bpp + 15) & ~15; // Interleaved UV pitch for NV12.
+                    vf.u_stride = (vk_chroma.first * 2 * vk_bpp + 15) & ~15;
                     vf.v_stride = 0;
 
                     vf.y_plane.resize(size_t(vf.y_stride) * pic.height);
-                    vf.u_plane.resize(size_t(vf.u_stride) * ((pic.height + 1) / 2));
+                    vf.u_plane.resize(size_t(vf.u_stride) * vk_chroma.second);
 
                     if (!hw_device_ || hw_device_->type != HWDeviceType::VULKAN)
                         continue;
@@ -1413,6 +1416,7 @@ private:
 
                 // blockingPush sleeps on a CV until space is available or
                 // abort() is called — no spin, no arbitrary sleep.
+
                 if (!video_frame_queue_.blockingPush(std::move(vf))) return false;
             }
         return true;

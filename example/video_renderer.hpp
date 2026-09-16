@@ -329,6 +329,23 @@ private:
                    vf.y_plane.data(), vf.y_stride,
                    dst, dst_stride, yuv, w, h) == 0;
 
+      // Semi-planar 4:2:2 and 4:4:4, which hardware decoders hand back for
+      // those chroma formats. libyuv has no NV16/NV24 entry point, so split the
+      // interleaved chroma and reuse the planar kernels.
+      case OM_FORMAT_NV16:
+      case OM_FORMAT_NV24: {
+        const bool full_width = (format == OM_FORMAT_NV24);
+        const int cw = full_width ? w : (w + 1) / 2;
+        splitChroma(vf.u_plane, vf.u_stride, cw, h);
+        return (full_width
+                    ? libyuv::I444ToARGBMatrix(vf.y_plane.data(), vf.y_stride,
+                                               split_u_.data(), cw, split_v_.data(), cw,
+                                               dst, dst_stride, yuv, w, h)
+                    : libyuv::I422ToARGBMatrix(vf.y_plane.data(), vf.y_stride,
+                                               split_u_.data(), cw, split_v_.data(), cw,
+                                               dst, dst_stride, yuv, w, h)) == 0;
+      }
+
       // ---- 10/12/16-bit semi-planar (valid bits in the MSBs) ----
       case OM_FORMAT_P010:
       case OM_FORMAT_P012:
@@ -412,6 +429,22 @@ private:
                                     yuv, w, h) == 0;
   }
 
+  // Splits interleaved UV into two tightly packed planes.
+  void splitChroma(const std::vector<uint8_t>& src, int src_stride, int cw, int ch) {
+    split_u_.assign(static_cast<size_t>(cw) * ch, 0);
+    split_v_.assign(static_cast<size_t>(cw) * ch, 0);
+    if (src.empty() || src_stride <= 0) return;
+    for (int row = 0; row < ch; ++row) {
+      const uint8_t* s = src.data() + static_cast<size_t>(row) * src_stride;
+      uint8_t* du = split_u_.data() + static_cast<size_t>(row) * cw;
+      uint8_t* dv = split_v_.data() + static_cast<size_t>(row) * cw;
+      for (int col = 0; col < cw; ++col) {
+        du[col] = s[col * 2 + 0];
+        dv[col] = s[col * 2 + 1];
+      }
+    }
+  }
+
   static void narrowPlane(const std::vector<uint8_t>& src, int src_stride_bytes,
                           std::vector<uint16_t>& dst, int w, int h, int shift) {
     dst.resize(static_cast<size_t>(w) * h);
@@ -458,4 +491,5 @@ private:
   // Scratch for the libyuv conversion path.
   std::vector<uint8_t> argb_;
   std::vector<uint16_t> narrow_y_, narrow_u_, narrow_v_;
+  std::vector<uint8_t> split_u_, split_v_;
 };
