@@ -50,6 +50,8 @@ extern const CodecDescriptor CODEC_VIDEOTOOLBOX_PRORES;
 // Video - DirectX11
 extern const CodecDescriptor CODEC_DX11_H264;
 extern const CodecDescriptor CODEC_DX11_ENC_H264;
+extern const CodecDescriptor CODEC_DX11_ENC_H265;
+extern const CodecDescriptor CODEC_DX11_ENC_AV1;
 extern const CodecDescriptor CODEC_DX11_H265;
 extern const CodecDescriptor CODEC_DX11_AV1;
 extern const CodecDescriptor CODEC_DX11_VP9;
