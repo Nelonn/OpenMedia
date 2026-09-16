@@ -187,6 +187,16 @@ class VulkanDecoder final : public Decoder {
   uint32_t padded_width_ = 0;
   uint32_t padded_height_ = 0;
   uint8_t bit_depth_ = 8;
+  // Chroma format of the stream. Derived from the bitstream, never assumed:
+  // H.26x carry chroma_format_idc in the SPS, AV1 and VP9 carry subsampling
+  // flags in their colour config.
+  uint8_t subsampling_x_ = 1;
+  uint8_t subsampling_y_ = 1;
+  bool mono_chrome_ = false;
+  // VP9 signals its chroma format per frame; remember the last one seen so
+  // initSession() can pick a matching surface format.
+  uint8_t vp9_subsampling_x_ = 1;
+  uint8_t vp9_subsampling_y_ = 1;
   DecoderOptions options_ = {};
 
   OMMasteringDisplayMetadata mastering_display_ = {};
@@ -299,10 +309,11 @@ public:
     bit_depth_ = bit_depth;
     output_format_.width = width;
     output_format_.height = height;
-    output_format_.format = (bit_depth_ == 12) ? OM_FORMAT_P012 : ((bit_depth_ == 10) ? OM_FORMAT_P010 : OM_FORMAT_NV12);
+    resolveChromaFormat();
+    output_format_.format = pickOutputPixelFormat();
 
     video_profile_ = {VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
-    video_profile_.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+    video_profile_.chromaSubsampling = chromaSubsamplingFlag();
     if (bit_depth_ == 10) {
       video_profile_.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
       video_profile_.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
@@ -343,6 +354,12 @@ public:
     else if (codec_id_ == OM_CODEC_VP9) decode_caps.pNext = &vp9_caps;
 
     if (VK(vkGetPhysicalDeviceVideoCapabilitiesKHR)(hw_context_->vk_physical_device, &video_profile_, &video_caps) != VK_SUCCESS) {
+      // A profile the driver has no support for at all. The usual cause is a
+      // chroma format the hardware cannot decode: 4:2:2 and 4:4:4 decode is
+      // absent from most Vulkan Video implementations. Say so rather than
+      // reporting a generic acceleration failure.
+      if (video_profile_.chromaSubsampling != VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
+        return OM_CODEC_NOT_SUPPORTED;
       return OM_CODEC_HWACCEL_FAILED;
     }
 
@@ -368,15 +385,21 @@ public:
     }
 
     VkVideoProfileListInfoKHR profile_list = {VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR, nullptr, 1, &video_profile_};
-    if (bit_depth_ == 10) {
-      dpb_format_ = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
-    } else if (bit_depth_ == 12) {
-      dpb_format_ = VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16;
+
+    VkImageUsageFlags dpb_usage = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+    if (coincide_supported_)
+      dpb_usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    dpb_format_ = pickVideoFormat(dpb_usage, profile_list);
+    if (dpb_format_ == VK_FORMAT_UNDEFINED) return OM_CODEC_NOT_SUPPORTED;
+
+    if (coincide_supported_) {
+      out_format_ = dpb_format_;
     } else {
-      dpb_format_ = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+      out_format_ = pickVideoFormat(VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                    profile_list);
+      if (out_format_ == VK_FORMAT_UNDEFINED) return OM_CODEC_NOT_SUPPORTED;
     }
     dpb_tiling_ = VK_IMAGE_TILING_OPTIMAL;
-    out_format_ = dpb_format_;
     out_tiling_ = dpb_tiling_;
 
     dpb_slot_count_ = MAX_DPB_SLOTS + 1;
@@ -840,8 +863,12 @@ public:
       std::vector<Frame> frames;
       for (const auto& parsed : parsed_frames) {
         if (!parsed.header.valid) continue;
-        if (parsed.header.bit_depth != bit_depth_ || !video_session_) {
+        if (parsed.header.bit_depth != bit_depth_ ||
+            parsed.header.subsampling_x != vp9_subsampling_x_ ||
+            parsed.header.subsampling_y != vp9_subsampling_y_ || !video_session_) {
           bit_depth_ = parsed.header.bit_depth;
+          vp9_subsampling_x_ = parsed.header.subsampling_x;
+          vp9_subsampling_y_ = parsed.header.subsampling_y;
           uint32_t fw = parsed.header.frame_width > 0 ? parsed.header.frame_width : width_;
           uint32_t fh = parsed.header.frame_height > 0 ? parsed.header.frame_height : height_;
           auto err = initSession(fw, fh, bit_depth_);
@@ -925,6 +952,111 @@ public:
   }
 
 private:
+
+  // 4:2:0 -> (1,1), 4:2:2 -> (1,0), 4:4:4 -> (0,0), monochrome -> no chroma.
+  void resolveChromaFormat() {
+    subsampling_x_ = 1;
+    subsampling_y_ = 1;
+    mono_chrome_ = false;
+
+    auto fromChromaFormatIdc = [&](uint32_t idc) {
+      switch (idc) {
+        case 0: mono_chrome_ = true; subsampling_x_ = 1; subsampling_y_ = 1; break;
+        case 2: subsampling_x_ = 1; subsampling_y_ = 0; break;  // 4:2:2
+        case 3: subsampling_x_ = 0; subsampling_y_ = 0; break;  // 4:4:4
+        default: subsampling_x_ = 1; subsampling_y_ = 1; break; // 4:2:0
+      }
+    };
+
+    if (codec_id_ == OM_CODEC_H264 && has_h264_sps_) {
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (!h264_sps_valid_[i]) continue;
+        fromChromaFormatIdc(static_cast<uint32_t>(h264_sps_[i].chroma_format_idc));
+        break;
+      }
+    } else if (codec_id_ == OM_CODEC_H265 && h265_parser_.hasSps()) {
+      for (int i = 0; i < 16; ++i) {
+        const auto& sps = h265_parser_.sps(i);
+        if (!sps.valid) continue;
+        fromChromaFormatIdc(static_cast<uint32_t>(sps.chroma_format_idc));
+        break;
+      }
+    } else if (codec_id_ == OM_CODEC_AV1) {
+      const auto& cc = av1_parser_.sequenceHeader().color_config;
+      if (av1_parser_.sequenceHeader().valid) {
+        mono_chrome_ = cc.mono_chrome;
+        subsampling_x_ = cc.subsampling_x;
+        subsampling_y_ = cc.subsampling_y;
+      }
+    } else if (codec_id_ == OM_CODEC_VP9) {
+      subsampling_x_ = vp9_subsampling_x_;
+      subsampling_y_ = vp9_subsampling_y_;
+    }
+  }
+
+  auto chromaSubsamplingFlag() const -> VkVideoChromaSubsamplingFlagBitsKHR {
+    if (mono_chrome_) return VK_VIDEO_CHROMA_SUBSAMPLING_MONOCHROME_BIT_KHR;
+    if (subsampling_x_ == 0 && subsampling_y_ == 0) return VK_VIDEO_CHROMA_SUBSAMPLING_444_BIT_KHR;
+    if (subsampling_x_ == 1 && subsampling_y_ == 0) return VK_VIDEO_CHROMA_SUBSAMPLING_422_BIT_KHR;
+    return VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+  }
+
+  auto pickOutputPixelFormat() const -> OMPixelFormat {
+    if (mono_chrome_) return bit_depth_ > 8 ? OM_FORMAT_GRAY16 : OM_FORMAT_GRAY8;
+    if (subsampling_x_ == 0 && subsampling_y_ == 0)
+      return bit_depth_ > 8 ? OM_FORMAT_YUV444P16 : OM_FORMAT_NV24;
+    if (subsampling_x_ == 1 && subsampling_y_ == 0)
+      return bit_depth_ > 8 ? OM_FORMAT_YUV422P16 : OM_FORMAT_NV16;
+    if (bit_depth_ == 12) return OM_FORMAT_P012;
+    if (bit_depth_ == 10) return OM_FORMAT_P010;
+    return OM_FORMAT_NV12;
+  }
+
+  // Asks the driver which formats it can actually produce for this profile and
+  // usage instead of assuming a 4:2:0 layout. Returns VK_FORMAT_UNDEFINED when
+  // the combination is unsupported, which is how an unsupported chroma format
+  // surfaces as a clean decoder-open failure.
+  auto pickVideoFormat(VkImageUsageFlags usage, const VkVideoProfileListInfoKHR& profiles) const -> VkFormat {
+    VkPhysicalDeviceVideoFormatInfoKHR info = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR};
+    info.pNext = const_cast<VkVideoProfileListInfoKHR*>(&profiles);
+    info.imageUsage = usage;
+
+    uint32_t count = 0;
+    if (VK(vkGetPhysicalDeviceVideoFormatPropertiesKHR)(hw_context_->vk_physical_device, &info, &count, nullptr) != VK_SUCCESS || count == 0)
+      return VK_FORMAT_UNDEFINED;
+    std::vector<VkVideoFormatPropertiesKHR> props(count, {VK_STRUCTURE_TYPE_VIDEO_FORMAT_PROPERTIES_KHR});
+    if (VK(vkGetPhysicalDeviceVideoFormatPropertiesKHR)(hw_context_->vk_physical_device, &info, &count, props.data()) != VK_SUCCESS)
+      return VK_FORMAT_UNDEFINED;
+
+    // Prefer the layout that matches the stream; otherwise take whatever the
+    // driver offers first, which is always a usable decode target.
+    const VkFormat preferred = preferredVideoFormat();
+    for (const auto& prop : props)
+      if (prop.format == preferred) return prop.format;
+    return props[0].format;
+  }
+
+  auto preferredVideoFormat() const -> VkFormat {
+    if (mono_chrome_) {
+      if (bit_depth_ == 10) return VK_FORMAT_R10X6_UNORM_PACK16;
+      if (bit_depth_ == 12) return VK_FORMAT_R12X4_UNORM_PACK16;
+      return VK_FORMAT_R8_UNORM;
+    }
+    if (subsampling_x_ == 0 && subsampling_y_ == 0) {
+      if (bit_depth_ == 10) return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16;
+      if (bit_depth_ == 12) return VK_FORMAT_G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16;
+      return VK_FORMAT_G8_B8R8_2PLANE_444_UNORM;
+    }
+    if (subsampling_x_ == 1 && subsampling_y_ == 0) {
+      if (bit_depth_ == 10) return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16;
+      if (bit_depth_ == 12) return VK_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16;
+      return VK_FORMAT_G8_B8R8_2PLANE_422_UNORM;
+    }
+    if (bit_depth_ == 10) return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+    if (bit_depth_ == 12) return VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16;
+    return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+  }
+
   void syncH264ParserState() {
     const auto& state = h264_parser_.state();
     std::copy(std::begin(state.sps), std::end(state.sps), std::begin(h264_sps_));

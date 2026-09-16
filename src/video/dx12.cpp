@@ -109,6 +109,9 @@ public:
           padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
           dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 1, 2, 17);
           bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
+          // The D3D12 decode profiles used here are 4:2:0 only; taking a 4:2:2
+          // or 4:4:4 stream would silently produce a wrong picture.
+          if (h264_.sps[i].chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
           break;
         }
       }
@@ -125,6 +128,7 @@ public:
           padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
           dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(s.sps_max_dec_pic_buffering_minus1[s.max_sub_layers_minus1] + 1), 2, 17);
           bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
+          if (s.chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
           break;
         }
       }
