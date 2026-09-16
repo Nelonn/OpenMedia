@@ -786,16 +786,26 @@ public:
       }
       const auto& hdr = av1_parser_.hdrMetadata();
       if (hdr.has_mdcv) {
-        mastering_display_.display_primaries[0][0] = hdr.primary_chromaticity_x[0];
-        mastering_display_.display_primaries[0][1] = hdr.primary_chromaticity_y[0];
-        mastering_display_.display_primaries[1][0] = hdr.primary_chromaticity_x[1];
-        mastering_display_.display_primaries[1][1] = hdr.primary_chromaticity_y[1];
-        mastering_display_.display_primaries[2][0] = hdr.primary_chromaticity_x[2];
-        mastering_display_.display_primaries[2][1] = hdr.primary_chromaticity_y[2];
-        mastering_display_.white_point[0] = hdr.white_point_chromaticity_x;
-        mastering_display_.white_point[1] = hdr.white_point_chromaticity_y;
-        mastering_display_.max_display_mastering_luminance = hdr.luminance_max;
-        mastering_display_.min_display_mastering_luminance = hdr.luminance_min;
+        // OMMasteringDisplayMetadata is defined in the H.26x SEI convention:
+        // chromaticity in 0.00002 units, luminance in 0.0001 units, primaries
+        // ordered green-blue-red. AV1 codes the same information as 0.16 fixed
+        // point with 24.8 / 18.14 luminance and red-green-blue order, so copying
+        // it across verbatim reported a 1000 nit master as 25.6 nits.
+        auto av1_chroma = [](uint16_t v) -> uint16_t {
+          return static_cast<uint16_t>((static_cast<uint32_t>(v) * 50000u + 32768u) / 65536u);
+        };
+        const uint32_t rgb_for_sei_index[3] = {1, 2, 0}; // green, blue, red
+        for (uint32_t i = 0; i < 3; ++i) {
+          const uint32_t c = rgb_for_sei_index[i];
+          mastering_display_.display_primaries[i][0] = av1_chroma(hdr.primary_chromaticity_x[c]);
+          mastering_display_.display_primaries[i][1] = av1_chroma(hdr.primary_chromaticity_y[c]);
+        }
+        mastering_display_.white_point[0] = av1_chroma(hdr.white_point_chromaticity_x);
+        mastering_display_.white_point[1] = av1_chroma(hdr.white_point_chromaticity_y);
+        mastering_display_.max_display_mastering_luminance =
+            static_cast<uint32_t>((static_cast<uint64_t>(hdr.luminance_max) * 10000u + 128u) / 256u);
+        mastering_display_.min_display_mastering_luminance =
+            static_cast<uint32_t>((static_cast<uint64_t>(hdr.luminance_min) * 10000u + 8192u) / 16384u);
         mastering_display_.has_value = true;
         output_format_.mastering_display = mastering_display_;
       }

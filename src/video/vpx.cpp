@@ -140,6 +140,24 @@ public:
 };
 
 class VpxEncoder final : public Encoder {
+  // HDR10 static metadata travels in the container for VP9; hold on to it
+  // so getInfo() can pass it to the muxer.
+  OMMasteringDisplayMetadata mastering_display_ = {};
+  OMContentLightLevel content_light_level_ = {};
+  vpx_color_space_t color_space_ = VPX_CS_UNKNOWN;
+  vpx_color_range_t color_range_ = VPX_CR_STUDIO_RANGE;
+
+  static auto toVpxColorSpace(OMColorSpace c) -> vpx_color_space_t {
+    switch (c) {
+      case OM_COLOR_SPACE_BT601:     return VPX_CS_BT_601;
+      case OM_COLOR_SPACE_BT709:     return VPX_CS_BT_709;
+      case OM_COLOR_SPACE_BT2020:    return VPX_CS_BT_2020;
+      case OM_COLOR_SPACE_SMPTE240M: return VPX_CS_SMPTE_240;
+      case OM_COLOR_SPACE_RGB:       return VPX_CS_SRGB;
+      default:                       return VPX_CS_UNKNOWN;
+    }
+  }
+
   vpx_codec_ctx_t ctx_ = {};
   bool initialized_ = false;
   OMCodecId codec_id_;
@@ -202,8 +220,18 @@ public:
       }
     }
 
+    color_space_ = toVpxColorSpace(options.format.video.color_space);
+    color_range_ = (options.format.video.color_range == OM_COLOR_RANGE_FULL)
+                       ? VPX_CR_FULL_RANGE : VPX_CR_STUDIO_RANGE;
+
     if (vpx_codec_enc_init(&ctx_, iface, &cfg, (cfg.g_bit_depth > VPX_BITS_8) ? VPX_CODEC_USE_HIGHBITDEPTH : 0) != VPX_CODEC_OK) {
       return OM_CODEC_OPEN_FAILED;
+    }
+
+    // These are sequence-level and must be set on the codec, not per picture.
+    if (codec_id_ == OM_CODEC_VP9) {
+      vpx_codec_control(&ctx_, VP9E_SET_COLOR_SPACE, static_cast<int>(color_space_));
+      vpx_codec_control(&ctx_, VP9E_SET_COLOR_RANGE, static_cast<int>(color_range_));
     }
 
     cfg_ = cfg;
@@ -213,11 +241,42 @@ public:
   }
 
   auto getInfo() -> EncodingInfo override {
-    return {};
+    EncodingInfo info = {};
+    info.mastering_display = mastering_display_;
+    info.content_light_level = content_light_level_;
+    return info;
+  }
+
+  // Pulls whatever libvpx has ready into packets.
+  auto collect() -> std::vector<Packet> {
+    std::vector<Packet> packets;
+    vpx_codec_iter_t iter = nullptr;
+    const vpx_codec_cx_pkt_t* pkt = nullptr;
+    while ((pkt = vpx_codec_get_cx_data(&ctx_, &iter)) != nullptr) {
+      if (pkt->kind != VPX_CODEC_CX_FRAME_PKT) continue;
+      Packet p;
+      p.allocate(pkt->data.frame.sz);
+      std::memcpy(p.bytes.data(), pkt->data.frame.buf, pkt->data.frame.sz);
+      p.pts = pkt->data.frame.pts;
+      p.dts = pkt->data.frame.pts;
+      p.duration = pkt->data.frame.duration;
+      p.is_keyframe = (pkt->data.frame.flags & VPX_FRAME_IS_KEY) != 0;
+      packets.push_back(std::move(p));
+    }
+    return packets;
   }
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
     if (!initialized_) return Err(OM_CODEC_ENCODE_FAILED);
+
+    // An empty frame drains the encoder.
+    const bool flush = !std::holds_alternative<Picture>(frame.data) ||
+                       std::get<Picture>(frame.data).width == 0;
+    if (flush) {
+      if (vpx_codec_encode(&ctx_, nullptr, 0, 1, 0, VPX_DL_REALTIME) != VPX_CODEC_OK)
+        return Err(OM_CODEC_ENCODE_FAILED);
+      return Ok(collect());
+    }
 
     const auto& pic = std::get<Picture>(frame.data);
     vpx_image_t img = {};
@@ -257,28 +316,21 @@ public:
       default: img.cs = VPX_CS_UNKNOWN; break;
     }
 
+    img.range = (pic.color_range == OM_COLOR_RANGE_FULL) ? VPX_CR_FULL_RANGE
+                                                         : VPX_CR_STUDIO_RANGE;
+
+    // VP9 has no SEI, so HDR10 static metadata lives in the container (the
+    // SmpteSt2086 elements in WebM). Keep what the picture carries so getInfo()
+    // can hand it to the muxer; libvpx itself has nowhere to put it.
+    if (pic.mastering_display.has_value) mastering_display_ = pic.mastering_display;
+    if (pic.content_light_level.has_value) content_light_level_ = pic.content_light_level;
+
     vpx_codec_pts_t pts = frame.pts;
     if (vpx_codec_encode(&ctx_, &img, pts, 1, 0, VPX_DL_REALTIME) != VPX_CODEC_OK) {
       return Err(OM_CODEC_ENCODE_FAILED);
     }
 
-    std::vector<Packet> packets;
-    vpx_codec_iter_t iter = nullptr;
-    const vpx_codec_cx_pkt_t* pkt = nullptr;
-
-    while ((pkt = vpx_codec_get_cx_data(&ctx_, &iter)) != nullptr) {
-      if (pkt->kind == VPX_CODEC_CX_FRAME_PKT) {
-        Packet p;
-        p.allocate(pkt->data.frame.sz);
-        std::memcpy(p.bytes.data(), pkt->data.frame.buf, pkt->data.frame.sz);
-        p.pts = pkt->data.frame.pts;
-        p.dts = pkt->data.frame.pts;
-        p.is_keyframe = (pkt->data.frame.flags & VPX_FRAME_IS_KEY) != 0;
-        packets.push_back(std::move(p));
-      }
-    }
-
-    return Ok(std::move(packets));
+    return Ok(collect());
   }
 
   auto updateBitrate(const RateControlParams& rc) -> OMError override {

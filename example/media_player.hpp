@@ -999,7 +999,41 @@ private:
         return nullptr;
     }
 
+    // The demuxers parse the Dolby Vision configuration box, but nothing here
+    // applies the per-frame RPU metadata. Whether that matters depends entirely
+    // on the profile, so say which case the user is in instead of quietly
+    // showing the base layer and letting them guess.
+    void reportDolbyVision(const Track& track) {
+        if (!track.metadata.getBool(DOLBY_VISION_PRESENT, false)) return;
+
+        const int32_t profile = track.metadata.getInt32(DOLBY_VISION_PROFILE, -1);
+        const int32_t compat = track.metadata.getInt32(DOLBY_VISION_BL_SIGNAL_COMPATIBILITY_ID, 0);
+
+        switch (profile) {
+            case 8:
+                // Base layer is ordinary HDR10 (compatibility id 1) or SDR/HLG,
+                // so it plays correctly, just without the dynamic tone mapping.
+                SDL_Log("[Player] Dolby Vision profile 8 (compat %d): playing the base "
+                        "layer; dynamic metadata is not applied.", compat);
+                break;
+            case 5:
+                SDL_Log("[Player] Dolby Vision profile 5: the base layer is IPT, not "
+                        "BT.2020 PQ. Without the RPU the colours will be wrong.");
+                break;
+            case 4:
+            case 7:
+                SDL_Log("[Player] Dolby Vision profile %d is dual layer; only the base "
+                        "layer is decoded, the enhancement layer is ignored.", profile);
+                break;
+            default:
+                SDL_Log("[Player] Dolby Vision profile %d present; RPU metadata is not "
+                        "applied.", profile);
+                break;
+        }
+    }
+
     void setupVideoDecoder(const Track& track) {
+        reportDolbyVision(track);
         const auto* desc = makeDecoder(track, video_decoder_);
         if (!desc) return;
         clock_.setMode(AVClock::Mode::WALL);

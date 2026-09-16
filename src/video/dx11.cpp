@@ -77,6 +77,9 @@ class DX11Encoder final : public Encoder {
   bool provides_samples_ = false;
   std::vector<uint8_t> extradata_;
   bool parameter_sets_captured_ = false;
+  OMMasteringDisplayMetadata hdr_mastering_display_ = {};
+  OMContentLightLevel hdr_content_light_level_ = {};
+  std::vector<uint8_t> hdr_sei_;
 
   auto setup_device_manager() -> bool {
     ID3D11Device* device = HWD3D11Context_getDevice(hw_context_);
@@ -107,10 +110,14 @@ class DX11Encoder final : public Encoder {
     output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     output_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, map_color_primaries(options.format.video.color_primaries));
     output_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, map_transfer_characteristics(options.format.video.transfer_char));
-    output_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space));
+    output_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space, ten_bit ? 10 : 8));
     output_type->SetUINT32(MF_MT_AVG_BITRATE, target_bitrate(options.rate_control));
-    if (options.format.profile != OM_PROFILE_NONE) {
-      const uint32_t profile = map_profile(options.format.codec_id, options.format.profile);
+    output_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, map_nominal_range(options.format.video.color_range));
+    apply_hdr_metadata(output_type.Get(), options.format.video.mastering_display,
+                       options.format.video.content_light_level);
+    {
+      const uint32_t profile = map_profile(options.format.codec_id, options.format.profile,
+                                           ten_bit ? 10 : 8);
       if (profile != 0) output_type->SetUINT32(MF_MT_MPEG2_PROFILE, profile);
     }
     if (FAILED(encoder_->SetOutputType(0, output_type.Get(), 0))) return false;
@@ -124,7 +131,10 @@ class DX11Encoder final : public Encoder {
     input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     input_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, map_color_primaries(options.format.video.color_primaries));
     input_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, map_transfer_characteristics(options.format.video.transfer_char));
-    input_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space));
+    input_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space, ten_bit ? 10 : 8));
+    input_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, map_nominal_range(options.format.video.color_range));
+    apply_hdr_metadata(input_type.Get(), options.format.video.mastering_display,
+                       options.format.video.content_light_level);
     if (FAILED(encoder_->SetInputType(0, input_type.Get(), 0))) return false;
 
     captureExtradata();
@@ -267,7 +277,7 @@ class DX11Encoder final : public Encoder {
     if (gop > 0) set_u32(CODECAPI_AVEncMPVGOPSize, gop);
   }
 
-  static auto map_profile(OMCodecId codec, OMProfile profile) -> uint32_t {
+  static auto map_profile(OMCodecId codec, OMProfile profile, uint8_t bit_depth) -> uint32_t {
     if (codec == OM_CODEC_H264) {
       switch (profile) {
         case OM_PROFILE_H264_BASELINE: return eAVEncH264VProfile_Base;
@@ -276,34 +286,260 @@ class DX11Encoder final : public Encoder {
         default: return 0;
       }
     }
+    if (codec == OM_CODEC_H265) {
+      // 10-bit HEVC must be signalled as Main10 or the encoder falls back to
+      // Main and silently truncates the input.
+      return (bit_depth > 8) ? static_cast<uint32_t>(eAVEncH265VProfile_Main_420_10)
+                             : static_cast<uint32_t>(eAVEncH265VProfile_Main_420_8);
+    }
     return 0;
   }
 
   static auto map_color_primaries(OMColorPrimaries p) -> uint32_t {
     switch (p) {
-      case OM_PRIMARIES_BT709: return MFVideoPrimaries_BT709;
-      case OM_PRIMARIES_BT2020: return MFVideoPrimaries_BT2020;
-      case OM_PRIMARIES_BT601: return MFVideoPrimaries_SMPTE170M;
-      default: return MFVideoPrimaries_Unknown;
+      case OM_PRIMARIES_BT709:     return MFVideoPrimaries_BT709;
+      case OM_PRIMARIES_BT470M:    return MFVideoPrimaries_BT470_2_SysM;
+      case OM_PRIMARIES_BT470BG:   return MFVideoPrimaries_BT470_2_SysBG;
+      case OM_PRIMARIES_BT601:     return MFVideoPrimaries_SMPTE170M;
+      case OM_PRIMARIES_SMPTE240M: return MFVideoPrimaries_SMPTE240M;
+      case OM_PRIMARIES_BT2020:    return MFVideoPrimaries_BT2020;
+      case OM_PRIMARIES_SMPTE428:  return MFVideoPrimaries_XYZ;
+      case OM_PRIMARIES_SMPTE431:  return MFVideoPrimaries_DCI_P3;
+      case OM_PRIMARIES_SMPTE432:  return MFVideoPrimaries_Display_P3;
+      case OM_PRIMARIES_EBU3213:   return MFVideoPrimaries_EBU3213;
+      // OM_PRIMARIES_FILM has no Media Foundation equivalent.
+      default:                     return MFVideoPrimaries_Unknown;
     }
   }
 
   static auto map_transfer_characteristics(OMTransferCharacteristic t) -> uint32_t {
     switch (t) {
-      case OM_TRANSFER_BT709: return MFVideoTransFunc_709;
-      case OM_TRANSFER_PQ: return 12;  // MFVideoTransFunc_2084
-      case OM_TRANSFER_HLG: return 11; // MFVideoTransFunc_2020
-      default: return MFVideoTransFunc_Unknown;
+      case OM_TRANSFER_BT709:      return MFVideoTransFunc_709;
+      case OM_TRANSFER_BT601:      return MFVideoTransFunc_709; // shares the 709 curve
+      case OM_TRANSFER_SMPTE240M:  return MFVideoTransFunc_240M;
+      case OM_TRANSFER_LINEAR:     return MFVideoTransFunc_10;
+      case OM_TRANSFER_SRGB:       return MFVideoTransFunc_sRGB;
+      case OM_TRANSFER_GAMMA22:    return MFVideoTransFunc_22;
+      case OM_TRANSFER_GAMMA28:    return MFVideoTransFunc_28;
+      case OM_TRANSFER_BT2020_10:
+      case OM_TRANSFER_BT2020_12:  return MFVideoTransFunc_2020;
+      case OM_TRANSFER_PQ:         return MFVideoTransFunc_2084;
+      case OM_TRANSFER_HLG:        return MFVideoTransFunc_HLG;
+      default:                     return MFVideoTransFunc_Unknown;
     }
   }
 
-  static auto map_color_space(OMColorSpace c) -> uint32_t {
-    switch (c) {
-      case OM_COLOR_SPACE_BT709: return MFVideoTransferMatrix_BT709;
-      case OM_COLOR_SPACE_BT2020: return MFVideoTransferMatrix_BT2020_10;
-      case OM_COLOR_SPACE_BT601: return MFVideoTransferMatrix_BT601;
-      default: return MFVideoTransferMatrix_Unknown;
+  static auto map_nominal_range(OMColorRange range) -> uint32_t {
+    switch (range) {
+      case OM_COLOR_RANGE_FULL:    return MFNominalRange_0_255;
+      case OM_COLOR_RANGE_LIMITED: return MFNominalRange_16_235;
+      default:                     return MFNominalRange_Unknown;
     }
+  }
+
+  // HDR10 static metadata. Media Foundation carries ST.2086 mastering display
+  // and CEA-861.3 light levels as media-type attributes; without them the
+  // encoder emits a bitstream that is technically PQ but carries no mastering
+  // information, which players treat as unmastered HDR.
+  static void apply_hdr_metadata(IMFMediaType* type,
+                                 const OMMasteringDisplayMetadata& mastering,
+                                 const OMContentLightLevel& light) {
+    if (mastering.has_value) {
+      const auto& md = mastering;
+      // Ours is in 0.0001 nit units; MF wants nits for the maximum and
+      // 0.0001 nits for the minimum.
+      type->SetUINT32(MF_MT_MAX_MASTERING_LUMINANCE,
+                      md.max_display_mastering_luminance / 10000u);
+      type->SetUINT32(MF_MT_MIN_MASTERING_LUMINANCE,
+                      md.min_display_mastering_luminance);
+    }
+    if (light.has_value) {
+      const auto& cll = light;
+      type->SetUINT32(MF_MT_MAX_LUMINANCE_LEVEL, cll.max_content_light_level);
+      type->SetUINT32(MF_MT_MAX_FRAME_AVERAGE_LUMINANCE_LEVEL,
+                      cll.max_pic_average_light_level);
+    }
+  }
+
+  static auto map_color_space(OMColorSpace c, uint8_t bit_depth) -> uint32_t {
+    switch (c) {
+      case OM_COLOR_SPACE_BT709:      return MFVideoTransferMatrix_BT709;
+      case OM_COLOR_SPACE_BT601:      return MFVideoTransferMatrix_BT601;
+      case OM_COLOR_SPACE_SMPTE240M:  return MFVideoTransferMatrix_SMPTE240M;
+      case OM_COLOR_SPACE_FCC:        return MFVideoTransferMatrix_FCC47;
+      case OM_COLOR_SPACE_YCGCO:      return MFVideoTransferMatrix_YCgCo;
+      case OM_COLOR_SPACE_RGB:        return MFVideoTransferMatrix_Identity;
+      case OM_COLOR_SPACE_CHROMA_DERIVED_NCL: return MFVideoTransferMatrix_Chroma;
+      case OM_COLOR_SPACE_CHROMA_DERIVED_CL:  return MFVideoTransferMatrix_Chroma_const;
+      case OM_COLOR_SPACE_BT2020:
+        // BT.2020 has separate 10- and 12-bit matrices; always claiming the
+        // 10-bit one mis-signals 12-bit content.
+        return (bit_depth >= 12) ? MFVideoTransferMatrix_BT2020_12
+                                 : MFVideoTransferMatrix_BT2020_10;
+      // BT.2020 constant luminance and ICtCp have no Media Foundation value.
+      default:                        return MFVideoTransferMatrix_Unknown;
+    }
+  }
+
+
+  // The encoder MFTs accept the HDR media-type attributes but do not write the
+  // corresponding ST.2086 / CEA-861.3 messages into the elementary stream, so a
+  // standalone .h265 or .obu carries PQ signalling with no mastering data. Build
+  // the messages here and put them in front of every keyframe, which is what
+  // software encoders do and what players expect when there is no container to
+  // carry the metadata.
+  static void appendBE16(std::vector<uint8_t>& out, uint16_t v) {
+    out.push_back(static_cast<uint8_t>(v >> 8));
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+  }
+
+  static void appendBE32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>(v >> 24));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+  }
+
+  // Annex-B payloads must not contain 00 00 00/01/02/03, so re-insert the
+  // emulation prevention byte.
+  static void appendEscaped(std::vector<uint8_t>& out, const std::vector<uint8_t>& raw) {
+    uint32_t zeros = 0;
+    for (uint8_t byte : raw) {
+      if (zeros >= 2 && byte <= 3) {
+        out.push_back(0x03);
+        zeros = 0;
+      }
+      out.push_back(byte);
+      zeros = (byte == 0) ? zeros + 1 : 0;
+    }
+  }
+
+  auto buildHdrSei() const -> std::vector<uint8_t> {
+    std::vector<uint8_t> out;
+    const bool have_md = hdr_mastering_display_.has_value;
+    const bool have_cll = hdr_content_light_level_.has_value;
+    if (!have_md && !have_cll) return out;
+
+    if (codec_id_ == OM_CODEC_AV1) {
+      // AV1 carries these as metadata OBUs rather than SEI.
+      auto emit_obu = [&](uint8_t metadata_type, const std::vector<uint8_t>& body) {
+        std::vector<uint8_t> payload;
+        payload.push_back(metadata_type); // leb128, single byte for 1 and 2
+        payload.insert(payload.end(), body.begin(), body.end());
+        payload.push_back(0x80); // trailing bits
+        out.push_back(0x2A);     // OBU_METADATA, has_size_field
+        size_t size = payload.size();
+        do {                     // leb128 size
+          uint8_t byte = static_cast<uint8_t>(size & 0x7F);
+          size >>= 7;
+          if (size) byte |= 0x80;
+          out.push_back(byte);
+        } while (size);
+        out.insert(out.end(), payload.begin(), payload.end());
+      };
+
+      if (have_cll) {
+        std::vector<uint8_t> body;
+        appendBE16(body, hdr_content_light_level_.max_content_light_level);
+        appendBE16(body, hdr_content_light_level_.max_pic_average_light_level);
+        emit_obu(1, body); // METADATA_TYPE_HDR_CLL
+      }
+      if (have_md) {
+        // AV1 uses a different fixed point to the H.26x SEI, and orders the
+        // primaries red-green-blue where the SEI orders them green-blue-red.
+        // The stored values follow the SEI convention, so convert both.
+        const auto& md = hdr_mastering_display_;
+        auto chroma = [](uint16_t v) -> uint16_t {          // 1/50000 -> 0.16
+          return static_cast<uint16_t>((static_cast<uint32_t>(v) * 65536u + 25000u) / 50000u);
+        };
+        const uint32_t sei_index_for_rgb[3] = {2, 0, 1};    // R, G, B
+
+        std::vector<uint8_t> body;
+        for (uint32_t i = 0; i < 3; ++i) {
+          const uint32_t c = sei_index_for_rgb[i];
+          appendBE16(body, chroma(md.display_primaries[c][0]));
+          appendBE16(body, chroma(md.display_primaries[c][1]));
+        }
+        appendBE16(body, chroma(md.white_point[0]));
+        appendBE16(body, chroma(md.white_point[1]));
+        // luminance_max is 24.8 and luminance_min is 18.14, both from 1/10000.
+        appendBE32(body, static_cast<uint32_t>(
+                             (static_cast<uint64_t>(md.max_display_mastering_luminance) * 256u + 5000u) / 10000u));
+        appendBE32(body, static_cast<uint32_t>(
+                             (static_cast<uint64_t>(md.min_display_mastering_luminance) * 16384u + 5000u) / 10000u));
+        emit_obu(2, body); // METADATA_TYPE_HDR_MDCV
+      }
+      return out;
+    }
+
+    const bool hevc = (codec_id_ == OM_CODEC_H265);
+    auto emit_sei = [&](uint8_t payload_type, const std::vector<uint8_t>& body) {
+      std::vector<uint8_t> rbsp;
+      rbsp.push_back(payload_type);
+      rbsp.push_back(static_cast<uint8_t>(body.size())); // both payloads are < 255
+      rbsp.insert(rbsp.end(), body.begin(), body.end());
+      rbsp.push_back(0x80); // rbsp_trailing_bits
+
+      out.insert(out.end(), {0, 0, 0, 1});
+      if (hevc) {
+        out.push_back(0x4E); // nal_unit_type 39 (PREFIX_SEI), layer 0
+        out.push_back(0x01); // temporal_id_plus1
+      } else {
+        out.push_back(0x06); // nal_unit_type 6 (SEI)
+      }
+      appendEscaped(out, rbsp);
+    };
+
+    if (have_md) {
+      std::vector<uint8_t> body;
+      // Primaries are stored in the order the SEI uses (green, blue, red).
+      for (uint32_t i = 0; i < 3; ++i) {
+        appendBE16(body, hdr_mastering_display_.display_primaries[i][0]);
+        appendBE16(body, hdr_mastering_display_.display_primaries[i][1]);
+      }
+      appendBE16(body, hdr_mastering_display_.white_point[0]);
+      appendBE16(body, hdr_mastering_display_.white_point[1]);
+      appendBE32(body, hdr_mastering_display_.max_display_mastering_luminance);
+      appendBE32(body, hdr_mastering_display_.min_display_mastering_luminance);
+      emit_sei(137, body); // mastering_display_colour_volume
+    }
+    if (have_cll) {
+      std::vector<uint8_t> body;
+      appendBE16(body, hdr_content_light_level_.max_content_light_level);
+      appendBE16(body, hdr_content_light_level_.max_pic_average_light_level);
+      emit_sei(144, body); // content_light_level_info
+    }
+    return out;
+  }
+
+  // Returns the byte offset at which extra OBUs may be inserted: past the
+  // leading temporal delimiter and sequence header, before the frame itself.
+  static auto av1InsertPoint(std::span<const uint8_t> data) -> size_t {
+    size_t pos = 0;
+    size_t insert_at = 0;
+    while (pos < data.size()) {
+      const uint8_t header = data[pos];
+      const uint8_t type = static_cast<uint8_t>((header >> 3) & 0x0F);
+      const bool extension = (header >> 2) & 1;
+      const bool has_size = (header >> 1) & 1;
+      size_t cursor = pos + 1 + (extension ? 1 : 0);
+      if (!has_size || cursor >= data.size()) break;
+      uint64_t payload = 0;
+      size_t leb = 0;
+      for (; leb < 8 && cursor + leb < data.size(); ++leb) {
+        const uint8_t byte = data[cursor + leb];
+        payload |= static_cast<uint64_t>(byte & 0x7F) << (leb * 7);
+        if ((byte & 0x80) == 0) { ++leb; break; }
+      }
+      cursor += leb;
+      if (cursor + payload > data.size()) break;
+      const size_t next = cursor + static_cast<size_t>(payload);
+      // 2 = OBU_TEMPORAL_DELIMITER, 1 = OBU_SEQUENCE_HEADER
+      if (type == 2 || type == 1) insert_at = next;
+      else break;
+      pos = next;
+    }
+    return insert_at;
   }
 
   auto wrap_frame(const Frame& frame) -> ComPtr<IMFSample> {
@@ -414,7 +650,26 @@ class DX11Encoder final : public Encoder {
             captureExtradataFromKeyframe(std::span<const uint8_t>(pkt.bytes.data(), pkt.bytes.size()));
             parameter_sets_captured_ = true;
           }
-          packets.push_back(std::move(pkt));
+          if (pkt.is_keyframe && !hdr_sei_.empty()) {
+            // Annex-B SEI goes in front; AV1 metadata OBUs have to land after
+            // the temporal delimiter and sequence header.
+            const size_t at = (codec_id_ == OM_CODEC_AV1)
+                                  ? av1InsertPoint(std::span<const uint8_t>(pkt.bytes.data(), pkt.bytes.size()))
+                                  : 0;
+            Packet with_hdr;
+            with_hdr.allocate(hdr_sei_.size() + pkt.bytes.size());
+            std::memcpy(with_hdr.bytes.data(), pkt.bytes.data(), at);
+            std::memcpy(with_hdr.bytes.data() + at, hdr_sei_.data(), hdr_sei_.size());
+            std::memcpy(with_hdr.bytes.data() + at + hdr_sei_.size(),
+                        pkt.bytes.data() + at, pkt.bytes.size() - at);
+            with_hdr.pts = pkt.pts;
+            with_hdr.dts = pkt.dts;
+            with_hdr.duration = pkt.duration;
+            with_hdr.is_keyframe = true;
+            packets.push_back(std::move(with_hdr));
+          } else {
+            packets.push_back(std::move(pkt));
+          }
         }
       }
       if (provides_samples_) output.pSample->Release();
@@ -516,6 +771,9 @@ public:
     encoder_.As(&codec_api_);
 
     input_format_ = options.video_format;
+    hdr_mastering_display_ = options.format.video.mastering_display;
+    hdr_content_light_level_ = options.format.video.content_light_level;
+    hdr_sei_ = buildHdrSei();
     apply_rate_control(options);
     if (!setup_types(options)) return OM_CODEC_OPEN_FAILED;
 
@@ -562,8 +820,10 @@ public:
   auto getInfo() -> EncodingInfo override {
     EncodingInfo info = {};
     info.extradata = extradata_;
-    info.mastering_display = input_format_.mastering_display;
-    info.content_light_level = input_format_.content_light_level;
+    // The encoder does not invent HDR metadata; it signals what the caller
+    // supplied, and the muxer needs the same values for the container boxes.
+    info.mastering_display = hdr_mastering_display_;
+    info.content_light_level = hdr_content_light_level_;
     return info;
   }
 
@@ -589,6 +849,7 @@ public:
     codec_api_.Reset();
     device_manager_.Reset();
     extradata_.clear();
+    hdr_sei_.clear();
     parameter_sets_captured_ = false;
     is_async_ = false;
     provides_samples_ = false;
