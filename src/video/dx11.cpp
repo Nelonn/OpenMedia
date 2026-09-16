@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 #include <video/parser/av1_parser.hpp>
+#include <video/parser/vp9_parser.hpp>
 #include <video/parser/h265_parser.hpp>
 
 #include <mfapi.h>
@@ -326,6 +327,14 @@ class DX11Decoder final : public Decoder {
   dx_h264::State h264_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
   std::unique_ptr<video_parser::AV1ObuParser> av1_;
+  std::unique_ptr<video_parser::VP9FrameParser> vp9_;
+  // Maps each VP9 reference slot (0..7) to the DPB texture index holding it.
+  int32_t vp9_ref_slot_[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  // libvpx only lets the decoder reuse the previous frame's motion vectors
+  // when the geometry is unchanged, so track what the last frame looked like.
+  uint32_t vp9_last_width_ = 0;
+  uint32_t vp9_last_height_ = 0;
+  bool vp9_last_show_frame_ = false;
   // Maps each AV1 reference slot (0..7) to the DPB texture index holding it.
   int32_t av1_ref_slot_[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
   dx_h265::PocState h265_poc_;
@@ -348,7 +357,7 @@ public:
     release();
     codec_id_ = options.format.codec_id;
     if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 &&
-        codec_id_ != OM_CODEC_AV1) return OM_CODEC_NOT_SUPPORTED;
+        codec_id_ != OM_CODEC_AV1 && codec_id_ != OM_CODEC_VP9) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
     if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
@@ -368,6 +377,14 @@ public:
           break;
         }
       }
+    } else if (codec_id_ == OM_CODEC_VP9) {
+      vp9_ = std::make_unique<video_parser::VP9FrameParser>();
+      // VP9 carries no out-of-band configuration; everything of interest is in
+      // the first frame's uncompressed header.
+      bit_depth = static_cast<uint8_t>(options.format.video.format == OM_FORMAT_P010 ? 10 : 8);
+      padded_width_ = dx_h264::alignUp(width_, 64u);
+      padded_height_ = dx_h264::alignUp(height_, 64u);
+      dpb_slot_count_ = 9; // 8 reference slots plus the frame being decoded
     } else if (codec_id_ == OM_CODEC_AV1) {
       av1_ = std::make_unique<video_parser::AV1ObuParser>();
       // The AV1CodecConfigurationRecord prefixes the config OBUs with four
@@ -483,6 +500,7 @@ public:
     if (codec_id_ == OM_CODEC_H264) return decodeH264(packet);
     if (codec_id_ == OM_CODEC_H265) return decodeH265(packet);
     if (codec_id_ == OM_CODEC_AV1) return decodeAV1(packet);
+    if (codec_id_ == OM_CODEC_VP9) return decodeVP9(packet);
     return Err(OM_CODEC_NOT_SUPPORTED);
   }
 
@@ -497,6 +515,11 @@ public:
     h265_poc_.reset();
     if (av1_) av1_->reset();
     for (auto& r : av1_ref_slot_) r = -1;
+    if (vp9_) vp9_->reset();
+    for (auto& r : vp9_ref_slot_) r = -1;
+    vp9_last_width_ = 0;
+    vp9_last_height_ = 0;
+    vp9_last_show_frame_ = false;
   }
 
 private:
@@ -655,6 +678,9 @@ private:
     } else if (codec_id_ == OM_CODEC_AV1) {
       // Only Profile0 (4:2:0, 8/10-bit) is exposed by current DXVA drivers.
       target_profile = D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0;
+    } else if (codec_id_ == OM_CODEC_VP9) {
+      target_profile = (bit_depth > 8) ? D3D11_DECODER_PROFILE_VP9_VLD_10BIT_PROFILE2
+                                       : D3D11_DECODER_PROFILE_VP9_VLD_PROFILE0;
     } else {
       target_profile = (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10
                                        : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
@@ -686,7 +712,8 @@ private:
       if (config.guidConfigBitstreamEncryption == DXVA_NO_ENCRYPT &&
           config.guidConfigMBcontrolEncryption == DXVA_NO_ENCRYPT &&
           config.guidConfigResidDiffEncryption == DXVA_NO_ENCRYPT &&
-          (codec_id_ == OM_CODEC_AV1 || config.ConfigBitstreamRaw == expected_raw)) {
+          (codec_id_ == OM_CODEC_AV1 || codec_id_ == OM_CODEC_VP9 ||
+           config.ConfigBitstreamRaw == expected_raw)) {
         decoder_config_ = config;
         found_config = true;
         break;
@@ -1205,6 +1232,195 @@ private:
     return Ok(std::move(output));
   }
 
+
+  auto pickVP9Slot() const -> uint32_t {
+    bool in_use[32] = {};
+    for (int32_t r : vp9_ref_slot_)
+      if (r >= 0 && r < static_cast<int32_t>(dpb_slot_count_)) in_use[r] = true;
+    for (uint32_t i = 0; i < dpb_slot_count_; ++i)
+      if (!in_use[i]) return i;
+    return 0;
+  }
+
+  void fillVP9PicParams(const video_parser::VP9ParsedFrame& parsed, uint32_t slot,
+                        DXVA_PicParams_VP9& pp) {
+    const auto& h = parsed.header;
+
+    pp.CurrPic.Index7Bits = static_cast<UCHAR>(slot);
+    pp.profile = h.profile;
+
+    pp.frame_type = h.frame_type;
+    pp.show_frame = h.show_frame;
+    pp.error_resilient_mode = h.error_resilient_mode;
+    pp.subsampling_x = h.subsampling_x;
+    pp.subsampling_y = h.subsampling_y;
+    pp.extra_plane = 0;
+    pp.refresh_frame_context = h.refresh_frame_context;
+    pp.frame_parallel_decoding_mode = h.frame_parallel_decoding_mode;
+    pp.intra_only = h.intra_only;
+    pp.frame_context_idx = h.frame_context_idx;
+    pp.reset_frame_context = h.reset_frame_context;
+    pp.allow_high_precision_mv = h.allow_high_precision_mv;
+
+    pp.width = h.frame_width;
+    pp.height = h.frame_height;
+    pp.BitDepthMinus8Luma = static_cast<UCHAR>(h.bit_depth - 8);
+    pp.BitDepthMinus8Chroma = static_cast<UCHAR>(h.bit_depth - 8);
+    pp.interp_filter = h.interpolation_filter;
+
+    for (uint32_t i = 0; i < 8; ++i) {
+      pp.ref_frame_map[i].bPicEntry =
+          vp9_ref_slot_[i] >= 0 ? static_cast<UCHAR>(vp9_ref_slot_[i]) : 0xFF;
+      const auto& ref = vp9_->refSlot(i);
+      pp.ref_frame_coded_width[i] = ref.width;
+      pp.ref_frame_coded_height[i] = ref.height;
+    }
+    for (uint32_t i = 0; i < 3; ++i) {
+      const uint8_t map_idx = h.ref_frame_idx[i];
+      pp.frame_refs[i].bPicEntry =
+          (map_idx < 8 && vp9_ref_slot_[map_idx] >= 0)
+              ? static_cast<UCHAR>(vp9_ref_slot_[map_idx]) : 0xFF;
+    }
+    for (uint32_t i = 0; i < 4; ++i)
+      pp.ref_frame_sign_bias[i] = static_cast<CHAR>(h.ref_frame_sign_bias[i]);
+
+    pp.filter_level = static_cast<CHAR>(h.loop_filter.level);
+    pp.sharpness_level = static_cast<CHAR>(h.loop_filter.sharpness);
+    pp.mode_ref_delta_enabled = h.loop_filter.delta_enabled;
+    pp.mode_ref_delta_update = h.loop_filter.delta_update;
+    // Mirrors libvpx: the previous frame's motion vectors may only be reused
+    // when the geometry matches and nothing reset the context.
+    pp.use_prev_in_find_mv_refs =
+        vp9_last_width_ == h.frame_width && vp9_last_height_ == h.frame_height &&
+        !h.error_resilient_mode && !h.intra_only && vp9_last_show_frame_;
+
+    for (uint32_t i = 0; i < 4; ++i) pp.ref_deltas[i] = h.loop_filter.ref_deltas[i];
+    for (uint32_t i = 0; i < 2; ++i) pp.mode_deltas[i] = h.loop_filter.mode_deltas[i];
+
+    pp.base_qindex = h.quantization.base_q_idx;
+    pp.y_dc_delta_q = h.quantization.delta_q_y_dc;
+    pp.uv_dc_delta_q = h.quantization.delta_q_uv_dc;
+    pp.uv_ac_delta_q = h.quantization.delta_q_uv_ac;
+
+    pp.stVP9Segments.enabled = h.segmentation.enabled;
+    pp.stVP9Segments.update_map = h.segmentation.update_map;
+    pp.stVP9Segments.temporal_update = h.segmentation.temporal_update;
+    pp.stVP9Segments.abs_delta = h.segmentation.abs_or_delta_update;
+    for (uint32_t i = 0; i < 7; ++i)
+      pp.stVP9Segments.tree_probs[i] = h.segmentation.tree_probs[i];
+    for (uint32_t i = 0; i < 3; ++i)
+      pp.stVP9Segments.pred_probs[i] = h.segmentation.pred_probs[i];
+    for (uint32_t i = 0; i < 8; ++i) {
+      pp.stVP9Segments.feature_mask[i] = 0;
+      for (uint32_t j = 0; j < 4; ++j) {
+        if (h.segmentation.feature_enabled[i][j])
+          pp.stVP9Segments.feature_mask[i] |= static_cast<UCHAR>(1u << j);
+        pp.stVP9Segments.feature_data[i][j] = h.segmentation.feature_data[i][j];
+      }
+    }
+
+    pp.log2_tile_cols = h.tile_cols_log2;
+    pp.log2_tile_rows = h.tile_rows_log2;
+    pp.uncompressed_header_size_byte_aligned =
+        static_cast<USHORT>(h.uncompressed_header_size);
+    pp.first_partition_size = h.header_size_in_bytes;
+
+    pp.StatusReportFeedbackNumber = feedback_++;
+  }
+
+  auto decodeVP9(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
+    if (!vp9_) return Err(OM_CODEC_DECODE_FAILED);
+    auto parsed_frames = vp9_->parse(packet.bytes);
+    if (parsed_frames.empty()) return Ok(std::vector<Frame> {});
+
+    std::vector<Frame> output;
+    for (const auto& parsed : parsed_frames) {
+      const auto& h = parsed.header;
+      if (!h.valid) continue;
+
+      if (h.show_existing_frame) {
+        const int32_t slot = (h.frame_to_show_map_idx < 8)
+                                 ? vp9_ref_slot_[h.frame_to_show_map_idx] : -1;
+        if (slot < 0) continue;
+        if (auto pic = download(static_cast<uint32_t>(slot))) {
+          Frame frame = {};
+          frame.pts = packet.pts;
+          frame.dts = packet.dts;
+          frame.data = std::move(*pic);
+          output.push_back(std::move(frame));
+        }
+        continue;
+      }
+
+      const uint32_t slot = pickVP9Slot();
+
+      DXVA_PicParams_VP9 pic_params = {};
+      fillVP9PicParams(parsed, slot, pic_params);
+
+      HRESULT hr = E_FAIL;
+      for (int attempt = 0; attempt < 512; ++attempt) {
+        hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[slot].view.Get(), 0, nullptr);
+        if (hr != E_PENDING) break;
+      }
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+
+      void* buffer = nullptr;
+      UINT buffer_size = 0;
+
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
+      if (FAILED(hr) || buffer_size < sizeof(pic_params)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      std::memcpy(buffer, &pic_params, sizeof(pic_params));
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
+
+      // VP9 hands the decoder the whole frame, header included, as one slice.
+      const size_t frame_size = parsed.bitstream.size();
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
+      if (FAILED(hr) || buffer_size < frame_size) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      std::memcpy(buffer, parsed.bitstream.data(), frame_size);
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
+
+      DXVA_Slice_VPx_Short slice = {};
+      slice.BSNALunitDataLocation = 0;
+      slice.SliceBytesInBuffer = static_cast<UINT>(frame_size);
+      slice.wBadSliceChopping = 0;
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
+      if (FAILED(hr) || buffer_size < sizeof(slice)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      std::memcpy(buffer, &slice, sizeof(slice));
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
+
+      D3D11_VIDEO_DECODER_BUFFER_DESC descs[3] = {};
+      descs[0].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
+      descs[0].DataSize = static_cast<UINT>(sizeof(pic_params));
+      descs[1].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
+      descs[1].DataSize = static_cast<UINT>(frame_size);
+      descs[2].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
+      descs[2].DataSize = static_cast<UINT>(sizeof(slice));
+      if (FAILED(video_context_->SubmitDecoderBuffers(decoder_.Get(), 3, descs))) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+      if (FAILED(video_context_->DecoderEndFrame(decoder_.Get()))) return Err(OM_CODEC_DECODE_FAILED);
+
+      for (uint32_t i = 0; i < 8; ++i)
+        if (h.refresh_frame_flags & (1u << i)) vp9_ref_slot_[i] = static_cast<int32_t>(slot);
+
+      vp9_last_width_ = h.frame_width;
+      vp9_last_height_ = h.frame_height;
+      vp9_last_show_frame_ = h.show_frame;
+
+      if (h.show_frame) {
+        auto pic = download(slot);
+        if (!pic.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+        Frame frame = {};
+        frame.pts = packet.pts;
+        frame.dts = packet.dts;
+        frame.data = std::move(*pic);
+        output.push_back(std::move(frame));
+      }
+    }
+    return Ok(std::move(output));
+  }
+
   auto download(uint32_t slot) -> std::optional<Picture> {
     D3D11_TEXTURE2D_DESC desc = {};
     dpb_texture_->GetDesc(&desc);
@@ -1292,6 +1508,16 @@ const CodecDescriptor CODEC_DX11_AV1 = {
     .caps = CodecCaps {
         .profiles = {OM_PROFILE_AV1_MAIN},
     },
+    .decoder_factory = [] { return std::make_unique<DX11Decoder>(); },
+};
+
+const CodecDescriptor CODEC_DX11_VP9 = {
+    .codec_id = OM_CODEC_VP9,
+    .type = OM_MEDIA_VIDEO,
+    .name = "dx11_vp9",
+    .long_name = "DirectX11 VP9 Decoder",
+    .vendor = "Microsoft",
+    .flags = HARDWARE,
     .decoder_factory = [] { return std::make_unique<DX11Decoder>(); },
 };
 

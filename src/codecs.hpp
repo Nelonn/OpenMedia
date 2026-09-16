@@ -52,6 +52,7 @@ extern const CodecDescriptor CODEC_DX11_H264;
 extern const CodecDescriptor CODEC_DX11_ENC_H264;
 extern const CodecDescriptor CODEC_DX11_H265;
 extern const CodecDescriptor CODEC_DX11_AV1;
+extern const CodecDescriptor CODEC_DX11_VP9;
 
 // Video - DirectX12
 extern const CodecDescriptor CODEC_DX12_H264;

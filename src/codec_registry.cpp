@@ -179,6 +179,7 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_DX11_H264);
   registry->registerCodec(&CODEC_DX11_H265);
   registry->registerCodec(&CODEC_DX11_AV1);
+  registry->registerCodec(&CODEC_DX11_VP9);
   registry->registerCodec(&CODEC_DX11_ENC_H264);
 #endif
 
