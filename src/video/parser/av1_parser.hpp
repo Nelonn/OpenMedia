@@ -232,7 +232,9 @@ struct AV1CdefParams {
 
 struct AV1LoopRestorationParams {
   uint8_t frame_restoration_type[3] = {};
-  uint8_t loop_restoration_size[3] = {};
+  // RESTORATION_TILESIZE_MAX is 256, which does not fit in a uint8_t.
+  uint16_t loop_restoration_size[3] = {};
+  uint8_t loop_restoration_size_log2[3] = {};
   bool uses_lr = false;
 };
 
@@ -304,8 +306,15 @@ struct AV1FrameHeader {
   uint32_t upscaled_width = 0;
   uint32_t render_width = 0;
   uint32_t render_height = 0;
+  // The syntax flag as coded, not a comparison of the sizes: with superres in
+  // play FrameWidth != UpscaledWidth even when the flag is 0.
+  bool render_and_frame_size_different = false;
   bool use_superres = false;
   uint8_t superres_denom = AV1_SUPERRES_NUM;
+  // coded_denom as it appears in the bitstream (SuperresDenom - 9). Accelerator
+  // structures such as StdVideoDecodeAV1PictureInfo want this, not the
+  // reconstructed denominator.
+  uint8_t coded_denom = 0;
   uint32_t mi_cols = 0;
   uint32_t mi_rows = 0;
 

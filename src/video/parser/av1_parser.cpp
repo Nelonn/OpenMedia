@@ -531,9 +531,13 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
   // ---- frame size / references -----------------------------------------
   auto superres_params = [&]() {
     h.use_superres = seq_.enable_superres ? r.flag() : false;
-    h.superres_denom = h.use_superres
-                           ? static_cast<uint8_t>(r.f(AV1_SUPERRES_DENOM_BITS) + AV1_SUPERRES_DENOM_MIN)
-                           : static_cast<uint8_t>(AV1_SUPERRES_NUM);
+    if (h.use_superres) {
+      h.coded_denom = static_cast<uint8_t>(r.f(AV1_SUPERRES_DENOM_BITS));
+      h.superres_denom = static_cast<uint8_t>(h.coded_denom + AV1_SUPERRES_DENOM_MIN);
+    } else {
+      h.coded_denom = 0;
+      h.superres_denom = static_cast<uint8_t>(AV1_SUPERRES_NUM);
+    }
     h.upscaled_width = h.frame_width;
     h.frame_width = (h.upscaled_width * AV1_SUPERRES_NUM + (h.superres_denom / 2)) / h.superres_denom;
   };
@@ -553,7 +557,8 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
     compute_image_size();
   };
   auto render_size = [&]() {
-    if (r.flag()) {
+    h.render_and_frame_size_different = r.flag();
+    if (h.render_and_frame_size_different) {
       h.render_width = r.f(16) + 1;
       h.render_height = r.f(16) + 1;
     } else {
@@ -804,6 +809,12 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
   h.delta_q_present = h.quantization.base_q_idx > 0 ? r.flag() : false;
   if (h.delta_q_present) h.delta_q_res = static_cast<uint8_t>(r.f(2));
 
+  // delta_lf_params() starts by zeroing these. Leaving them inherited from the
+  // primary reference frame (loaded above) would switch on per-superblock loop
+  // filter deltas for a frame that never coded any.
+  h.loop_filter.delta_lf_present = false;
+  h.loop_filter.delta_lf_res = 0;
+  h.loop_filter.delta_lf_multi = false;
   if (h.delta_q_present) {
     if (!h.allow_intrabc) h.loop_filter.delta_lf_present = r.flag();
     if (h.loop_filter.delta_lf_present) {
@@ -916,11 +927,18 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
           if (lr_unit_shift) lr_unit_shift += r.f(1);
         }
         lr.loop_restoration_size[0] =
-            static_cast<uint8_t>(kRestorationTileSizeMax >> (2 - lr_unit_shift));
+            static_cast<uint16_t>(kRestorationTileSizeMax >> (2 - lr_unit_shift));
         const uint32_t lr_uv_shift =
             (cc.subsampling_x && cc.subsampling_y && uses_chroma_lr) ? r.f(1) : 0;
-        lr.loop_restoration_size[1] = static_cast<uint8_t>(lr.loop_restoration_size[0] >> lr_uv_shift);
+        lr.loop_restoration_size[1] =
+            static_cast<uint16_t>(lr.loop_restoration_size[0] >> lr_uv_shift);
         lr.loop_restoration_size[2] = lr.loop_restoration_size[1];
+
+        // log2(RESTORATION_TILESIZE_MAX) is 8; accelerators want the log2 form.
+        lr.loop_restoration_size_log2[0] = static_cast<uint8_t>(6 + lr_unit_shift);
+        lr.loop_restoration_size_log2[1] =
+            static_cast<uint8_t>(lr.loop_restoration_size_log2[0] - lr_uv_shift);
+        lr.loop_restoration_size_log2[2] = lr.loop_restoration_size_log2[1];
       }
     }
   }
@@ -987,7 +1005,20 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
   // ---- global_motion_params() -------------------------------------------
   {
     auto& gm = h.global_motion;
-    AV1GlobalMotionParams prev = gm; // PrevGmParams, inherited above
+
+    // PrevGmParams: setup_past_independence() seeds it with the *identity*
+    // warp, not zeros. load_previous() replaces it with the primary reference
+    // frame's saved parameters (already loaded into gm above). Getting this
+    // wrong does not desync the bitstream — the subexp codes are the same
+    // length either way — it just decodes every global motion parameter to the
+    // wrong value, which shows up as drifting/warped inter frames.
+    AV1GlobalMotionParams prev;
+    for (uint32_t ref = AV1_LAST_FRAME; ref <= AV1_ALTREF_FRAME; ++ref) {
+      for (uint32_t i = 0; i < 6; ++i)
+        prev.params[ref][i] = (i % 3 == 2) ? (1 << kWarpedModelPrecBits) : 0;
+    }
+    if (h.primary_ref_frame != AV1_PRIMARY_REF_NONE) prev = gm;
+
     for (uint32_t ref = AV1_LAST_FRAME; ref <= AV1_ALTREF_FRAME; ++ref) {
       gm.type[ref] = AV1_IDENTITY;
       for (uint32_t i = 0; i < 6; ++i)
@@ -1237,9 +1268,20 @@ auto AV1ObuParser::parse(std::span<const uint8_t> packet) -> std::vector<AV1Pars
   std::vector<AV1ParsedFrame> frames;
   if (packet.empty()) return frames;
 
+  // A temporal unit may carry more than one frame — most commonly a coded
+  // frame with show_frame=0 followed by a show_existing_frame that displays an
+  // earlier one. Each frame header therefore starts a new output entry;
+  // accumulating them into a single entry would silently drop all but the last.
   AV1ParsedFrame current;
   current.bitstream.assign(packet.begin(), packet.end());
   bool have_frame_header = false;
+
+  auto start_new_frame = [&]() {
+    frames.push_back(std::move(current));
+    current = {};
+    current.bitstream.assign(packet.begin(), packet.end());
+    have_frame_header = false;
+  };
 
   size_t pos = 0;
   while (pos < packet.size()) {
@@ -1271,6 +1313,10 @@ auto AV1ObuParser::parse(std::span<const uint8_t> packet) -> std::vector<AV1Pars
     if (pos + payload_size > packet.size()) break;
 
     const auto payload = packet.subspan(pos, payload_size);
+
+    // A second frame header in the same temporal unit belongs to a new frame.
+    if ((obu_type == AV1_OBU_FRAME_HEADER || obu_type == AV1_OBU_FRAME) && have_frame_header)
+      start_new_frame();
 
     AV1Obu obu;
     obu.type = obu_type;

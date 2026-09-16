@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <video/parser/av1_parser.hpp>
 #include <video/parser/h265_parser.hpp>
 
 #include <mfapi.h>
@@ -324,6 +325,9 @@ class DX11Decoder final : public Decoder {
 
   dx_h264::State h264_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
+  std::unique_ptr<video_parser::AV1ObuParser> av1_;
+  // Maps each AV1 reference slot (0..7) to the DPB texture index holding it.
+  int32_t av1_ref_slot_[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
   dx_h265::PocState h265_poc_;
   OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
@@ -343,7 +347,8 @@ public:
   auto configure(const DecoderOptions& options) -> OMError override {
     release();
     codec_id_ = options.format.codec_id;
-    if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265) return OM_CODEC_NOT_SUPPORTED;
+    if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 &&
+        codec_id_ != OM_CODEC_AV1) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
     if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
@@ -363,6 +368,23 @@ public:
           break;
         }
       }
+    } else if (codec_id_ == OM_CODEC_AV1) {
+      av1_ = std::make_unique<video_parser::AV1ObuParser>();
+      // The AV1CodecConfigurationRecord prefixes the config OBUs with four
+      // bytes of its own; feeding those to the OBU parser yields nothing.
+      if (options.extradata.size() > 4 && (options.extradata[0] & 0x80) != 0)
+        av1_->parse(options.extradata.subspan(4));
+      const auto& seq = av1_->sequenceHeader();
+      if (seq.valid) {
+        width_ = seq.max_frame_width;
+        height_ = seq.max_frame_height;
+        bit_depth = seq.color_config.bit_depth;
+      }
+      // AV1 superblocks are up to 128x128, so give the surface room for a
+      // whole one; the download crops back to the coded size.
+      padded_width_ = dx_h264::alignUp(width_, 128u);
+      padded_height_ = dx_h264::alignUp(height_, 128u);
+      dpb_slot_count_ = 9; // 8 reference slots plus the frame being decoded
     } else {
       h265_ = std::make_unique<video_parser::H265AccessUnitParser>();
       h265_->parseExtradata(options.extradata);
@@ -460,6 +482,7 @@ public:
 
     if (codec_id_ == OM_CODEC_H264) return decodeH264(packet);
     if (codec_id_ == OM_CODEC_H265) return decodeH265(packet);
+    if (codec_id_ == OM_CODEC_AV1) return decodeAV1(packet);
     return Err(OM_CODEC_NOT_SUPPORTED);
   }
 
@@ -472,6 +495,8 @@ public:
     next_ref_ = 0;
     h264_.resetPoc();
     h265_poc_.reset();
+    if (av1_) av1_->reset();
+    for (auto& r : av1_ref_slot_) r = -1;
   }
 
 private:
@@ -624,8 +649,16 @@ private:
     dpb_texture_.Reset();
     slots_.clear();
 
-    GUID target_profile = (codec_id_ == OM_CODEC_H264) ? D3D11_DECODER_PROFILE_H264_VLD_NOFGT :
-                          (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10 : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
+    GUID target_profile = {};
+    if (codec_id_ == OM_CODEC_H264) {
+      target_profile = D3D11_DECODER_PROFILE_H264_VLD_NOFGT;
+    } else if (codec_id_ == OM_CODEC_AV1) {
+      // Only Profile0 (4:2:0, 8/10-bit) is exposed by current DXVA drivers.
+      target_profile = D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0;
+    } else {
+      target_profile = (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10
+                                       : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
+    }
     bool profile_supported = false;
     const UINT profile_count = video_device_->GetVideoDecoderProfileCount();
     for (UINT i = 0; i < profile_count; ++i) {
@@ -653,7 +686,7 @@ private:
       if (config.guidConfigBitstreamEncryption == DXVA_NO_ENCRYPT &&
           config.guidConfigMBcontrolEncryption == DXVA_NO_ENCRYPT &&
           config.guidConfigResidDiffEncryption == DXVA_NO_ENCRYPT &&
-          config.ConfigBitstreamRaw == expected_raw) {
+          (codec_id_ == OM_CODEC_AV1 || config.ConfigBitstreamRaw == expected_raw)) {
         decoder_config_ = config;
         found_config = true;
         break;
@@ -802,6 +835,380 @@ private:
     return Ok(std::move(output));
   }
 
+
+  // Collects the tile payloads of one frame. DXVA wants the tile data packed
+  // contiguously with offsets relative to the start of that packed buffer,
+  // unlike Vulkan which indexes into the original packet.
+  struct AV1TileRef {
+    const uint8_t* data = nullptr;
+    uint32_t size = 0;
+  };
+
+  auto collectAV1Tiles(const video_parser::AV1ParsedFrame& parsed,
+                       std::vector<AV1TileRef>& tiles) -> bool {
+    const auto& ti = parsed.header.tile_info;
+    const uint32_t num_tiles = ti.tile_cols * ti.tile_rows;
+    if (num_tiles == 0) return false;
+    const uint32_t tile_size_bytes = ti.tile_size_bytes > 0 ? ti.tile_size_bytes : 1;
+
+    for (const auto& obu : parsed.obus) {
+      if (obu.type != video_parser::AV1_OBU_FRAME &&
+          obu.type != video_parser::AV1_OBU_TILE_GROUP) continue;
+
+      size_t tg_offset = (obu.type == video_parser::AV1_OBU_FRAME) ? parsed.tile_group_offset
+                                                                   : obu.payload_offset;
+      size_t tg_size = (obu.type == video_parser::AV1_OBU_FRAME) ? parsed.tile_group_size
+                                                                 : obu.payload_size;
+      if (tg_size == 0 || tg_offset + tg_size > parsed.bitstream.size()) continue;
+
+      BitReader reader(std::span<const uint8_t>(parsed.bitstream.data() + tg_offset, tg_size));
+      uint32_t tg_start = 0;
+      uint32_t tg_end = num_tiles - 1;
+      if (num_tiles > 1) {
+        const bool present = reader.readFlag();
+        if (present && obu.type != video_parser::AV1_OBU_FRAME) {
+          const uint32_t bits = ti.tile_cols_log2 + ti.tile_rows_log2;
+          tg_start = reader.readBits(bits);
+          tg_end = reader.readBits(bits);
+        }
+      }
+      reader.alignToByte();
+
+      size_t pos = tg_offset + reader.bytePosition();
+      const size_t end = tg_offset + tg_size;
+      for (uint32_t t = tg_start; t <= tg_end; ++t) {
+        uint32_t size = 0;
+        if (t == tg_end) {
+          if (pos > end) return false;
+          size = static_cast<uint32_t>(end - pos);
+        } else {
+          if (pos + tile_size_bytes > end) return false;
+          uint32_t coded = 0;
+          for (uint32_t b = 0; b < tile_size_bytes; ++b)
+            coded |= static_cast<uint32_t>(parsed.bitstream[pos + b]) << (8 * b);
+          pos += tile_size_bytes;
+          size = coded + 1;
+          if (pos + size > end) return false;
+        }
+        tiles.push_back({parsed.bitstream.data() + pos, size});
+        pos += size;
+      }
+    }
+    return tiles.size() == num_tiles;
+  }
+
+  auto pickAV1Slot() const -> uint32_t {
+    bool in_use[32] = {};
+    for (int32_t r : av1_ref_slot_)
+      if (r >= 0 && r < static_cast<int32_t>(dpb_slot_count_)) in_use[r] = true;
+    for (uint32_t i = 0; i < dpb_slot_count_; ++i)
+      if (!in_use[i]) return i;
+    return 0;
+  }
+
+  void fillAV1PicParams(const video_parser::AV1ParsedFrame& parsed, uint32_t slot,
+                        DXVA_PicParams_AV1& pp) {
+    const auto& seq = av1_->sequenceHeader();
+    const auto& h = parsed.header;
+
+    pp.width = h.frame_width;
+    pp.height = h.frame_height;
+    pp.max_width = seq.max_frame_width;
+    pp.max_height = seq.max_frame_height;
+
+    pp.CurrPicTextureIndex = static_cast<UCHAR>(slot);
+    // Unlike Vulkan's coded_denom, DXVA wants the reconstructed denominator.
+    pp.superres_denom = h.use_superres ? h.superres_denom
+                                       : static_cast<UCHAR>(video_parser::AV1_SUPERRES_NUM);
+    pp.bitdepth = seq.color_config.bit_depth;
+    pp.seq_profile = seq.seq_profile;
+
+    const auto& ti = h.tile_info;
+    pp.tiles.cols = static_cast<UCHAR>(ti.tile_cols);
+    pp.tiles.rows = static_cast<UCHAR>(ti.tile_rows);
+    pp.tiles.context_update_id = static_cast<USHORT>(ti.context_update_tile_id);
+
+    // Tile sizes are expressed in superblocks.
+    const uint32_t sb_shift = seq.use_128x128_superblock ? 5u : 4u;
+    for (uint32_t i = 0; i < ti.tile_cols && i < 64; ++i) {
+      const uint32_t mi = ti.mi_col_starts[i + 1] - ti.mi_col_starts[i];
+      pp.tiles.widths[i] = static_cast<USHORT>((mi + (1u << sb_shift) - 1) >> sb_shift);
+    }
+    for (uint32_t i = 0; i < ti.tile_rows && i < 64; ++i) {
+      const uint32_t mi = ti.mi_row_starts[i + 1] - ti.mi_row_starts[i];
+      pp.tiles.heights[i] = static_cast<USHORT>((mi + (1u << sb_shift) - 1) >> sb_shift);
+    }
+
+    pp.coding.use_128x128_superblock = seq.use_128x128_superblock;
+    pp.coding.intra_edge_filter = seq.enable_intra_edge_filter;
+    pp.coding.interintra_compound = seq.enable_interintra_compound;
+    pp.coding.masked_compound = seq.enable_masked_compound;
+    // Per the DXVA spec these three take the *frame* header values even though
+    // the sequence header has similarly named fields.
+    pp.coding.warped_motion = h.allow_warped_motion;
+    pp.coding.dual_filter = seq.enable_dual_filter;
+    pp.coding.jnt_comp = seq.enable_jnt_comp;
+    pp.coding.screen_content_tools = h.allow_screen_content_tools;
+    pp.coding.integer_mv = h.force_integer_mv;
+    pp.coding.cdef = seq.enable_cdef;
+    pp.coding.restoration = seq.enable_restoration;
+    pp.coding.film_grain = seq.film_grain_params_present;
+    pp.coding.intrabc = h.allow_intrabc;
+    pp.coding.high_precision_mv = h.allow_high_precision_mv;
+    pp.coding.switchable_motion_mode = h.is_motion_mode_switchable;
+    pp.coding.filter_intra = seq.enable_filter_intra;
+    pp.coding.disable_frame_end_update_cdf = h.disable_frame_end_update_cdf;
+    pp.coding.disable_cdf_update = h.disable_cdf_update;
+    pp.coding.reference_mode = h.reference_select;
+    pp.coding.skip_mode = h.skip_mode_present;
+    pp.coding.reduced_tx_set = h.reduced_tx_set;
+    pp.coding.superres = h.use_superres;
+    pp.coding.tx_mode = h.tx_mode;
+    pp.coding.use_ref_frame_mvs = h.use_ref_frame_mvs;
+    pp.coding.enable_ref_frame_mvs = seq.enable_ref_frame_mvs;
+    pp.coding.reference_frame_update =
+        !(h.show_existing_frame && h.frame_type == video_parser::AV1_KEY_FRAME);
+
+    pp.format.frame_type = h.frame_type;
+    pp.format.show_frame = h.show_frame;
+    pp.format.showable_frame = h.showable_frame;
+    pp.format.subsampling_x = seq.color_config.subsampling_x;
+    pp.format.subsampling_y = seq.color_config.subsampling_y;
+    pp.format.mono_chrome = seq.color_config.mono_chrome;
+
+    pp.primary_ref_frame = h.primary_ref_frame;
+    pp.order_hint = static_cast<UCHAR>(h.order_hint);
+    pp.order_hint_bits = seq.order_hint_bits;
+
+    for (uint32_t i = 0; i < 7; ++i) {
+      const uint8_t map_idx = h.ref_frame_idx[i];
+      const int32_t ref_slot = (map_idx < 8) ? av1_ref_slot_[map_idx] : -1;
+      if (h.frame_is_intra || ref_slot < 0) {
+        pp.frame_refs[i].Index = 0xFF;
+        continue;
+      }
+      pp.frame_refs[i].Index = map_idx;
+      pp.frame_refs[i].width = h.frame_width;
+      pp.frame_refs[i].height = h.frame_height;
+      const uint32_t ref_name = video_parser::AV1_LAST_FRAME + i;
+      for (uint32_t j = 0; j < 6; ++j)
+        pp.frame_refs[i].wmmat[j] = h.global_motion.params[ref_name][j];
+      pp.frame_refs[i].wmtype = h.global_motion.type[ref_name];
+      pp.frame_refs[i].wminvalid =
+          (h.global_motion.type[ref_name] == video_parser::AV1_IDENTITY);
+    }
+    for (uint32_t i = 0; i < 8; ++i)
+      pp.RefFrameMapTextureIndex[i] =
+          av1_ref_slot_[i] >= 0 ? static_cast<UCHAR>(av1_ref_slot_[i]) : 0xFF;
+
+    pp.loop_filter.filter_level[0] = h.loop_filter.level[0];
+    pp.loop_filter.filter_level[1] = h.loop_filter.level[1];
+    pp.loop_filter.filter_level_u = h.loop_filter.level[2];
+    pp.loop_filter.filter_level_v = h.loop_filter.level[3];
+    pp.loop_filter.sharpness_level = h.loop_filter.sharpness;
+    pp.loop_filter.mode_ref_delta_enabled = h.loop_filter.delta_enabled;
+    pp.loop_filter.mode_ref_delta_update = h.loop_filter.delta_update;
+    pp.loop_filter.delta_lf_multi = h.loop_filter.delta_lf_multi;
+    pp.loop_filter.delta_lf_present = h.loop_filter.delta_lf_present;
+    for (uint32_t i = 0; i < 8; ++i)
+      pp.loop_filter.ref_deltas[i] = h.loop_filter.ref_deltas[i];
+    pp.loop_filter.mode_deltas[0] = h.loop_filter.mode_deltas[0];
+    pp.loop_filter.mode_deltas[1] = h.loop_filter.mode_deltas[1];
+    pp.loop_filter.delta_lf_res = h.loop_filter.delta_lf_res;
+    for (uint32_t i = 0; i < 3; ++i) {
+      // The AV1 spec numbering already matches what DXVA expects here.
+      pp.loop_filter.frame_restoration_type[i] = h.lr.frame_restoration_type[i];
+      pp.loop_filter.log2_restoration_unit_size[i] = h.lr.loop_restoration_size_log2[i];
+    }
+
+    pp.quantization.delta_q_present = h.delta_q_present;
+    pp.quantization.delta_q_res = h.delta_q_res;
+    pp.quantization.base_qindex = h.quantization.base_q_idx;
+    pp.quantization.y_dc_delta_q = static_cast<CHAR>(h.quantization.delta_q_y_dc);
+    pp.quantization.u_dc_delta_q = static_cast<CHAR>(h.quantization.delta_q_u_dc);
+    pp.quantization.v_dc_delta_q = static_cast<CHAR>(h.quantization.delta_q_v_dc);
+    pp.quantization.u_ac_delta_q = static_cast<CHAR>(h.quantization.delta_q_u_ac);
+    pp.quantization.v_ac_delta_q = static_cast<CHAR>(h.quantization.delta_q_v_ac);
+    pp.quantization.qm_y = h.quantization.using_qmatrix ? h.quantization.qm_y : 0xFF;
+    pp.quantization.qm_u = h.quantization.using_qmatrix ? h.quantization.qm_u : 0xFF;
+    pp.quantization.qm_v = h.quantization.using_qmatrix ? h.quantization.qm_v : 0xFF;
+
+    pp.cdef.damping = h.cdef.damping >= 3 ? (h.cdef.damping - 3) : 0;
+    pp.cdef.bits = h.cdef.bits;
+    for (uint32_t i = 0; i < 8; ++i) {
+      // The parser stores the decoded secondary strength, where the coded
+      // value 3 becomes 4. DXVA wants the two-bit coded form back.
+      uint8_t y_sec = h.cdef.y_sec_strength[i];
+      uint8_t uv_sec = h.cdef.uv_sec_strength[i];
+      pp.cdef.y_strengths[i].primary = h.cdef.y_pri_strength[i];
+      pp.cdef.y_strengths[i].secondary = (y_sec == 4) ? 3 : y_sec;
+      pp.cdef.uv_strengths[i].primary = h.cdef.uv_pri_strength[i];
+      pp.cdef.uv_strengths[i].secondary = (uv_sec == 4) ? 3 : uv_sec;
+    }
+
+    pp.interp_filter = h.interpolation_filter;
+
+    pp.segmentation.enabled = h.segmentation.enabled;
+    pp.segmentation.update_map = h.segmentation.update_map;
+    pp.segmentation.update_data = h.segmentation.update_data;
+    pp.segmentation.temporal_update = h.segmentation.temporal_update;
+    for (uint32_t i = 0; i < 8; ++i) {
+      for (uint32_t j = 0; j < 8; ++j) {
+        if (h.segmentation.feature_enabled[i][j])
+          pp.segmentation.feature_mask[i].mask |= static_cast<UCHAR>(1u << j);
+        pp.segmentation.feature_data[i][j] = h.segmentation.feature_data[i][j];
+      }
+    }
+
+    if (h.film_grain.apply_grain) {
+      const auto& fg = h.film_grain;
+      pp.film_grain.apply_grain = 1;
+      pp.film_grain.scaling_shift_minus8 = fg.grain_scaling >= 8 ? (fg.grain_scaling - 8) : 0;
+      pp.film_grain.chroma_scaling_from_luma = fg.chroma_scaling_from_luma;
+      pp.film_grain.ar_coeff_lag = fg.ar_coeff_lag;
+      pp.film_grain.ar_coeff_shift_minus6 = fg.ar_coeff_shift >= 6 ? (fg.ar_coeff_shift - 6) : 0;
+      pp.film_grain.grain_scale_shift = fg.grain_scale_shift;
+      pp.film_grain.overlap_flag = fg.overlap_flag;
+      pp.film_grain.clip_to_restricted_range = fg.clip_to_restricted_range;
+      pp.film_grain.matrix_coeff_is_identity = (seq.color_config.matrix_coefficients == 0);
+      pp.film_grain.grain_seed = fg.grain_seed;
+      pp.film_grain.num_y_points = fg.num_y_points;
+      for (uint32_t i = 0; i < fg.num_y_points && i < 14; ++i) {
+        pp.film_grain.scaling_points_y[i][0] = fg.point_y_value[i];
+        pp.film_grain.scaling_points_y[i][1] = fg.point_y_scaling[i];
+      }
+      pp.film_grain.num_cb_points = fg.num_cb_points;
+      for (uint32_t i = 0; i < fg.num_cb_points && i < 10; ++i) {
+        pp.film_grain.scaling_points_cb[i][0] = fg.point_cb_value[i];
+        pp.film_grain.scaling_points_cb[i][1] = fg.point_cb_scaling[i];
+      }
+      pp.film_grain.num_cr_points = fg.num_cr_points;
+      for (uint32_t i = 0; i < fg.num_cr_points && i < 10; ++i) {
+        pp.film_grain.scaling_points_cr[i][0] = fg.point_cr_value[i];
+        pp.film_grain.scaling_points_cr[i][1] = fg.point_cr_scaling[i];
+      }
+      for (uint32_t i = 0; i < 24; ++i) pp.film_grain.ar_coeffs_y[i] = fg.ar_coeffs_y[i];
+      for (uint32_t i = 0; i < 25; ++i) pp.film_grain.ar_coeffs_cb[i] = fg.ar_coeffs_cb[i];
+      for (uint32_t i = 0; i < 25; ++i) pp.film_grain.ar_coeffs_cr[i] = fg.ar_coeffs_cr[i];
+      pp.film_grain.cb_mult = fg.cb_mult;
+      pp.film_grain.cb_luma_mult = fg.cb_luma_mult;
+      pp.film_grain.cr_mult = fg.cr_mult;
+      pp.film_grain.cr_luma_mult = fg.cr_luma_mult;
+      pp.film_grain.cb_offset = static_cast<SHORT>(fg.cb_offset);
+      pp.film_grain.cr_offset = static_cast<SHORT>(fg.cr_offset);
+    }
+
+    pp.StatusReportFeedbackNumber = feedback_++;
+  }
+
+  auto decodeAV1(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
+    if (!av1_) return Err(OM_CODEC_DECODE_FAILED);
+    auto parsed_frames = av1_->parse(packet.bytes);
+    if (parsed_frames.empty()) return Ok(std::vector<Frame> {});
+
+    std::vector<Frame> output;
+    for (const auto& parsed : parsed_frames) {
+      if (!parsed.header.valid) continue;
+      const auto& h = parsed.header;
+
+      if (h.show_existing_frame) {
+        const int32_t slot = (h.frame_to_show_map_idx < 8)
+                                 ? av1_ref_slot_[h.frame_to_show_map_idx] : -1;
+        if (slot < 0) continue;
+        if (auto pic = download(static_cast<uint32_t>(slot))) {
+          Frame frame = {};
+          frame.pts = packet.pts;
+          frame.dts = packet.dts;
+          frame.data = std::move(*pic);
+          output.push_back(std::move(frame));
+        }
+        // Re-showing a key frame resets the whole reference pool to it.
+        if (h.refresh_frame_flags == 0xFF)
+          for (auto& r : av1_ref_slot_) r = slot;
+        continue;
+      }
+
+      std::vector<AV1TileRef> tiles;
+      if (!collectAV1Tiles(parsed, tiles) || tiles.empty()) continue;
+
+      const uint32_t slot = pickAV1Slot();
+
+      DXVA_PicParams_AV1 pic_params = {};
+      fillAV1PicParams(parsed, slot, pic_params);
+
+      HRESULT hr = E_FAIL;
+      for (int attempt = 0; attempt < 512; ++attempt) {
+        hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[slot].view.Get(), 0, nullptr);
+        if (hr != E_PENDING) break;
+      }
+      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+
+      void* buffer = nullptr;
+      UINT buffer_size = 0;
+
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
+      if (FAILED(hr) || buffer_size < sizeof(pic_params)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      std::memcpy(buffer, &pic_params, sizeof(pic_params));
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
+
+      // The tile payloads go in back-to-back; DataOffset indexes that buffer.
+      std::vector<DXVA_Tile_AV1> tile_params(tiles.size());
+      size_t total = 0;
+      for (size_t i = 0; i < tiles.size(); ++i) {
+        tile_params[i].DataOffset = static_cast<UINT>(total);
+        tile_params[i].DataSize = tiles[i].size;
+        tile_params[i].row = static_cast<USHORT>(i / std::max<uint32_t>(pic_params.tiles.cols, 1));
+        tile_params[i].column = static_cast<USHORT>(i % std::max<uint32_t>(pic_params.tiles.cols, 1));
+        tile_params[i].anchor_frame = 0xFF;
+        total += tiles[i].size;
+      }
+
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
+      if (FAILED(hr) || buffer_size < total) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      {
+        auto* dst = static_cast<uint8_t*>(buffer);
+        size_t off = 0;
+        for (const auto& t : tiles) { std::memcpy(dst + off, t.data, t.size); off += t.size; }
+      }
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
+
+      const size_t tile_bytes = tile_params.size() * sizeof(DXVA_Tile_AV1);
+      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
+      if (FAILED(hr) || buffer_size < tile_bytes) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      std::memcpy(buffer, tile_params.data(), tile_bytes);
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
+
+      D3D11_VIDEO_DECODER_BUFFER_DESC descs[3] = {};
+      descs[0].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
+      descs[0].DataSize = static_cast<UINT>(sizeof(pic_params));
+      descs[1].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
+      descs[1].DataSize = static_cast<UINT>(total);
+      descs[2].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
+      descs[2].DataSize = static_cast<UINT>(tile_bytes);
+      if (FAILED(video_context_->SubmitDecoderBuffers(decoder_.Get(), 3, descs))) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+      if (FAILED(video_context_->DecoderEndFrame(decoder_.Get()))) return Err(OM_CODEC_DECODE_FAILED);
+
+      uint8_t refresh = h.refresh_frame_flags;
+      if (h.frame_type == video_parser::AV1_KEY_FRAME && h.show_frame) refresh = 0xFF;
+      for (uint32_t i = 0; i < 8; ++i)
+        if (refresh & (1u << i)) av1_ref_slot_[i] = static_cast<int32_t>(slot);
+
+      if (h.show_frame) {
+        auto pic = download(slot);
+        if (!pic.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+        Frame frame = {};
+        frame.pts = packet.pts;
+        frame.dts = packet.dts;
+        frame.data = std::move(*pic);
+        output.push_back(std::move(frame));
+      }
+    }
+    return Ok(std::move(output));
+  }
+
   auto download(uint32_t slot) -> std::optional<Picture> {
     D3D11_TEXTURE2D_DESC desc = {};
     dpb_texture_->GetDesc(&desc);
@@ -876,6 +1283,19 @@ const CodecDescriptor CODEC_DX11_H265 = {
     .long_name = "DirectX11 H.265/HEVC Decoder",
     .vendor = "Microsoft",
     .flags = HARDWARE,
+    .decoder_factory = [] { return std::make_unique<DX11Decoder>(); },
+};
+
+const CodecDescriptor CODEC_DX11_AV1 = {
+    .codec_id = OM_CODEC_AV1,
+    .type = OM_MEDIA_VIDEO,
+    .name = "dx11_av1",
+    .long_name = "DirectX11 AV1 Decoder",
+    .vendor = "Microsoft",
+    .flags = HARDWARE,
+    .caps = CodecCaps {
+        .profiles = {OM_PROFILE_AV1_MAIN},
+    },
     .decoder_factory = [] { return std::make_unique<DX11Decoder>(); },
 };
 
