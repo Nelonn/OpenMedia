@@ -125,10 +125,37 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   uint32_t dst_family = context->queue_family_index;
   const bool same_family = src_family == dst_family;
 
-  const uint32_t bpp = (src->format == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 ||
-                        src->format == VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16 ||
-                        src->format == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM) ? 2 : 1;
-  size_t size = (size_t)width * height * 3 / 2 * bpp;
+  // Chroma geometry follows the surface format, not a 4:2:0 assumption.
+  uint32_t bpp = 1;
+  uint32_t ssx = 1;
+  uint32_t ssy = 1;
+  switch (src->format) {
+    case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
+    case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
+    case VK_FORMAT_G16_B16R16_2PLANE_420_UNORM:
+      bpp = 2; ssx = 1; ssy = 1; break;
+    case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16:
+    case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16:
+    case VK_FORMAT_G16_B16R16_2PLANE_422_UNORM:
+      bpp = 2; ssx = 1; ssy = 0; break;
+    case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16:
+    case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16:
+    case VK_FORMAT_G16_B16R16_2PLANE_444_UNORM:
+      bpp = 2; ssx = 0; ssy = 0; break;
+    case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
+      bpp = 1; ssx = 1; ssy = 0; break;
+    case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
+      bpp = 1; ssx = 0; ssy = 0; break;
+    default:
+      bpp = 1; ssx = 1; ssy = 1; break; // 8-bit 4:2:0
+  }
+
+  const uint32_t chroma_width = width >> ssx;   // chroma samples per row
+  const uint32_t chroma_height = height >> ssy;
+  const size_t luma_bytes = (size_t)width * height * bpp;
+  // Two interleaved components per chroma sample.
+  const size_t chroma_row_bytes = (size_t)chroma_width * 2 * bpp;
+  size_t size = luma_bytes + chroma_row_bytes * chroma_height;
   VkBuffer staging_buffer;
   VkDeviceMemory staging_memory;
 
@@ -219,9 +246,9 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   regions[0].bufferOffset = 0;
   regions[0].imageSubresource = {VK_IMAGE_ASPECT_PLANE_0_BIT, 0, src->layer, 1};
   regions[0].imageExtent = {width, height, 1};
-  regions[1].bufferOffset = (size_t)width * height * bpp;
+  regions[1].bufferOffset = luma_bytes;
   regions[1].imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, src->layer, 1};
-  regions[1].imageExtent = {width / 2, height / 2, 1};
+  regions[1].imageExtent = {chroma_width, chroma_height, 1};
   
   context->vkCmdCopyImageToBuffer(graphics_cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_buffer, 2, regions);
 
@@ -272,10 +299,10 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
     memcpy(d_y + (size_t)i * stride_y, src_ptr + (size_t)i * width * bpp, (size_t)width * bpp);
   }
   
-  uint8_t* src_uv = src_ptr + (size_t)width * height * bpp;
+  uint8_t* src_uv = src_ptr + luma_bytes;
   uint8_t* d_uv = (uint8_t*)dst_uv;
-  for (uint32_t i = 0; i < height / 2; ++i) {
-    memcpy(d_uv + (size_t)i * stride_uv, src_uv + (size_t)i * width * bpp, (size_t)width * bpp);
+  for (uint32_t i = 0; i < chroma_height; ++i) {
+    memcpy(d_uv + (size_t)i * stride_uv, src_uv + (size_t)i * chroma_row_bytes, chroma_row_bytes);
   }
 
   context->vkUnmapMemory(context->vk_device, staging_memory);
