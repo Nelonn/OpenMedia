@@ -64,6 +64,7 @@ struct OMVulkanPicture {
   VkDeviceMemory memory;
   uint32_t layer;
   VkImageLayout layout;
+  VkFormat format;
 };
 
 #if defined(__cplusplus)
