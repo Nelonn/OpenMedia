@@ -34,6 +34,7 @@ struct OPENMEDIA_ABI DecoderOptions {
   Rational time_base = {};
   std::span<const uint8_t> extradata;
   Dictionary extra;
+  bool hardware_output = false;
 };
 
 struct OPENMEDIA_ABI DecodingInfo {

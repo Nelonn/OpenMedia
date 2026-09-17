@@ -10,14 +10,18 @@
 namespace openmedia {
 
 #if defined(_WIN32)
+// Wraps a D3D11 surface that belongs to somebody else — the decoder's frame
+// pool, an encoder's input, whatever produced it. Lifetime is the producer's
+// business, so nothing is released here; a producer that needs to reclaim the
+// surface derives from this and does it in its own destructor.
 class DX11HardwarePicture : public HardwarePicture {
 public:
   OMDX11Picture* pic;
   explicit DX11HardwarePicture(OMDX11Picture* p)
       : HardwarePicture(HWDeviceType::DX11), pic(p) {}
-  ~DX11HardwarePicture() override {
-    // HWD3D11Picture_delete(pic); // Should we delete here? Depends on ownership.
-  }
+  ~DX11HardwarePicture() override = default;
+
+  auto texture() const -> ID3D11Texture2D* { return pic ? pic->texture : nullptr; }
 };
 
 class DX12HardwarePicture : public HardwarePicture {
