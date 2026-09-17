@@ -98,49 +98,6 @@ void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const {
   if (ptr) LibAVFormat::getInstance().avio_context_free(&ptr);
 }
 
-static auto avCodecIdToOmCodecId(AVCodecID codec_id) -> OMCodecId {
-  switch (codec_id) {
-    // Video codecs
-    case AV_CODEC_ID_H261: return OM_CODEC_H261;
-    case AV_CODEC_ID_H263: return OM_CODEC_H263;
-    case AV_CODEC_ID_H264: return OM_CODEC_H264;
-    case AV_CODEC_ID_HEVC: return OM_CODEC_H265;
-    case AV_CODEC_ID_VVC: return OM_CODEC_H266;
-    case AV_CODEC_ID_EVC: return OM_CODEC_EVC;
-    //case AV_CODEC_ID_LCEVC: return OM_CODEC_LCEVC;
-    case AV_CODEC_ID_VP8: return OM_CODEC_VP8;
-    case AV_CODEC_ID_VP9: return OM_CODEC_VP9;
-    case AV_CODEC_ID_AV1: return OM_CODEC_AV1;
-    case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
-    case AV_CODEC_ID_PRORES: return OM_CODEC_PRORES;
-    case AV_CODEC_ID_THEORA: return OM_CODEC_THEORA;
-    case AV_CODEC_ID_RAWVIDEO: return OM_CODEC_RAW_VIDEO;
-
-    // Audio codecs
-    case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
-    case AV_CODEC_ID_AAC: return OM_CODEC_AAC;
-    case AV_CODEC_ID_MP3: return OM_CODEC_MP3;
-    case AV_CODEC_ID_OPUS: return OM_CODEC_OPUS;
-    case AV_CODEC_ID_VORBIS: return OM_CODEC_VORBIS;
-    case AV_CODEC_ID_FLAC: return OM_CODEC_FLAC;
-    case AV_CODEC_ID_PCM_S16LE: return OM_CODEC_PCM_S16LE;
-    case AV_CODEC_ID_PCM_S32LE: return OM_CODEC_PCM_S32LE;
-    case AV_CODEC_ID_AC3: return OM_CODEC_AC3;
-    case AV_CODEC_ID_EAC3: return OM_CODEC_EAC3;
-
-    // Image codecs
-    case AV_CODEC_ID_MJPEG: return OM_CODEC_JPEG;
-    case AV_CODEC_ID_PNG: return OM_CODEC_PNG;
-    case AV_CODEC_ID_WEBP: return OM_CODEC_WEBP;
-    case AV_CODEC_ID_BMP: return OM_CODEC_BMP;
-    case AV_CODEC_ID_TIFF: return OM_CODEC_TIFF;
-    case AV_CODEC_ID_GIF: return OM_CODEC_GIF;
-    case AV_CODEC_ID_TARGA: return OM_CODEC_TGA;
-
-    default: return OM_CODEC_NONE;
-  }
-}
-
 static auto avMediaTypeToOmMediaType(AVMediaType media_type) -> OMMediaType {
   switch (media_type) {
     case AVMEDIA_TYPE_VIDEO: return OM_MEDIA_VIDEO;
@@ -442,6 +399,7 @@ static auto omCodecIdToAvCodecId(OMCodecId codec_id) -> AVCodecID {
     case OM_CODEC_PCM_S32LE: return AV_CODEC_ID_PCM_S32LE;
     case OM_CODEC_AC3: return AV_CODEC_ID_AC3;
     case OM_CODEC_EAC3: return AV_CODEC_ID_EAC3;
+    case OM_CODEC_AC4: return AV_CODEC_ID_AC4;
     default: return AV_CODEC_ID_NONE;
   }
 }

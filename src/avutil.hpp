@@ -3,6 +3,7 @@
 #include <mutex>
 #include <openmedia/audio.hpp>
 #include <openmedia/video.hpp>
+#include <openmedia/codec_defs.h>
 #include <util/dynamic_loader.hpp>
 
 extern "C" {
@@ -12,6 +13,8 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
 #include <libavutil/mastering_display_metadata.h>
+
+#include <libavcodec/codec_id.h>
 }
 
 struct AVFrame;
@@ -94,5 +97,38 @@ template <> void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const;
 
 template <typename T>
 using AVPtr = std::unique_ptr<T, AVDeleter<T>>;
+
+static auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {
+  switch (id) {
+    case AV_CODEC_ID_H264: return OM_CODEC_H264;
+    case AV_CODEC_ID_HEVC: return OM_CODEC_H265;
+    case AV_CODEC_ID_VVC: return OM_CODEC_H266;
+    case AV_CODEC_ID_EVC: return OM_CODEC_EVC;
+    case AV_CODEC_ID_VP8: return OM_CODEC_VP8;
+    case AV_CODEC_ID_VP9: return OM_CODEC_VP9;
+    case AV_CODEC_ID_AV1: return OM_CODEC_AV1;
+    case AV_CODEC_ID_MPEG4: return OM_CODEC_MPEG4;
+    case AV_CODEC_ID_PRORES: return OM_CODEC_PRORES;
+    case AV_CODEC_ID_AAC: return OM_CODEC_AAC;
+    case AV_CODEC_ID_MP3: return OM_CODEC_MP3;
+    case AV_CODEC_ID_OPUS: return OM_CODEC_OPUS;
+    case AV_CODEC_ID_VORBIS: return OM_CODEC_VORBIS;
+    case AV_CODEC_ID_FLAC: return OM_CODEC_FLAC;
+    case AV_CODEC_ID_PCM_S16LE: return OM_CODEC_PCM_S16LE;
+    case AV_CODEC_ID_PCM_F32LE: return OM_CODEC_PCM_F32LE;
+    case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
+    case AV_CODEC_ID_AC3: return OM_CODEC_AC3;
+    case AV_CODEC_ID_EAC3: return OM_CODEC_EAC3;
+    case AV_CODEC_ID_AC4: return OM_CODEC_AC4;
+    case AV_CODEC_ID_MJPEG: return OM_CODEC_JPEG;
+    case AV_CODEC_ID_PNG: return OM_CODEC_PNG;
+    case AV_CODEC_ID_WEBP: return OM_CODEC_WEBP;
+    case AV_CODEC_ID_BMP: return OM_CODEC_BMP;
+    case AV_CODEC_ID_TIFF: return OM_CODEC_TIFF;
+    case AV_CODEC_ID_GIF: return OM_CODEC_GIF;
+    case AV_CODEC_ID_TARGA: return OM_CODEC_TGA;
+    default: return OM_CODEC_NONE;
+  }
+}
 
 } // namespace openmedia

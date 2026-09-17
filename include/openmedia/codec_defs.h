@@ -55,6 +55,7 @@ OM_ENUM(OMCodecId, uint32_t) {
   OM_CODEC_DTS = OM_MAGIC('DTS '),
   OM_CODEC_AC3 = OM_MAGIC('ac-3'),
   OM_CODEC_EAC3 = OM_MAGIC('ec-3'),
+  OM_CODEC_AC4 = OM_MAGIC('ac-4'),
   OM_CODEC_LC3 = OM_MAGIC('lc3 '),
   OM_CODEC_SBC = OM_MAGIC('sbc '),
   OM_CODEC_APTX = OM_MAGIC('aptX'),
