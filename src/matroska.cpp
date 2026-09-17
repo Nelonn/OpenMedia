@@ -18,6 +18,7 @@
 #include <openmedia/track.hpp>
 #include <openmedia/video.hpp>
 #include <span>
+#include <util/color_codes.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 
@@ -416,6 +417,7 @@ private:
           applyNalDecoderConfig(track, next_index);
         }
 
+        applyColour(vt, track);
         parseDolbyVisionBlockAdditionMapping(t, track);
 
         tracks_.push_back(track);
@@ -475,6 +477,92 @@ private:
     track.extradata = config->annexb_extradata;
     bsf_[stream_index] = std::make_unique<AnnexBFilter>(
         config->nal_length_size, std::move(config->annexb_extradata));
+  }
+
+  // Matroska describes colour in the Colour element of the video track using
+  // the same ISO/IEC 23001-8 codes MP4 keeps in `colr`, plus MasteringMetadata
+  // and MaxCLL/MaxFALL for HDR10. libwebm parses the element for us; all that
+  // is left is the unit conversion, because Matroska stores chromaticities and
+  // luminance as floats while the rest of the pipeline uses the SEI fixed point.
+  static void applyColour(const mkvparser::VideoTrack* vt, Track& track) {
+    const mkvparser::Colour* colour = vt->GetColour();
+    if (!colour) return;
+
+    auto& video = track.format.video;
+    const long long absent = mkvparser::Colour::kValueNotPresent;
+
+    if (colour->matrix_coefficients != absent) {
+      video.color_space = color_codes::colorSpaceFromMatrix(
+          static_cast<uint32_t>(colour->matrix_coefficients));
+    }
+    if (colour->transfer_characteristics != absent) {
+      video.transfer_char = color_codes::transferFromCode(
+          static_cast<uint32_t>(colour->transfer_characteristics));
+    }
+    if (colour->primaries != absent) {
+      video.color_primaries = color_codes::primariesFromCode(
+          static_cast<uint32_t>(colour->primaries));
+      // Files that name the primaries but not the matrix are common; the
+      // matrix that normally accompanies them is a better guess than BT.709.
+      if (colour->matrix_coefficients == absent) {
+        video.color_space = color_codes::colorSpaceFromPrimaries(
+            static_cast<uint32_t>(colour->primaries));
+      }
+    }
+    if (colour->range != absent) {
+      // 0 unspecified, 1 broadcast (limited), 2 full, 3 defined by the matrix.
+      switch (colour->range) {
+        case 1: video.color_range = OM_COLOR_RANGE_LIMITED; break;
+        case 2: video.color_range = OM_COLOR_RANGE_FULL; break;
+        default: break;
+      }
+    }
+
+    auto& cll = video.content_light_level;
+    if (colour->max_cll != absent && colour->max_cll > 0) {
+      cll.max_content_light_level = static_cast<uint16_t>(colour->max_cll);
+      cll.has_value = true;
+    }
+    if (colour->max_fall != absent && colour->max_fall > 0) {
+      cll.max_pic_average_light_level = static_cast<uint16_t>(colour->max_fall);
+      cll.has_value = true;
+    }
+
+    const mkvparser::MasteringMetadata* mm = colour->mastering_metadata;
+    if (!mm) return;
+
+    // Chromaticities are 0..1 and stored in 0.00002 units; luminance is cd/m^2
+    // stored in 0.0001 units. The primaries array follows the SEI order: green,
+    // blue, red.
+    auto chromaticity = [](const mkvparser::PrimaryChromaticity* c,
+                           uint16_t (&out)[2]) -> bool {
+      if (!c || c->x == mkvparser::MasteringMetadata::kValueNotPresent ||
+          c->y == mkvparser::MasteringMetadata::kValueNotPresent) {
+        return false;
+      }
+      out[0] = static_cast<uint16_t>(c->x * 50000.0f + 0.5f);
+      out[1] = static_cast<uint16_t>(c->y * 50000.0f + 0.5f);
+      return true;
+    };
+
+    auto& md = video.mastering_display;
+    bool any = false;
+    any |= chromaticity(mm->g, md.display_primaries[0]);
+    any |= chromaticity(mm->b, md.display_primaries[1]);
+    any |= chromaticity(mm->r, md.display_primaries[2]);
+    any |= chromaticity(mm->white_point, md.white_point);
+
+    if (mm->luminance_max != mkvparser::MasteringMetadata::kValueNotPresent) {
+      md.max_display_mastering_luminance =
+          static_cast<uint32_t>(mm->luminance_max * 10000.0f + 0.5f);
+      any = true;
+    }
+    if (mm->luminance_min != mkvparser::MasteringMetadata::kValueNotPresent) {
+      md.min_display_mastering_luminance =
+          static_cast<uint32_t>(mm->luminance_min * 10000.0f + 0.5f);
+      any = true;
+    }
+    md.has_value = any;
   }
 
   void parseDolbyVisionBlockAdditionMapping(const mkvparser::Track* parser_track, Track& track) {
@@ -769,6 +857,61 @@ public:
   }
 
 private:
+  // Mirror of applyColour on the way out: without this a remux of an HDR10
+  // source would lose everything the Colour element carried.
+  static void writeColour(mkvmuxer::VideoTrack* video_track, const Track& track) {
+    const auto& video = track.format.video;
+    mkvmuxer::Colour colour;
+    bool any = false;
+
+    if (video.color_space != OM_COLOR_SPACE_UNKNOWN) {
+      colour.set_matrix_coefficients(color_codes::matrixFromColorSpace(video.color_space));
+      any = true;
+    }
+    if (video.transfer_char != OM_TRANSFER_UNKNOWN) {
+      colour.set_transfer_characteristics(color_codes::codeFromTransfer(video.transfer_char));
+      any = true;
+    }
+    if (video.color_primaries != OM_PRIMARIES_UNKNOWN) {
+      colour.set_primaries(color_codes::codeFromPrimaries(video.color_primaries));
+      any = true;
+    }
+    if (video.color_range != OM_COLOR_RANGE_UNSPECIFIED) {
+      colour.set_range(video.color_range == OM_COLOR_RANGE_FULL ? 2u : 1u);
+      any = true;
+    }
+
+    if (video.content_light_level.has_value) {
+      colour.set_max_cll(video.content_light_level.max_content_light_level);
+      colour.set_max_fall(video.content_light_level.max_pic_average_light_level);
+      any = true;
+    }
+
+    if (video.mastering_display.has_value) {
+      const auto& md = video.mastering_display;
+      auto chromaticity = [](const uint16_t (&v)[2]) {
+        return mkvmuxer::PrimaryChromaticity(static_cast<float>(v[0]) / 50000.0f,
+                                             static_cast<float>(v[1]) / 50000.0f);
+      };
+      // display_primaries is in SEI order: green, blue, red.
+      const mkvmuxer::PrimaryChromaticity g = chromaticity(md.display_primaries[0]);
+      const mkvmuxer::PrimaryChromaticity b = chromaticity(md.display_primaries[1]);
+      const mkvmuxer::PrimaryChromaticity r = chromaticity(md.display_primaries[2]);
+      const mkvmuxer::PrimaryChromaticity wp = chromaticity(md.white_point);
+
+      mkvmuxer::MasteringMetadata mastering;
+      if (mastering.SetChromaticity(&r, &g, &b, &wp)) {
+        mastering.set_luminance_max(static_cast<float>(md.max_display_mastering_luminance) / 10000.0f);
+        mastering.set_luminance_min(static_cast<float>(md.min_display_mastering_luminance) / 10000.0f);
+        if (colour.SetMasteringMetadata(mastering)) any = true;
+      }
+    }
+
+    // Colour::Valid() rejects out-of-range values; writing an invalid element
+    // would fail the whole segment, so drop it instead.
+    if (any && colour.Valid()) video_track->SetColour(colour);
+  }
+
   auto addVideoTrack(const Track& track) -> uint64_t {
     const uint64_t track_number = segment_->AddVideoTrack(
         track.format.video.width, track.format.video.height, 0);
@@ -805,6 +948,8 @@ private:
       video_track->set_display_width(track.format.video.width);
       video_track->set_display_height(track.format.video.height);
     }
+
+    writeColour(video_track, track);
 
     if (const Value* value = track.metadata.get(DOLBY_VISION_BLOCK_ADD_ID)) {
       if (auto block_add_id = value->toInt64(); block_add_id && *block_add_id > 0) {

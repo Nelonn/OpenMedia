@@ -16,6 +16,7 @@
 #include <video/parser/av1_parser.hpp>
 #include <video/parser/vp9_parser.hpp>
 #include <video/parser/h265_parser.hpp>
+#include <video/hdr_sei.hpp>
 
 #include <mfapi.h>
 #include <mferror.h>
@@ -1229,6 +1230,11 @@ private:
   }
 
   auto decodeH264(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
+    // HDR10 static metadata only exists in the bitstream for H.26x; pick it
+    // out before the packet disappears into the hardware decoder.
+    hdr_sei::parseAnnexB(packet.bytes, false, output_format_.mastering_display,
+                         output_format_.content_light_level);
+
 
     auto parsed = h264_.parseFrame(packet.bytes);
     if (parsed.slice_offsets.empty()) return Ok(std::vector<Frame> {});
@@ -1470,6 +1476,11 @@ private:
   }
 
   auto decodeH265(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
+    // HDR10 static metadata only exists in the bitstream for H.26x; pick it
+    // out before the packet disappears into the hardware decoder.
+    hdr_sei::parseAnnexB(packet.bytes, true, output_format_.mastering_display,
+                         output_format_.content_light_level);
+
     if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
     auto frames = h265_->parse(packet.bytes, true);
     if (frames.empty()) return Ok(std::vector<Frame> {});

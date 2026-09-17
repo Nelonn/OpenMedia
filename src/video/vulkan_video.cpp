@@ -11,6 +11,7 @@
 #include <span>
 #include <video/parser/h264_parser.hpp>
 #include <video/parser/h265_parser.hpp>
+#include <video/hdr_sei.hpp>
 #include <video/parser/vp9_parser.hpp>
 #include <video/parser/av1_parser.hpp>
 #include <util/io_util.hpp>
@@ -684,6 +685,10 @@ public:
     if (packet.bytes.empty()) return Ok(std::vector<Frame>{});
 
     if (codec_id_ == OM_CODEC_H264) {
+      // HDR10 static metadata only exists in the bitstream for H.26x; pick it
+      // out before the packet disappears into the hardware decoder.
+      hdr_sei::parseAnnexB(packet.bytes, false, output_format_.mastering_display,
+                           output_format_.content_light_level);
       auto parsed_frames = h264_parser_.parse(packet.bytes);
       syncH264ParserState();
 
@@ -725,6 +730,10 @@ public:
       }
       return Ok(std::move(frames));
     } else if (codec_id_ == OM_CODEC_H265) {
+      // HDR10 static metadata only exists in the bitstream for H.26x; pick it
+      // out before the packet disappears into the hardware decoder.
+      hdr_sei::parseAnnexB(packet.bytes, true, output_format_.mastering_display,
+                           output_format_.content_light_level);
       auto parsed_frames = h265_parser_.parse(packet.bytes);
       has_h265_sps_ = h265_parser_.hasSps();
       has_h265_pps_ = h265_parser_.hasPps();
