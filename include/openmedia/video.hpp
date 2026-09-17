@@ -325,13 +325,16 @@ struct OPENMEDIA_ABI HostPicture {
 class OPENMEDIA_ABI HardwarePicture {
 protected:
   HWDeviceType type_ = HWDeviceType::NONE;
+  void* picture_ = nullptr;
 
 public:
-  explicit HardwarePicture(HWDeviceType type)
-      : type_(type) {}
+  explicit HardwarePicture(HWDeviceType type, void* picture = nullptr)
+      : type_(type), picture_(picture) {}
   virtual ~HardwarePicture() = default;
 
   auto getType() const noexcept -> HWDeviceType { return type_; }
+
+  auto getPicture() const noexcept -> void* { return picture_; }
 };
 
 using PictureBuffer = std::variant<HostPicture, std::shared_ptr<HardwarePicture>>;

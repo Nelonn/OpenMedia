@@ -18,7 +18,7 @@ class DX11HardwarePicture : public HardwarePicture {
 public:
   OMDX11Picture* pic;
   explicit DX11HardwarePicture(OMDX11Picture* p)
-      : HardwarePicture(HWDeviceType::DX11), pic(p) {}
+      : HardwarePicture(HWDeviceType::DX11, p), pic(p) {}
   ~DX11HardwarePicture() override = default;
 
   auto texture() const -> ID3D11Texture2D* { return pic ? pic->texture : nullptr; }
@@ -28,7 +28,7 @@ class DX12HardwarePicture : public HardwarePicture {
 public:
   OMDX12Picture* pic;
   explicit DX12HardwarePicture(OMDX12Picture* p)
-      : HardwarePicture(HWDeviceType::DX12), pic(p) {}
+      : HardwarePicture(HWDeviceType::DX12, p), pic(p) {}
 };
 #endif
 

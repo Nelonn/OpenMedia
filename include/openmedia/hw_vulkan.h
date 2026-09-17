@@ -78,7 +78,7 @@ class OPENMEDIA_ABI VulkanHardwarePicture : public HardwarePicture {
 public:
   OMVulkanPicture* picture = nullptr;
   VulkanHardwarePicture(OMVulkanPicture* pic)
-      : HardwarePicture(HWDeviceType::VULKAN), picture(pic) {}
+      : HardwarePicture(HWDeviceType::VULKAN, pic), picture(pic) {}
 };
 
 } // namespace openmedia
