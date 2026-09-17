@@ -7,8 +7,8 @@
 namespace openmedia {
 
 struct OPENMEDIA_ABI Frame {
-  uint64_t pts = 0;
-  uint64_t dts = 0;
+  int64_t pts = 0;
+  int64_t dts = 0;
   std::variant<AudioSamples, Picture> data;
 };
 
