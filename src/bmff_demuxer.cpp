@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <annexb.hpp>
+#include <nal_config.hpp>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -529,103 +530,30 @@ inline void parseBtrt(std::span<const uint8_t> body, BMFFTrack& track) {
 
 inline auto parseAvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
-  if (body.size() < 7) return false;
-  ByteReader r(body);
+  auto config = parseAvcDecoderConfig(body);
+  if (!config) return false;
 
-  r.skip(1); // configurationVersion
-  const uint8_t profile_idc = r.u8(); // AVCProfileIndication
-  const uint8_t profile_compat = r.u8(); // profile_compatibility
-  r.skip(1); // AVCLevelIndication
-
-  if (profile_idc == 66 && (profile_compat & 0x40u)) {
-    track.track.format.profile = OM_PROFILE_H264_CONSTRAINED_BASELINE;
-  } else {
-    track.track.format.profile = static_cast<OMProfile>(profile_idc);
-  }
-
-  const uint8_t nalu_len_sz = (r.u8() & 0x03u) + 1u;
-
-  std::vector<uint8_t> annexb_extra;
-  auto extract_nals = [&](uint8_t count) {
-    for (uint8_t i = 0; i < count; ++i) {
-      uint16_t nal_size = r.u16be();
-      if (r.remaining() < nal_size) break;
-      annexb_extra.insert(annexb_extra.end(),
-                          AnnexBFilter::START_CODE_LONG,
-                          AnnexBFilter::START_CODE_LONG + 4);
-      const uint8_t* ptr = r.cur();
-      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
-      r.skip(nal_size);
-    }
-  };
-
-  uint8_t num_sps = r.u8() & 0x1Fu;
-  extract_nals(num_sps);
-  if (r.remaining() > 0) {
-    uint8_t num_pps = r.u8();
-    extract_nals(num_pps);
-  }
-
-  track.track.extradata = annexb_extra;
+  track.track.format.profile = config->constrained_baseline
+      ? OM_PROFILE_H264_CONSTRAINED_BASELINE
+      : static_cast<OMProfile>(config->profile_idc);
+  track.track.extradata = config->annexb_extradata;
   track.bsf = std::make_unique<AnnexBFilter>(
-      nalu_len_sz, std::move(annexb_extra));
+      config->nal_length_size, std::move(config->annexb_extradata));
 
   return true;
 }
 
 inline auto parseHvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
-  if (body.size() < 23) return false;
+  auto config = parseHevcDecoderConfig(body);
+  if (!config) return false;
 
-  ByteReader r(body);
-
-  r.skip(1); // configurationVersion
-  const uint8_t ptl_byte = r.u8();
-  const uint8_t profile_idc = ptl_byte & 0x1Fu; // general_profile_idc
-  r.skip(4); // general_profile_compatibility_flags
-  r.skip(6); // general_constraint_indicator_flags (48 bit)
-  r.skip(1); // general_level_idc
-  r.skip(2); // min_spatial_segmentation_idc
-  r.skip(1); // parallelismType
-  r.skip(1); // chromaFormat
-  r.skip(1); // bitDepthLumaMinus8
-  r.skip(1); // bitDepthChromaMinus8
-  r.skip(2); // avgFrameRate
-
-  const uint8_t nalu_len_sz = (r.u8() & 0x03u) + 1u;
-  const uint8_t num_arrays = r.u8();
-
-  if (profile_idc) {
-    track.track.format.profile = static_cast<OMProfile>(profile_idc);
+  if (config->profile_idc) {
+    track.track.format.profile = static_cast<OMProfile>(config->profile_idc);
   }
-
-  std::vector<uint8_t> annexb_extra;
-
-  for (uint8_t i = 0; i < num_arrays; ++i) {
-    if (r.remaining() < 3) break;
-
-    r.skip(1);
-    const uint16_t num_nalus = r.u16be();
-
-    for (uint16_t j = 0; j < num_nalus; ++j) {
-      if (r.remaining() < 2) break;
-      const uint16_t nal_size = r.u16be();
-      if (r.remaining() < nal_size) break;
-
-      annexb_extra.insert(annexb_extra.end(),
-                          AnnexBFilter::START_CODE_LONG,
-                          AnnexBFilter::START_CODE_LONG + 4);
-      const uint8_t* ptr = r.cur();
-      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
-      r.skip(nal_size);
-    }
-  }
-
-  if (annexb_extra.empty()) return false;
-
-  track.track.extradata = annexb_extra;
+  track.track.extradata = config->annexb_extradata;
   track.bsf = std::make_unique<AnnexBFilter>(
-      nalu_len_sz, std::move(annexb_extra));
+      config->nal_length_size, std::move(config->annexb_extradata));
 
   return true;
 }
@@ -660,154 +588,15 @@ inline auto parseDolbyVisionConfiguration(std::span<const uint8_t> body,
 
 inline auto parseVvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
-  if (body.size() < 2) return false;
+  auto config = parseVvcDecoderConfig(body);
+  if (!config) return false;
 
-  fprintf(stderr, "vvcC body[%zu]: ", body.size());
-  for (size_t i = 0; i < std::min(body.size(), size_t{16}); ++i) {
-    fprintf(stderr, "%02x ", body[i]);
+  if (config->profile_idc) {
+    track.track.format.profile = static_cast<OMProfile>(config->profile_idc);
   }
-  fprintf(stderr, "\n");
-
-  ByteReader r(body);
-
-  // byte 0: configurationVersion (must be 1)
-  const uint8_t config_version = r.u8();
-  if (config_version != 1) {
-    return false;
-  }
-
-  // byte 1: lengthSizeMinusOne(2) | ptl_present_flag(1) | reserved(5)
-  // ISO 14496-15:2022 §11.2.4.2 VvcDecoderConfigurationRecord
-  const uint8_t flags       = r.u8();
-  const uint8_t nalu_len_sz = ((flags >> 5) & 0x03u) + 1u;  // bits [6:5]
-  const bool    ptl_present = (flags & 0x10u) != 0;          // bit 4
-
-  if (ptl_present) {
-    // bytes [2..3]:
-    //   ols_idx(9 bits) | num_sublayers(3 bits) | constant_frame_rate(2 bits)
-    //   | chroma_format_idc(2 bits)
-    // byte [4]: bit_depth_minus8(3) | reserved(5)
-    if (r.remaining() < 3) {
-      return false;
-    }
-    const uint8_t b0 = r.u8();
-    const uint8_t b1 = r.u8();
-    // b0 = ols_idx[8:1], b1[7] = ols_idx[0]
-    // b1[6:4] = num_sublayers, b1[3:2] = constant_frame_rate
-    // b1[1:0] = chroma_format_idc
-    const uint8_t num_sublayers = (b1 >> 4) & 0x07u;
-    r.skip(1);  // bit_depth_minus8(3) | reserved(5)
-
-    // --- VvcPTL() — ISO 14496-15:2022 §11.2.4.3 ---
-
-    // byte: general_profile_idc(7) | general_tier_flag(1)
-    if (r.remaining() < 1) {
-      return false;
-    }
-    const uint8_t ptl_b0      = r.u8();
-    const uint8_t profile_idc = ptl_b0 >> 1;   // bits [7:1]
-    if (profile_idc) {
-      track.track.format.profile = static_cast<OMProfile>(profile_idc);
-    }
-
-    // byte: general_level_idc(8)
-    if (r.remaining() < 1) {
-      return false;
-    }
-    r.skip(1);
-
-    // byte: ptl_frame_only_constraint_flag(1) | ptl_multi_layer_enabled_flag(1)
-    //       | gci_present_flag(1) | reserved(5)
-    if (r.remaining() < 1) {
-      return false;
-    }
-    const uint8_t constraint_byte = r.u8();
-    const bool    gci_present     = (constraint_byte >> 5) & 0x01u;  // bit 5
-
-    if (gci_present) {
-      // general_constraint_info() is exactly 12 bytes in the stored record
-      // (ISO 14496-15 §11.2 specifies the in-file form is byte-aligned to 12 B)
-      if (r.remaining() < 12) {
-        return false;
-      }
-      r.skip(12);
-    }
-
-    // ptl_sublayer_level_present_flag[i] for i in [num_sublayers-2 .. 0]
-    // That is (num_sublayers - 1) flags, packed MSB-first then byte-padded.
-    if (num_sublayers > 1) {
-      const uint32_t flag_count = num_sublayers - 1u;
-      const uint32_t flag_bytes = (flag_count + 7u) / 8u;
-      if (r.remaining() < flag_bytes) {
-        return false;
-      }
-
-      uint8_t present_count = 0;
-      for (uint32_t fb = 0; fb < flag_bytes; ++fb) {
-        const uint8_t fbyte      = r.u8();
-        const uint32_t bits_used = (fb == flag_bytes - 1u)
-            ? flag_count - fb * 8u
-            : 8u;
-        for (uint32_t bit = 0; bit < bits_used; ++bit) {
-          if ((fbyte >> (7u - bit)) & 0x01u) ++present_count;
-        }
-      }
-
-      // Each flagged sublayer has one level_idc byte
-      if (r.remaining() < present_count) {
-        return false;
-      }
-      r.skip(present_count);
-    }
-
-    // ptl_num_sub_profiles(8) followed by N × 4-byte sub-profile IDCs
-    if (r.remaining() < 1) {
-      return false;
-    }
-    const uint8_t num_sub_profiles   = r.u8();
-    const size_t  sub_profile_bytes  = static_cast<size_t>(num_sub_profiles) * 4u;
-    if (r.remaining() < sub_profile_bytes) {
-      return false;
-    }
-    r.skip(sub_profile_bytes);
-  }
-
-  // num_of_arrays(8)
-  if (r.remaining() < 1) {
-    return false;
-  }
-  const uint8_t num_arrays = r.u8();
-
-  std::vector<uint8_t> annexb_extra;
-
-  for (uint8_t i = 0; i < num_arrays; ++i) {
-    // array_completeness(1) | reserved(1) | nal_unit_type(6)
-    if (r.remaining() < 3) break;
-    r.skip(1);
-    const uint16_t num_nalus = r.u16be();
-
-    for (uint16_t j = 0; j < num_nalus; ++j) {
-      if (r.remaining() < 2) break;
-      const uint16_t nal_size = r.u16be();
-      if (nal_size == 0) continue;
-      if (r.remaining() < nal_size) break;
-
-      annexb_extra.insert(annexb_extra.end(),
-                          AnnexBFilter::START_CODE_LONG,
-                          AnnexBFilter::START_CODE_LONG + 4);
-      const uint8_t* ptr = r.cur();
-      annexb_extra.insert(annexb_extra.end(), ptr, ptr + nal_size);
-      r.skip(nal_size);
-    }
-  }
-
-  if (annexb_extra.empty()) {
-    return false;
-  }
-
-  track.track.extradata = annexb_extra;
+  track.track.extradata = config->annexb_extradata;
   track.bsf = std::make_unique<AnnexBFilter>(
-      nalu_len_sz, std::move(annexb_extra));
+      config->nal_length_size, std::move(config->annexb_extradata));
 
   return true;
 }

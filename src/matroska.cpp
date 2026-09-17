@@ -2,10 +2,12 @@
 #include <mkvmuxer/mkvwriter.h>
 #include <mkvparser/mkvparser.h>
 #include <mkvparser/mkvreader.h>
+#include <annexb.hpp>
 #include <cstring>
 #include <format>
 #include <limits>
 #include <map>
+#include <nal_config.hpp>
 #include <optional>
 #include <openmedia/audio.hpp>
 #include <openmedia/format_api.hpp>
@@ -130,6 +132,10 @@ class MatroskaDemuxer final : public BaseDemuxer {
 
   std::map<int32_t, int32_t> track_map_;
 
+  // Length-prefixed NAL streams (CodecPrivate is an avcC/hvcC/vvcC record) are
+  // rewritten to Annex-B on the way out; indexed by track index.
+  std::map<int32_t, std::unique_ptr<BitStreamFilter>> bsf_;
+
   const mkvparser::Cluster* current_cluster_ = nullptr;
   const mkvparser::BlockEntry* current_block_entry_ = nullptr;
   long long next_cluster_pos_ = 0;
@@ -207,6 +213,7 @@ public:
     segment_.reset();
     mkv_reader_.reset();
     track_map_.clear();
+    bsf_.clear();
     input_.reset();
   }
 
@@ -329,11 +336,27 @@ private:
     const mkvparser::Block::Frame& frame =
         current_block_->GetFrame(current_frame_index_++);
 
-    Packet pkt;
-    pkt.allocate(static_cast<size_t>(frame.len));
-
-    if (frame.Read(mkv_reader_.get(), pkt.bytes.data()) < 0)
+    std::vector<uint8_t> raw(static_cast<size_t>(frame.len));
+    if (frame.Read(mkv_reader_.get(), raw.data()) < 0)
       return Err(OM_FORMAT_PARSE_FAILED);
+
+    std::vector<uint8_t> converted;
+    FilteredBitstream filtered;
+    std::span<const uint8_t> payload(raw);
+
+    if (auto it = bsf_.find(current_stream_index_); it != bsf_.end()) {
+      if (current_is_keyframe_) {
+        converted = it->second->convert(payload, true);
+        payload = converted;
+      } else {
+        filtered = it->second->filter(std::move(raw));
+        payload = filtered.bytes;
+      }
+    }
+
+    Packet pkt;
+    pkt.allocate(payload.size());
+    std::memcpy(pkt.bytes.data(), payload.data(), payload.size());
 
     pkt.pts = current_timestamp_tc_;
     pkt.dts = current_timestamp_tc_;
@@ -389,6 +412,7 @@ private:
         const unsigned char* cp = t->GetCodecPrivate(cp_size);
         if (cp && cp_size) {
           track.extradata.assign(cp, cp + cp_size);
+          applyNalDecoderConfig(track, next_index);
         }
 
         parseDolbyVisionBlockAdditionMapping(t, track);
@@ -421,6 +445,35 @@ private:
     }
 
     return OM_SUCCESS;
+  }
+
+  // H.264/H.265/H.266 in Matroska store the same decoder configuration record
+  // MP4 keeps in its sample entry, and the frames are length-prefixed NAL units
+  // rather than Annex-B. Decoders here expect Annex-B, so replace the extradata
+  // with the parameter sets and install a filter for the frames.
+  void applyNalDecoderConfig(Track& track, int32_t stream_index) {
+    // Some muxers store the parameter sets as a plain Annex-B stream instead of
+    // a configuration record; those frames are already Annex-B too.
+    if (isAnnexBBitstream(track.extradata)) return;
+
+    std::optional<NalDecoderConfig> config;
+    switch (track.format.codec_id) {
+      case OM_CODEC_H264: config = parseAvcDecoderConfig(track.extradata); break;
+      case OM_CODEC_H265: config = parseHevcDecoderConfig(track.extradata); break;
+      case OM_CODEC_VVC:  config = parseVvcDecoderConfig(track.extradata); break;
+      default: return;
+    }
+    if (!config || config->annexb_extradata.empty()) return;
+
+    if (config->profile_idc) {
+      track.format.profile = config->constrained_baseline
+          ? OM_PROFILE_H264_CONSTRAINED_BASELINE
+          : static_cast<OMProfile>(config->profile_idc);
+    }
+
+    track.extradata = config->annexb_extradata;
+    bsf_[stream_index] = std::make_unique<AnnexBFilter>(
+        config->nal_length_size, std::move(config->annexb_extradata));
   }
 
   void parseDolbyVisionBlockAdditionMapping(const mkvparser::Track* parser_track, Track& track) {

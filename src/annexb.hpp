@@ -33,27 +33,26 @@ public:
   }
 
   auto filter(BitStreamFilterInput input) const -> FilteredBitstream override {
-    if (input.bytes.empty() || isAnnexB(input.bytes)) {
+    // The leading bytes alone cannot tell the two layouts apart: a 4-byte NAL
+    // length of 256..511 is 00 00 01 xx, which reads as a start code followed
+    // by a NAL header. Walking the length prefixes settles it, because that
+    // only lands exactly on the end of the packet for a real length-prefixed
+    // one; the Annex-B guess is what is left when no length size fits.
+    const uint8_t length_size = lengthPrefixSizeOf(input.bytes);
+
+    if (length_size == 0) {
       if (input.ownsBytes()) return makeFilteredBitstream(std::move(input.storage), input.bytes.size(), false);
       return makeFilteredBitstream(input.bytes);
     }
 
     auto mutable_bytes = input.mutableBytes();
     if (!mutable_bytes.empty()) {
-      if (auto size = rewriteLengthPrefixedInPlace(mutable_bytes, nal_length_size_, start_code_length_)) {
+      if (auto size = rewriteLengthPrefixedInPlace(mutable_bytes, length_size, start_code_length_)) {
         return makeFilteredBitstream(std::move(input.storage), *size, true);
-      }
-      if (fallback_nal_length_size_ != nal_length_size_) {
-        if (auto size = rewriteLengthPrefixedInPlace(mutable_bytes, fallback_nal_length_size_, start_code_length_)) {
-          return makeFilteredBitstream(std::move(input.storage), *size, true);
-        }
       }
     }
 
-    auto converted = convertLengthPrefixed(input.bytes, nal_length_size_, start_code_length_);
-    if (converted.empty() && fallback_nal_length_size_ != nal_length_size_) {
-      converted = convertLengthPrefixed(input.bytes, fallback_nal_length_size_, start_code_length_);
-    }
+    auto converted = convertLengthPrefixed(input.bytes, length_size, start_code_length_);
 
     if (converted.empty()) {
       if (input.ownsBytes()) return makeFilteredBitstream(std::move(input.storage), input.bytes.size(), false);
@@ -75,6 +74,31 @@ private:
 
   static auto validLengthSize(uint8_t nal_length_size) noexcept -> uint8_t {
     return nal_length_size <= 4 ? nal_length_size : 0;
+  }
+
+  // Returns the configured NAL length size whose prefixes tile the packet
+  // exactly, or 0 when neither does and the packet has to be taken as Annex-B.
+  auto lengthPrefixSizeOf(std::span<const uint8_t> input) const noexcept -> uint8_t {
+    if (input.empty()) return 0;
+    if (isLengthPrefixed(input, nal_length_size_)) return nal_length_size_;
+    if (fallback_nal_length_size_ != nal_length_size_ &&
+        isLengthPrefixed(input, fallback_nal_length_size_)) {
+      return fallback_nal_length_size_;
+    }
+    return 0;
+  }
+
+  static auto isLengthPrefixed(std::span<const uint8_t> input, uint8_t nal_length_size) noexcept -> bool {
+    if (nal_length_size == 0) return false;
+
+    size_t offset = 0;
+    while (offset < input.size()) {
+      if (offset + nal_length_size > input.size()) return false;
+      const uint32_t nal_size = readNalSize(input, offset, nal_length_size);
+      if (nal_size == 0) return false;
+      offset += nal_length_size + nal_size;
+    }
+    return offset == input.size();
   }
 
   static auto readNalSize(std::span<const uint8_t> input, size_t offset, uint8_t nal_length_size) noexcept -> uint32_t {
