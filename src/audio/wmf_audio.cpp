@@ -245,8 +245,8 @@ public:
 
         LONGLONG sample_time = 0;
         int64_t pts = 0;
-        if (SUCCEEDED(output_buffer.pSample->GetSampleTime(&sample_time))) {
-          pts = sample_time * output_format_.sample_rate / 10000000;
+        if (SUCCEEDED(output_buffer.pSample->GetSampleTime(&sample_time)) && timescale_ > 0) {
+          pts = sample_time / timescale_;
         }
 
         memcpy(samples_fmt.planes.data[0], data, current_len);
