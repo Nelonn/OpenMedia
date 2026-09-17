@@ -349,6 +349,15 @@ struct TREXEntry {
   uint32_t default_sample_flags = 0;
 };
 
+// Timestamps from different tracks only compare once they are off their own
+// timescales. Split rather than multiplied first, so a long file cannot
+// overflow on the way.
+inline auto toNanoseconds(int64_t value, uint32_t timescale) -> int64_t {
+  if (timescale == 0) return value;
+  const int64_t scale = static_cast<int64_t>(timescale);
+  return (value / scale) * 1'000'000'000LL + ((value % scale) * 1'000'000'000LL) / scale;
+}
+
 struct Sample {
   int64_t offset = 0;
   uint32_t size = 0;
@@ -1057,20 +1066,40 @@ public:
 
     if (tracks_.empty()) return OM_FORMAT_PARSE_FAILED;
 
+    // Merge the per-track sample lists in decode order.
+    //
+    // Merging by file offset instead just replays however the file happens to
+    // be laid out, and a file may not be interleaved at all: this one stores
+    // 1500 video samples before its first audio sample. A reader that follows
+    // that order hands a player a minute and a half of video before any sound,
+    // which no amount of queueing downstream can absorb. Ordering by timestamp
+    // costs nothing here — the samples are addressed by offset anyway — and
+    // gives the same interleaving whatever the file looks like.
     using Iter = std::vector<Sample>::iterator;
-    struct Run { Iter cur, end; };
+    struct Run {
+      Iter cur, end;
+      uint32_t timescale = 0;
+    };
     std::vector<Run> runs;
     runs.reserve(bmff_tracks_.size());
     for (auto& t : bmff_tracks_) {
       if (!t.samples.empty()) {
-        runs.push_back({t.samples.begin(), t.samples.end()});
+        runs.push_back({t.samples.begin(), t.samples.end(),
+                        t.timescale ? t.timescale : movie_timescale_});
       }
     }
 
     while (!runs.empty()) {
       auto best = runs.begin();
+      int64_t best_dts = toNanoseconds(best->cur->dts, best->timescale);
       for (auto it = runs.begin() + 1; it != runs.end(); ++it) {
-        if (it->cur->offset < best->cur->offset) best = it;
+        const int64_t dts = toNanoseconds(it->cur->dts, it->timescale);
+        // Equal timestamps keep the file's own order, so a sample is never
+        // read further ahead of its neighbours than it has to be.
+        if (dts < best_dts || (dts == best_dts && it->cur->offset < best->cur->offset)) {
+          best = it;
+          best_dts = dts;
+        }
       }
       samples_.push_back(*best->cur);
       if (++best->cur == best->end)
