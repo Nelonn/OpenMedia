@@ -28,7 +28,8 @@ static constexpr uint64_t MKV_BLOCK_ADDITION_MAPPING = 0x41E4;
 static constexpr uint64_t MKV_BLOCK_ADD_ID_VALUE = 0x41F0;
 static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE = 0x41E7;
 static constexpr uint64_t MKV_BLOCK_ADD_ID_EXTRA_DATA = 0x41ED;
-static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE_DOLBY_VISION = 4;
+static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE_DVCC = 0x64766343; // 'dvcC'
+static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE_DVVC = 0x64767643; // 'dvvC'
 
 struct EbmlElementView {
   uint64_t id = 0;
@@ -518,7 +519,8 @@ private:
         }
       }
 
-      if (block_add_type == MKV_BLOCK_ADD_ID_TYPE_DOLBY_VISION) {
+      if (block_add_type == MKV_BLOCK_ADD_ID_TYPE_DVCC ||
+          block_add_type == MKV_BLOCK_ADD_ID_TYPE_DVVC) {
         track.metadata.setBool(DOLBY_VISION_PRESENT, true);
         if (block_add_id) {
           track.metadata.setInt32(DOLBY_VISION_BLOCK_ADD_ID, static_cast<int32_t>(*block_add_id));
