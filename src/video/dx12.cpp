@@ -72,7 +72,8 @@ class DX12Decoder final : public Decoder {
   dx_h264::State h264_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
   dx_h265::PocState h265_poc_;
-  std::vector<dx_h264::DpbEntry> dpb_;
+  std::vector<dx_h264::DpbEntry> dpb_; // HEVC
+  dx_h264::Dpb h264_dpb_;
   D3D12_RESOURCE_STATES dpb_states_[17] = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
@@ -107,7 +108,13 @@ public:
           if (!h264_.sps_valid[i]) continue;
           padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
           padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-          dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 1, 2, 17);
+          // max_num_ref_frames slots for the reference pictures the DPB holds,
+          // one for the picture being decoded, and one more so a non-reference
+          // picture always has somewhere to go that no reference occupies.
+          dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 2, 3, 17);
+          h264_dpb_.configure(dpb_slot_count_,
+                              static_cast<uint32_t>(h264_.sps[i].num_ref_frames),
+                              1u << (h264_.sps[i].log2_max_frame_num_minus4 + 4));
           bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
           // The D3D12 decode profiles used here are 4:2:0 only; taking a 4:2:2
           // or 4:4:4 stream would silently produce a wrong picture.
@@ -212,6 +219,7 @@ public:
   void flush() override {
     resetReceiveState();
     for (auto& entry : dpb_) entry = {};
+    h264_dpb_.reset();
     reference_usage_.clear();
     h264_reorder_queue_.clear();
     next_slot_ = 0;
@@ -221,13 +229,6 @@ public:
   }
 
 private:
-  static auto h264ReorderDepth(const h264::SPS& sps) -> size_t {
-    if (sps.vui_parameters_present_flag && sps.vui.bitstream_restriction_flag) {
-      return static_cast<size_t>(std::clamp(sps.vui.num_reorder_frames, 0, 16));
-    }
-    return 0;
-  }
-
   auto pushH264Reordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
     if (reorder_depth == 0) return {std::move(frame)};
 
@@ -269,16 +270,19 @@ private:
     std::vector<Frame> pre_output;
     if (parsed.is_intra) {
       pre_output = drainH264Reordered();
-      for (auto& entry : dpb_) entry.is_reference = false;
-      reference_usage_.clear();
-      next_ref_ = 0;
-      next_slot_ = 0;
+      h264_dpb_.reset();
       h264_.resetPoc();
-      parsed.poc = h264_.computePoc(parsed.slice);
+      parsed.poc = h264_.computePoc(parsed.slice, parsed.is_reference);
     }
 
     std::memcpy(bitstream_ptr_, parsed.bitstream.data(), parsed.bitstream.size());
-    const uint32_t current_slot = next_slot_;
+
+    // Resolve the short-term pictures against this frame_num before anything
+    // reads or marks them, then take a slot the DPB is not holding a reference
+    // in — including for non-reference pictures, which must not be decoded over
+    // a surface the stream still refers to.
+    h264_dpb_.updatePicNums(static_cast<uint32_t>(parsed.slice.frame_num));
+    const uint32_t current_slot = h264_dpb_.acquireSlot();
 
     HRESULT hr = recordDecode(parsed, sps, pps, current_slot);
     if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
@@ -286,21 +290,13 @@ private:
     auto picture = download(current_slot);
     if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
 
-    dpb_[current_slot].poc = parsed.poc;
-    dpb_[current_slot].frame_num = static_cast<uint32_t>(parsed.slice.frame_num);
-    dpb_[current_slot].is_reference = parsed.is_reference;
-    if (parsed.is_reference && dpb_slot_count_ > 1) {
-      if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
-      reference_usage_[next_ref_] = static_cast<uint8_t>(current_slot);
-      next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
-      next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
-    }
+    h264_dpb_.store(current_slot, parsed.poc, parsed.slice, parsed.is_intra, parsed.is_reference);
 
     Frame frame = {};
     frame.pts = packet.pts;
     frame.dts = packet.dts;
     frame.data = std::move(*picture);
-    auto output = pushH264Reordered(std::move(frame), parsed.poc, h264ReorderDepth(sps));
+    auto output = pushH264Reordered(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
     if (!pre_output.empty()) {
       pre_output.insert(pre_output.end(), std::make_move_iterator(output.begin()), std::make_move_iterator(output.end()));
       return Ok(std::move(pre_output));
@@ -608,7 +604,7 @@ private:
     input.pHeap = decoder_heap_.Get();
 
     DXVA_PicParams_H264 pic = {};
-    dx_h264::fillPicParams(sps, pps, parsed.slice, parsed, current_slot, reference_usage_, dpb_, feedback_++, pic);
+    dx_h264::fillPicParams(sps, pps, parsed.slice, parsed, current_slot, h264_dpb_, feedback_++, pic);
     DXVA_Qmatrix_H264 qmatrix = {};
     dx_h264::fillQMatrix(sps, pps, qmatrix);
     std::vector<DXVA_Slice_H264_Short> slices(parsed.slice_offsets.size());

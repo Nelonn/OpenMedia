@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -130,7 +131,12 @@ struct State {
     }
   }
 
-  auto computePoc(const h264::SliceHeader& slice) -> int32_t {
+  // 8.2.1.1. prevPicOrderCntMsb/Lsb come from the previous *reference* picture
+  // in decoding order; letting non-reference pictures update them made the MSB
+  // step at the wrong moment once pic_order_cnt_lsb wrapped, which put the
+  // reordering queue and the DXVA field order counts out of step with the
+  // stream.
+  auto computePoc(const h264::SliceHeader& slice, bool is_reference) -> int32_t {
     if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !pps_valid[slice.pic_parameter_set_id]) {
       return slice.pic_order_cnt_lsb;
     }
@@ -153,9 +159,11 @@ struct State {
         pic_order_cnt_msb = prev_pic_order_cnt_msb;
       }
     }
-    prev_pic_order_cnt_lsb = slice.pic_order_cnt_lsb;
-    prev_pic_order_cnt_msb = pic_order_cnt_msb;
-    have_prev_poc = true;
+    if (is_reference) {
+      prev_pic_order_cnt_lsb = slice.pic_order_cnt_lsb;
+      prev_pic_order_cnt_msb = pic_order_cnt_msb;
+      have_prev_poc = true;
+    }
     return pic_order_cnt_msb + slice.pic_order_cnt_lsb;
   }
 
@@ -194,15 +202,271 @@ struct State {
 
     frame.is_intra = frame.nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
     frame.is_reference = frame.nal.idc != h264::NAL_REF_IDC_PRIORITY_DISPOSABLE;
-    frame.poc = computePoc(frame.slice);
+    frame.poc = computePoc(frame.slice, frame.is_reference);
     return frame;
   }
 };
+
+// Annex A Table A-1: the DPB capacity, in macroblocks, that each level
+// guarantees a decoder will provide.
+static auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
+  switch (level_idc) {
+    case 10: return 396;
+    case 11: return 900;
+    case 12:
+    case 13:
+    case 20: return 2376;
+    case 21: return 4752;
+    case 22:
+    case 30: return 8100;
+    case 31: return 18000;
+    case 32: return 20480;
+    case 40:
+    case 41: return 32768;
+    case 42: return 34816;
+    case 50: return 110400;
+    case 51:
+    case 52: return 184320;
+    default: return 696320; // level 6.x and anything newer
+  }
+}
+
+// How many decoded pictures may be held back to put them into output order.
+//
+// A stream that carries bitstream_restriction_flag states this outright. Without
+// it this used to return 0, meaning no reordering at all, so a stream with
+// B-frames was emitted in decode order and its timestamps ran backwards. The
+// fallback is the DPB capacity the stream's own level guarantees, which is what
+// a decoder is entitled to assume when the stream stays silent.
+static auto reorderDepth(const h264::SPS& sps) -> size_t {
+  if (sps.vui_parameters_present_flag && sps.vui.bitstream_restriction_flag) {
+    return static_cast<size_t>(std::clamp(sps.vui.num_reorder_frames, 0, 16));
+  }
+
+  const uint32_t width_mbs = static_cast<uint32_t>(sps.pic_width_in_mbs_minus1) + 1u;
+  const uint32_t height_mbs = (static_cast<uint32_t>(sps.pic_height_in_map_units_minus1) + 1u) *
+                              (sps.frame_mbs_only_flag ? 1u : 2u);
+  const uint32_t frame_mbs = width_mbs * height_mbs;
+  if (frame_mbs == 0) return 16;
+
+  const uint32_t frames = maxDpbMbsForLevel(sps.level_idc) / frame_mbs;
+  return static_cast<size_t>(std::clamp<uint32_t>(frames, 1u, 16u));
+}
 
 struct DpbEntry {
   int32_t poc = 0;
   uint32_t frame_num = 0;
   bool is_reference = false;
+  bool is_long_term = false;
+  int32_t long_term_frame_idx = -1;
+  // FrameNumWrap, recomputed against the current picture's frame_num. The MMCO
+  // operations address short-term pictures by this, not by frame_num.
+  int32_t pic_num = 0;
+};
+
+// The decoded picture buffer and the reference picture marking process of
+// ITU-T H.264 8.2.5.
+//
+// There used to be no marking at all: slots were handed out round-robin and
+// every picture decoded into one stayed flagged as a reference until the next
+// IDR. Once more pictures had been decoded than the stream's max_num_ref_frames,
+// the reference list handed to DXVA described pictures the stream had long since
+// retired, and the driver answered by emitting a copy of a reference instead of
+// a decoded picture. Streams without B-frames never got far enough into the list
+// for it to matter, which is why only some clips broke.
+class Dpb {
+public:
+  void configure(uint32_t slot_count, uint32_t max_num_ref_frames, uint32_t max_frame_num) {
+    entries_.assign(slot_count, DpbEntry {});
+    max_num_ref_frames_ = std::max(max_num_ref_frames, 1u);
+    max_frame_num_ = std::max(max_frame_num, 1u);
+  }
+
+  void reset() {
+    for (auto& entry : entries_) entry = {};
+  }
+
+  auto entries() const -> const std::vector<DpbEntry>& { return entries_; }
+  auto slotCount() const -> uint32_t { return static_cast<uint32_t>(entries_.size()); }
+
+  // 8.2.4.1: short-term pictures are addressed relative to the picture being
+  // decoded, so their PicNums have to be refreshed against its frame_num before
+  // any marking operation can resolve one.
+  void updatePicNums(uint32_t frame_num) {
+    for (auto& entry : entries_) {
+      if (!entry.is_reference || entry.is_long_term) continue;
+      entry.pic_num = entry.frame_num > frame_num
+                          ? static_cast<int32_t>(entry.frame_num) - static_cast<int32_t>(max_frame_num_)
+                          : static_cast<int32_t>(entry.frame_num);
+    }
+  }
+
+  // The slot to decode into: any the DPB is not holding a reference in. The
+  // picture is read back immediately, so nothing has to be reserved for output.
+  auto acquireSlot() const -> uint32_t {
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (!entries_[i].is_reference) return i;
+    }
+    // Every slot is spoken for, meaning the stream keeps more references live
+    // than its own max_num_ref_frames allows. Evicting the oldest short-term
+    // picture keeps decoding instead of failing the frame outright.
+    return oldestShortTermSlot().value_or(0u);
+  }
+
+  // Runs the marking process for the picture just decoded into `slot`.
+  void store(uint32_t slot, int32_t poc, const h264::SliceHeader& slice,
+             bool is_idr, bool is_reference) {
+    if (slot >= entries_.size()) return;
+
+    if (is_idr) {
+      markAllUnused();
+      const bool long_term = slice.long_term_reference_flag != 0;
+      writeEntry(slot, poc, slice, long_term, long_term ? 0 : -1);
+      return;
+    }
+
+    if (!is_reference) {
+      // Non-reference pictures leave the DPB alone; the slot they borrowed is
+      // free again as soon as the picture has been read back.
+      entries_[slot] = {};
+      return;
+    }
+
+    if (slice.adaptive_ref_pic_marking_mode_flag) {
+      if (applyMarkings(slot, poc, slice)) return; // operation 6 already stored it
+      writeEntry(slot, poc, slice, false, -1);
+      return;
+    }
+
+    slidingWindow(slot);
+    writeEntry(slot, poc, slice, false, -1);
+  }
+
+private:
+  void markAllUnused() {
+    for (auto& entry : entries_) {
+      entry.is_reference = false;
+      entry.is_long_term = false;
+      entry.long_term_frame_idx = -1;
+    }
+  }
+
+  void writeEntry(uint32_t slot, int32_t poc, const h264::SliceHeader& slice,
+                  bool long_term, int32_t long_term_frame_idx) {
+    auto& entry = entries_[slot];
+    entry.poc = poc;
+    entry.frame_num = static_cast<uint32_t>(slice.frame_num);
+    entry.pic_num = slice.frame_num;
+    entry.is_reference = true;
+    entry.is_long_term = long_term;
+    entry.long_term_frame_idx = long_term_frame_idx;
+  }
+
+  auto referenceCount(uint32_t except_slot) const -> uint32_t {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      if (i != except_slot && entries_[i].is_reference) ++count;
+    }
+    return count;
+  }
+
+  auto oldestShortTermSlot() const -> std::optional<uint32_t> {
+    std::optional<uint32_t> oldest;
+    int32_t smallest = 0;
+    for (uint32_t i = 0; i < entries_.size(); ++i) {
+      const auto& entry = entries_[i];
+      if (!entry.is_reference || entry.is_long_term) continue;
+      if (!oldest || entry.pic_num < smallest) {
+        oldest = i;
+        smallest = entry.pic_num;
+      }
+    }
+    return oldest;
+  }
+
+  // 8.2.5.3: retire the short-term picture with the smallest FrameNumWrap once
+  // the buffer is full.
+  void slidingWindow(uint32_t current_slot) {
+    if (referenceCount(current_slot) < max_num_ref_frames_) return;
+    if (auto oldest = oldestShortTermSlot()) {
+      if (*oldest != current_slot) entries_[*oldest] = {};
+    }
+  }
+
+  // 8.2.5.4. Returns true when operation 6 turned the current picture into a
+  // long-term reference, in which case the caller must not overwrite the entry.
+  auto applyMarkings(uint32_t current_slot, int32_t poc, const h264::SliceHeader& slice) -> bool {
+    const int32_t curr_pic_num = slice.frame_num;
+    bool current_is_long_term = false;
+
+    for (int i = 0; i < slice.num_ref_pic_markings; ++i) {
+      const auto& marking = slice.ref_pic_markings[i];
+      switch (marking.operation) {
+        case 1: { // short-term picture -> unused for reference
+          const int32_t pic_num = curr_pic_num - (marking.difference_of_pic_nums_minus1 + 1);
+          for (auto& entry : entries_) {
+            if (entry.is_reference && !entry.is_long_term && entry.pic_num == pic_num) entry = {};
+          }
+          break;
+        }
+        case 2: { // long-term picture -> unused for reference
+          for (auto& entry : entries_) {
+            if (entry.is_reference && entry.is_long_term &&
+                entry.long_term_frame_idx == marking.long_term_pic_num) {
+              entry = {};
+            }
+          }
+          break;
+        }
+        case 3: { // short-term picture -> long-term
+          const int32_t pic_num = curr_pic_num - (marking.difference_of_pic_nums_minus1 + 1);
+          for (auto& entry : entries_) {
+            if (entry.is_reference && entry.is_long_term &&
+                entry.long_term_frame_idx == marking.long_term_frame_idx) {
+              entry = {};
+            }
+          }
+          for (auto& entry : entries_) {
+            if (entry.is_reference && !entry.is_long_term && entry.pic_num == pic_num) {
+              entry.is_long_term = true;
+              entry.long_term_frame_idx = marking.long_term_frame_idx;
+            }
+          }
+          break;
+        }
+        case 4: { // shrink the long-term index range
+          const int32_t limit = marking.max_long_term_frame_idx_plus1 - 1;
+          for (auto& entry : entries_) {
+            if (entry.is_reference && entry.is_long_term && entry.long_term_frame_idx > limit) {
+              entry = {};
+            }
+          }
+          break;
+        }
+        case 5: // everything -> unused for reference
+          markAllUnused();
+          break;
+        case 6: { // current picture -> long-term
+          for (auto& entry : entries_) {
+            if (entry.is_reference && entry.is_long_term &&
+                entry.long_term_frame_idx == marking.long_term_frame_idx) {
+              entry = {};
+            }
+          }
+          writeEntry(current_slot, poc, slice, true, marking.long_term_frame_idx);
+          current_is_long_term = true;
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    return current_is_long_term;
+  }
+
+  std::vector<DpbEntry> entries_;
+  uint32_t max_num_ref_frames_ = 4;
+  uint32_t max_frame_num_ = 16;
 };
 
 #ifdef _WIN32
@@ -226,8 +490,7 @@ static void fillPicParams(const h264::SPS& sps,
                           const h264::SliceHeader& slice,
                           const ParsedFrame& frame,
                           uint32_t current_slot,
-                          const std::vector<uint8_t>& reference_usage,
-                          const std::vector<DpbEntry>& dpb,
+                          const Dpb& dpb,
                           uint32_t feedback,
                           DXVA_PicParams_H264& pic) {
   pic = {};
@@ -250,16 +513,23 @@ static void fillPicParams(const h264::SPS& sps,
     pic.FieldOrderCntList[i][1] = 0;
     pic.FrameNumList[i] = 0;
   }
-  for (size_t i = 0; i < reference_usage.size() && i < 16; ++i) {
-    const uint32_t ref_slot = reference_usage[i];
-    if (ref_slot >= dpb.size() || ref_slot == current_slot || !dpb[ref_slot].is_reference) continue;
-    pic.RefFrameList[i].AssociatedFlag = 0;
-    pic.RefFrameList[i].Index7Bits = (UCHAR)ref_slot;
-    pic.FieldOrderCntList[i][0] = dpb[ref_slot].poc;
-    pic.FieldOrderCntList[i][1] = dpb[ref_slot].poc;
-    pic.UsedForReferenceFlags |= 1 << (i * 2 + 0);
-    pic.UsedForReferenceFlags |= 1 << (i * 2 + 1);
-    pic.FrameNumList[i] = (USHORT)dpb[ref_slot].frame_num;
+  // The list is packed: every entry the DPB still marks as a reference, in slot
+  // order, with the unused tail left at 0xff. Long-term pictures are flagged as
+  // such and carry their LongTermFrameIdx in place of a frame_num, which is what
+  // the driver needs to build the slice reference lists itself.
+  size_t ref_index = 0;
+  for (uint32_t slot = 0; slot < dpb.slotCount() && ref_index < 16; ++slot) {
+    const auto& entry = dpb.entries()[slot];
+    if (!entry.is_reference || slot == current_slot) continue;
+    pic.RefFrameList[ref_index].AssociatedFlag = entry.is_long_term ? 1 : 0;
+    pic.RefFrameList[ref_index].Index7Bits = (UCHAR)slot;
+    pic.FieldOrderCntList[ref_index][0] = entry.poc;
+    pic.FieldOrderCntList[ref_index][1] = entry.poc;
+    pic.UsedForReferenceFlags |= 1u << (ref_index * 2 + 0);
+    pic.UsedForReferenceFlags |= 1u << (ref_index * 2 + 1);
+    pic.FrameNumList[ref_index] =
+        (USHORT)(entry.is_long_term ? entry.long_term_frame_idx : static_cast<int32_t>(entry.frame_num));
+    ++ref_index;
   }
   pic.weighted_pred_flag = (UCHAR)pps.weighted_pred_flag;
   pic.weighted_bipred_idc = (UCHAR)pps.weighted_bipred_idc;

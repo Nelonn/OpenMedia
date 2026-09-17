@@ -8,7 +8,6 @@ namespace h264 {
 // lists are self-terminating, so they need an explicit cap to stay finite on a
 // corrupt stream.
 static constexpr int MAX_REF_PIC_LIST_MODIFICATIONS = 32;
-static constexpr int MAX_DEC_REF_PIC_MARKINGS = 32;
 
 enum class SliceParse {
   ok,
@@ -108,24 +107,37 @@ static auto read_pred_weight_table(BitReader& br, const SPS& sps, SliceHeader& s
                                 sh.pwt.chroma_weight_l1_flag, sh.pwt.chroma_weight_l1, sh.pwt.chroma_offset_l1);
 }
 
-static auto read_dec_ref_pic_marking(BitReader& br, const NALHeader& nal, bool& mmco5) -> bool {
-  mmco5 = false;
+static auto read_dec_ref_pic_marking(BitReader& br, const NALHeader& nal, SliceHeader& sh) -> bool {
+  sh.mmco5 = 0;
+  sh.no_output_of_prior_pics_flag = 0;
+  sh.long_term_reference_flag = 0;
+  sh.adaptive_ref_pic_marking_mode_flag = 0;
+  sh.num_ref_pic_markings = 0;
+
   if (nal.type == NAL_UNIT_TYPE_CODED_SLICE_IDR) {
-    br.readBit(); // no_output_of_prior_pics_flag
-    br.readBit(); // long_term_reference_flag
+    sh.no_output_of_prior_pics_flag = br.readBit() ? 1 : 0;
+    sh.long_term_reference_flag = br.readBit() ? 1 : 0;
     return br.ok();
   }
-  if (!br.readBit()) return br.ok(); // adaptive_ref_pic_marking_mode_flag
-  for (int i = 0; i < MAX_DEC_REF_PIC_MARKINGS; ++i) {
+
+  sh.adaptive_ref_pic_marking_mode_flag = br.readBit() ? 1 : 0;
+  if (!sh.adaptive_ref_pic_marking_mode_flag) return br.ok();
+
+  for (int i = 0; i < MAX_REF_PIC_MARKINGS; ++i) {
     const uint32_t op = br.readUE();
     if (op == 0) return br.ok();
     if (op > 6) return false;
-    if (op == 1 || op == 3) br.readUE(); // difference_of_pic_nums_minus1
-    if (op == 2) br.readUE();            // long_term_pic_num
-    if (op == 3 || op == 6) br.readUE(); // long_term_frame_idx
-    if (op == 4) br.readUE();            // max_long_term_frame_idx_plus1
-    if (op == 5) mmco5 = true;
+
+    auto& marking = sh.ref_pic_markings[sh.num_ref_pic_markings];
+    marking = {};
+    marking.operation = static_cast<int>(op);
+    if (op == 1 || op == 3) marking.difference_of_pic_nums_minus1 = static_cast<int>(br.readUE());
+    if (op == 2) marking.long_term_pic_num = static_cast<int>(br.readUE());
+    if (op == 3 || op == 6) marking.long_term_frame_idx = static_cast<int>(br.readUE());
+    if (op == 4) marking.max_long_term_frame_idx_plus1 = static_cast<int>(br.readUE());
+    if (op == 5) sh.mmco5 = 1;
     if (!br.ok()) return false;
+    ++sh.num_ref_pic_markings;
   }
   return false; // ran past the cap without reaching the terminating 0
 }
@@ -197,9 +209,7 @@ static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, con
     if (!read_pred_weight_table(br, sps, slice)) return fail();
   }
   if (nal.idc != NAL_REF_IDC_PRIORITY_DISPOSABLE) {
-    bool mmco5 = false;
-    if (!read_dec_ref_pic_marking(br, nal, mmco5)) return fail();
-    slice.mmco5 = mmco5 ? 1 : 0;
+    if (!read_dec_ref_pic_marking(br, nal, slice)) return fail();
   }
   if (pps.entropy_coding_mode_flag && !isIntraSlice(slice.slice_type)) {
     slice.cabac_init_idc = static_cast<int>(br.readUE());

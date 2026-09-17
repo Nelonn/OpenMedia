@@ -172,6 +172,20 @@ struct PPS {
   int second_chroma_qp_index_offset = 0;
 };
 
+// 7.4.3.3: one memory_management_control_operation and whichever of its
+// arguments that operation carries. Kept so the DPB can run the marking
+// process; skipping them used to leave every reference picture marked as still
+// in use forever.
+struct RefPicMarking {
+  int operation = 0; // memory_management_control_operation, 0 terminates
+  int difference_of_pic_nums_minus1 = 0;
+  int long_term_pic_num = 0;
+  int long_term_frame_idx = 0;
+  int max_long_term_frame_idx_plus1 = 0;
+};
+
+inline constexpr int MAX_REF_PIC_MARKINGS = 32;
+
 struct SliceHeader {
   struct PredWeightTable {
     int luma_log2_weight_denom = 0;
@@ -216,6 +230,14 @@ struct SliceHeader {
   int slice_beta_offset_div2 = 0;
   int slice_group_change_cycle = 0;
   int mmco5 = 0;
+
+  // dec_ref_pic_marking()
+  int no_output_of_prior_pics_flag = 0;
+  int long_term_reference_flag = 0;
+  int adaptive_ref_pic_marking_mode_flag = 0;
+  int num_ref_pic_markings = 0;
+  RefPicMarking ref_pic_markings[MAX_REF_PIC_MARKINGS] = {};
+
   int header_bit_size = 0;
 };
 

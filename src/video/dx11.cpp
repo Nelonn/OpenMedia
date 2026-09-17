@@ -902,6 +902,9 @@ class DX11Decoder final : public Decoder {
   uint32_t padded_width_ = 0;
   uint32_t padded_height_ = 0;
   uint32_t dpb_slot_count_ = 17;
+  // H.264 reference picture buffer and its marking process. The other codecs
+  // still use next_slot_/reference_usage_ below.
+  dx_h264::Dpb h264_dpb_;
   uint32_t next_slot_ = 0;
   uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
@@ -930,7 +933,14 @@ public:
           if (!h264_.sps_valid[i]) continue;
           padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
           padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-          dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 1, 2, 17);
+          // max_num_ref_frames slots for the reference pictures the DPB holds,
+          // one for the picture being decoded, and one more so a non-reference
+          // picture always has somewhere to go that no reference occupies.
+          dpb_slot_count_ =
+              std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 2, 3, 17);
+          h264_dpb_.configure(dpb_slot_count_,
+                              static_cast<uint32_t>(h264_.sps[i].num_ref_frames),
+                              1u << (h264_.sps[i].log2_max_frame_num_minus4 + 4));
           bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
           // The DXVA profiles used below are 4:2:0 only; accepting a 4:2:2 or
           // 4:4:4 stream here would decode into an NV12/P010 surface and hand
@@ -1070,6 +1080,7 @@ public:
   void flush() override {
     resetReceiveState();
     for (auto& slot : slots_) slot.dpb = {};
+    h264_dpb_.reset();
     reference_usage_.clear();
     h264_reorder_queue_.clear();
     next_slot_ = 0;
@@ -1086,13 +1097,6 @@ public:
   }
 
 private:
-  static auto h264ReorderDepth(const h264::SPS& sps) -> size_t {
-    if (sps.vui_parameters_present_flag && sps.vui.bitstream_restriction_flag) {
-      return static_cast<size_t>(std::clamp(sps.vui.num_reorder_frames, 0, 16));
-    }
-    return 0;
-  }
-
   auto pushH264Reordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
     if (reorder_depth == 0) return {std::move(frame)};
 
@@ -1139,20 +1143,20 @@ private:
     std::vector<Frame> pre_output;
     if (parsed.is_intra) {
       pre_output = drainH264Reordered();
-      for (auto& slot : slots_) slot.dpb.is_reference = false;
-      reference_usage_.clear();
-      next_ref_ = 0;
-      next_slot_ = 0;
+      h264_dpb_.reset();
       h264_.resetPoc();
-      parsed.poc = h264_.computePoc(parsed.slice);
+      parsed.poc = h264_.computePoc(parsed.slice, parsed.is_reference);
     }
 
-    const uint32_t current_slot = next_slot_;
+    // Resolve the short-term pictures against this frame_num before anything
+    // reads or marks them, then take a slot the DPB is not holding a reference
+    // in — including for non-reference pictures, which must not be decoded over
+    // a surface the stream still refers to.
+    h264_dpb_.updatePicNums(static_cast<uint32_t>(parsed.slice.frame_num));
+    const uint32_t current_slot = h264_dpb_.acquireSlot();
+
     DXVA_PicParams_H264 pic_params = {};
-    std::vector<dx_h264::DpbEntry> dpb;
-    dpb.reserve(slots_.size());
-    for (const auto& slot : slots_) dpb.push_back(slot.dpb);
-    dx_h264::fillPicParams(sps, pps, parsed.slice, parsed, current_slot, reference_usage_, dpb, feedback_++, pic_params);
+    dx_h264::fillPicParams(sps, pps, parsed.slice, parsed, current_slot, h264_dpb_, feedback_++, pic_params);
 
     DXVA_Qmatrix_H264 qmatrix = {};
     dx_h264::fillQMatrix(sps, pps, qmatrix);
@@ -1169,11 +1173,22 @@ private:
     HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
     if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
 
+    // DXVA wants the bitstream buffer a multiple of 128 bytes, zero-padded, with
+    // the padding counted into the last slice. Handing over an unpadded buffer
+    // leaves it up to the driver whether the trailing partial block is read at
+    // all, which is why only some frames used to come out decoded.
+    const size_t bitstream_size = parsed.bitstream.size();
+    const size_t padded_size = (bitstream_size + 127u) & ~size_t(127u);
+    if (!slices.empty()) {
+      slices.back().SliceBytesInBuffer += static_cast<UINT>(padded_size - bitstream_size);
+    }
+
     UINT buffer_size = 0;
     void* buffer = nullptr;
     hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-    if (FAILED(hr) || parsed.bitstream.size() > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-    std::memcpy(buffer, parsed.bitstream.data(), parsed.bitstream.size());
+    if (FAILED(hr) || padded_size > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
+    std::memcpy(buffer, parsed.bitstream.data(), bitstream_size);
+    std::memset(static_cast<uint8_t*>(buffer) + bitstream_size, 0, padded_size - bitstream_size);
     video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
     hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
@@ -1193,7 +1208,7 @@ private:
 
     D3D11_VIDEO_DECODER_BUFFER_DESC descs[4] = {};
     descs[0].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
-    descs[0].DataSize = static_cast<UINT>(parsed.bitstream.size());
+    descs[0].DataSize = static_cast<UINT>(padded_size);
     descs[1].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
     descs[1].DataSize = sizeof(pic_params);
     descs[2].BufferType = D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX;
@@ -1208,21 +1223,13 @@ private:
     auto picture = download(current_slot);
     if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
 
-    slots_[current_slot].dpb.poc = parsed.poc;
-    slots_[current_slot].dpb.frame_num = static_cast<uint32_t>(parsed.slice.frame_num);
-    slots_[current_slot].dpb.is_reference = parsed.is_reference;
-    if (parsed.is_reference && dpb_slot_count_ > 1) {
-      if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
-      reference_usage_[next_ref_] = static_cast<uint8_t>(current_slot);
-      next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
-      next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
-    }
+    h264_dpb_.store(current_slot, parsed.poc, parsed.slice, parsed.is_intra, parsed.is_reference);
 
     Frame frame = {};
     frame.pts = packet.pts;
     frame.dts = packet.dts;
     frame.data = std::move(*picture);
-    auto output = pushH264Reordered(std::move(frame), parsed.poc, h264ReorderDepth(sps));
+    auto output = pushH264Reordered(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
     if (!pre_output.empty()) {
       pre_output.insert(pre_output.end(), std::make_move_iterator(output.begin()), std::make_move_iterator(output.end()));
       return Ok(std::move(pre_output));
