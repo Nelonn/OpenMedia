@@ -115,8 +115,12 @@ static inline auto toYuvConstants(OMColorSpace space, bool full, uint32_t height
 // against the master AVClock, and uploads/displays when the frame is due.
 class VideoRenderer {
 public:
-  // Seconds: a frame more than this far ahead is held back.
-  static constexpr double kFutureThresh = 0.010; // 10 ms
+  // Fallback presentation interval when the display refresh rate is unknown.
+  static constexpr double kFallbackRefresh = 1.0 / 60.0;
+  // How many ticks between re-reads of the refresh rate. The window can be
+  // dragged to a display with a different one, but not often enough to justify
+  // asking SDL every frame.
+  static constexpr int kRefreshPollTicks = 120;
   // Seconds: a frame more than this far behind is dropped to catch up.
   static constexpr double kDropThresh = 0.100; // 100 ms
   // Seconds: past this the decoder simply cannot keep up with real time, so
@@ -149,12 +153,25 @@ public:
       return true;
     }
 
+    // A frame uploaded now is not seen until the next present, one refresh
+    // away, so that is the moment its timestamp has to be judged against. It is
+    // due when that present is the nearest refresh to it — hence a look-ahead
+    // of half an interval.
+    //
+    // The look-ahead has to be measured in refreshes rather than in a fixed
+    // number of milliseconds. A 10 ms window is two whole refreshes on a 200 Hz
+    // display, so whether a frame went up early or late depended on where the
+    // clock happened to sit, and 60 fps came out as an irregular 3/4/5/6-
+    // refresh stutter instead of a steady 3-3-4.
+    const double refresh = refreshInterval();
+
     // Process frames until we either display one or run out of due frames.
     while (true) {
       const double master = clock.masterSeconds();
+      const double present_at = master + refresh;
 
       auto opt = queue.peekPop([&](double pts_sec) {
-        return (pts_sec - master) <= kFutureThresh;
+        return (pts_sec - present_at) <= refresh * 0.5;
       });
 
       if (!opt) break;
@@ -205,6 +222,26 @@ public:
   }
 
 private:
+  // Presentation interval of the display the window currently sits on.
+  auto refreshInterval() -> double {
+    if (refresh_interval_ == 0.0 || ++refresh_poll_ >= kRefreshPollTicks) {
+      refresh_poll_ = 0;
+      refresh_interval_ = queryRefreshInterval();
+    }
+    return refresh_interval_;
+  }
+
+  auto queryRefreshInterval() const -> double {
+    if (SDL_Window* window = SDL_GetRenderWindow(renderer_)) {
+      const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+      const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display);
+      if (mode && mode->refresh_rate > 0.0f) {
+        return 1.0 / static_cast<double>(mode->refresh_rate);
+      }
+    }
+    return kFallbackRefresh;
+  }
+
   void uploadFrame(const VideoFrame& vf) {
     std::lock_guard lock(mutex_);
 
@@ -487,6 +524,10 @@ private:
   double last_pts_sec_ = 0.0;
   bool primed_ = false;
   uint32_t warned_format_ = 0;
+
+  // Cached display refresh interval, 0 until first queried.
+  double refresh_interval_ = 0.0;
+  int refresh_poll_ = 0;
 
   // Scratch for the libyuv conversion path.
   std::vector<uint8_t> argb_;

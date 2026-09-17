@@ -107,6 +107,9 @@ public:
     if (!open_ || started_ || !ring_) return false;
     const double ratio = ring_->fillRatio();
     if (ratio >= kStartThresh) {
+      base_seconds_ = current_seconds;
+      written_frames_ = 0;
+      silence_frames_ = 0;
       clock_->setAudioSeconds(current_seconds);
       SDL_ResumeAudioDevice(device_);
       started_ = true;
@@ -125,6 +128,12 @@ public:
 
   void clearBuffer() {
     if (ring_) ring_->clear();
+    // The stream's own backlog has to go too: the play position is counted
+    // from the next tickBuffering(), and anything SDL still held would be
+    // subtracted from a frame count that no longer includes it.
+    if (stream_) SDL_ClearAudioStream(stream_);
+    written_frames_ = 0;
+    silence_frames_ = 0;
     started_ = false;
   }
 
@@ -160,22 +169,50 @@ private:
 
     const size_t available = ring_->currentSize();
     const size_t to_read = std::min(available, static_cast<size_t>(need));
-
     if (to_read > 0) {
       tmp_buf_.resize(to_read);
       const size_t n = ring_->read(tmp_buf_.data(), to_read);
       SDL_PutAudioStreamData(stream, tmp_buf_.data(), static_cast<int>(n));
 
-      // Advance the master clock by the number of PCM frames consumed.
+      // Report where playback actually *is*, not how much has been handed over.
+      // Advancing the clock by every byte written counted the stream's own
+      // backlog as already played, and since SDL asks for data in uneven
+      // chunks the error moved around by a whole chunk from one callback to
+      // the next. Video frames were selected against that wobble, which showed
+      // up as judder. Subtracting what the stream still holds turns the
+      // reading into an absolute position that corrects itself every callback.
       if (sample_rate_ > 0 && frame_bytes_ > 0) {
-        const double secs_consumed = static_cast<double>(n) / (sample_rate_ * frame_bytes_);
-        clock_->audioAdvance(secs_consumed);
+        written_frames_ += n / frame_bytes_;
+        updateClock(stream);
       }
     } else {
       // Underrun – push silence to avoid SDL starvation.
       silence_buf_.assign(static_cast<size_t>(need), 0);
       SDL_PutAudioStreamData(stream, silence_buf_.data(), need);
+
+      // The device plays this silence, so the playback position moves whether
+      // or not there was anything to play. Leaving the clock where it was made
+      // an underrun unrecoverable: no video frame came due, so nothing drained,
+      // so the demuxer never got back to reading the audio that would have
+      // ended it. Counting the gap keeps the clock honest about what the device
+      // has actually played and lets the pipeline pick itself back up.
+      if (sample_rate_ > 0 && frame_bytes_ > 0) {
+        silence_frames_ += static_cast<size_t>(need) / frame_bytes_;
+        updateClock(stream);
+      }
     }
+  }
+
+  // Where the device has actually got to, counting both the audio handed over
+  // and any silence played in its place, minus whatever the stream still holds.
+  void updateClock(SDL_AudioStream* stream) {
+    const int queued_bytes = SDL_GetAudioStreamQueued(stream);
+    const uint64_t pending_frames =
+        queued_bytes > 0 ? static_cast<uint64_t>(queued_bytes) / frame_bytes_ : 0;
+    const uint64_t output_frames = written_frames_ + silence_frames_;
+    const uint64_t played_frames =
+        output_frames > pending_frames ? output_frames - pending_frames : 0;
+    clock_->setAudioSeconds(base_seconds_ + static_cast<double>(played_frames) / sample_rate_);
   }
 
   AVClock* clock_ = nullptr;
@@ -187,6 +224,12 @@ private:
   int channels_ = 0;
   size_t bps_ = 0;         // bytes per sample
   size_t frame_bytes_ = 0; // bytes per interleaved PCM frame
+
+  // Playback position bookkeeping: the timestamp the first sample handed to
+  // SDL carries, and how many PCM frames have been handed over since.
+  double base_seconds_ = 0.0;
+  uint64_t written_frames_ = 0;
+  uint64_t silence_frames_ = 0;
 
   float gain_ = 1.0f;
   bool open_ = false;

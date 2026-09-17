@@ -45,6 +45,7 @@ public:
     pts_sec_.store(seconds, std::memory_order_release);
     wall_ref_pts_sec_ = seconds;
     wall_ref_time_ = SteadyClock::now();
+    audio_update_ns_.store(0, std::memory_order_release);
     paused_ = false;
   }
 
@@ -58,11 +59,13 @@ public:
     wall_ref_pts_sec_ = seconds;
     wall_ref_time_ = SteadyClock::now();
     pts_sec_.store(seconds, std::memory_order_release);
+    audio_update_ns_.store(0, std::memory_order_release);
   }
 
   void pause() noexcept {
     if (paused_) return;
     pts_sec_.store(masterSeconds(), std::memory_order_release);
+    audio_update_ns_.store(0, std::memory_order_release);
     paused_ = true;
   }
 
@@ -70,24 +73,21 @@ public:
     if (!paused_) return;
     wall_ref_pts_sec_ = pts_sec_.load(std::memory_order_acquire);
     wall_ref_time_ = SteadyClock::now();
+    audio_update_ns_.store(0, std::memory_order_release);
     paused_ = false;
   }
 
   // -----------------------------------------------------------------------
-  // AUDIO mode: audio callback reports how many samples it consumed.
+  // AUDIO mode: the audio callback reports the position playback has reached.
+  //
+  // It reports an absolute position rather than an increment on purpose. An
+  // increment per callback accumulates whatever the sink mis-estimates, while
+  // an absolute reading corrects itself on every callback.
   // -----------------------------------------------------------------------
-
-  void audioAdvance(double seconds) noexcept {
-    if (seconds <= 0) return;
-    // Simple addition to the atomic double.
-    double current = pts_sec_.load(std::memory_order_acquire);
-    while (!pts_sec_.compare_exchange_weak(current, current + seconds,
-                                           std::memory_order_release,
-                                           std::memory_order_acquire));
-  }
 
   void setAudioSeconds(double seconds) noexcept {
     pts_sec_.store(seconds, std::memory_order_release);
+    audio_update_ns_.store(nowNanos(), std::memory_order_release);
   }
 
   // -----------------------------------------------------------------------
@@ -107,19 +107,49 @@ public:
 
   // Current master position in seconds.
   double masterSeconds() const noexcept {
-    if (mode_ == Mode::WALL && !paused_) {
+    if (paused_) return pts_sec_.load(std::memory_order_acquire);
+
+    if (mode_ == Mode::WALL) {
         const auto now = SteadyClock::now();
         const double elapsed = std::chrono::duration<double>(now - wall_ref_time_).count();
         return wall_ref_pts_sec_ + elapsed;
     }
-    return pts_sec_.load(std::memory_order_acquire);
+
+    // AUDIO mode: the callback advances the clock one buffer at a time, so the
+    // stored value is a staircase whose steps are longer than a video frame.
+    // Comparing frame timestamps against it made the renderer pick frames a
+    // refresh early or late at random, which is what the judder was. Fill in
+    // the gap between callbacks from the wall clock; the step and the elapsed
+    // time cancel out, so the result is continuous across each callback.
+    const double base = pts_sec_.load(std::memory_order_acquire);
+    const int64_t updated_ns = audio_update_ns_.load(std::memory_order_acquire);
+    if (updated_ns == 0) return base;
+
+    const double since = static_cast<double>(nowNanos() - updated_ns) / 1e9;
+    // A stalled or starved audio thread must not let the clock run away.
+    if (since < 0.0 || since > kMaxAudioExtrapolation) return base;
+    return base + since;
   }
 
   bool paused() const noexcept { return paused_; }
 
 private:
+  // Seconds: how far past the last audio callback the clock may be
+  // extrapolated before it is assumed the audio thread is not running.
+  static constexpr double kMaxAudioExtrapolation = 0.25;
+
+  static auto nowNanos() noexcept -> int64_t {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               SteadyClock::now().time_since_epoch())
+        .count();
+  }
+
   std::atomic<double> pts_sec_ {0.0};
   Mode mode_ {Mode::WALL};
+
+  // Steady-clock reading at the last audio update, or 0 when there has not
+  // been one since the last reset/seek/pause.
+  std::atomic<int64_t> audio_update_ns_ {0};
 
   double wall_ref_pts_sec_ = 0.0;
   TimePoint wall_ref_time_ = SteadyClock::now();

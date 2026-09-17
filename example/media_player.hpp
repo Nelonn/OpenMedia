@@ -49,17 +49,31 @@ using namespace openmedia;
 // The demux thread pushes; per-stream decoder threads pop.
 // abort() unblocks all waiters immediately (used on seek / stop).
 // ---------------------------------------------------------------------------
+// The queue has to be able to swallow a whole interleaving chunk of one stream,
+// because the demux thread reads both streams and blocks when the queue it is
+// pushing to is full. A file that writes 250 video packets before its next
+// audio packet used to wedge that thread against a 64-packet queue: the audio
+// behind those packets was never reached, its ring buffer ran dry, the master
+// clock stopped, so no video frame was ever due, the frame queue stayed full and
+// nothing drained. Bounding by bytes as well keeps the memory in check whatever
+// the packet sizes are.
 class PacketQueue {
 public:
-    explicit PacketQueue(size_t capacity = 64) : capacity_(capacity) {}
+    explicit PacketQueue(size_t capacity, size_t byte_capacity)
+        : capacity_(capacity), byte_capacity_(byte_capacity) {}
 
     // Block until space is available or abort() is called.
     auto blockingPush(Packet pkt) -> bool {
+        const size_t bytes = pkt.bytes.size();
         std::unique_lock<std::mutex> lock(mutex_);
         not_full_cv_.wait(lock, [&] {
-            return aborted_ || queue_.size() < capacity_;
+            // An empty queue always accepts, so a packet larger than the whole
+            // budget cannot wedge the thread forever.
+            return aborted_ || queue_.empty() ||
+                   (queue_.size() < capacity_ && bytes_ + bytes <= byte_capacity_);
         });
         if (aborted_) return false;
+        bytes_ += bytes;
         queue_.push(std::move(pkt));
         not_empty_cv_.notify_one();
         return true;
@@ -74,6 +88,7 @@ public:
         if (aborted_ && queue_.empty()) return std::nullopt;
         Packet pkt = std::move(queue_.front());
         queue_.pop();
+        bytes_ -= std::min(bytes_, pkt.bytes.size());
         not_full_cv_.notify_one();
         return pkt;
     }
@@ -82,6 +97,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         aborted_ = true;
         while (!queue_.empty()) queue_.pop();
+        bytes_ = 0;
         not_empty_cv_.notify_all();
         not_full_cv_.notify_all();
     }
@@ -90,11 +106,18 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         aborted_ = false;
         while (!queue_.empty()) queue_.pop();
+        bytes_ = 0;
     }
 
     auto size() const -> size_t {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.size();
+    }
+
+    // True once the queue holds enough that the demux thread may pause reading.
+    auto wellFed() const -> bool {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size() >= capacity_ * 3 / 4 || bytes_ >= byte_capacity_ * 3 / 4;
     }
 
     auto isAborted() const -> bool {
@@ -108,6 +131,8 @@ private:
     std::condition_variable not_full_cv_;
     std::condition_variable not_empty_cv_;
     size_t                  capacity_;
+    size_t                  byte_capacity_;
+    size_t                  bytes_ = 0;
     bool                    aborted_ = false;
 };
 
@@ -755,9 +780,12 @@ private:
     SDL_Renderer* renderer_ = nullptr;
 
     // Packet queues (demux thread → decoder threads)
-    static constexpr size_t kPacketQueueCapacity = 64;
-    PacketQueue audio_packet_queue_ {kPacketQueueCapacity};
-    PacketQueue video_packet_queue_ {kPacketQueueCapacity};
+    // Large enough for any sane interleaving chunk, with a byte budget as the
+    // real guard so a badly interleaved file costs memory rather than deadlock.
+    static constexpr size_t kPacketQueueCapacity = 1024;
+    static constexpr size_t kPacketQueueBytes = 32u << 20;
+    PacketQueue audio_packet_queue_ {kPacketQueueCapacity, kPacketQueueBytes};
+    PacketQueue video_packet_queue_ {kPacketQueueCapacity, kPacketQueueBytes};
 
     // Frame queue (video decoder thread → render thread)
     FrameQueue video_frame_queue_ {8};
@@ -999,6 +1027,127 @@ private:
         return nullptr;
     }
 
+    // ---- colour / HDR reporting -------------------------------------------
+    //
+    // The colour description reaches us from two places: the container (MP4
+    // `colr`/`mdcv`/`clli`, Matroska `Colour`) and the bitstream itself (H.26x
+    // SEI, AV1 metadata OBUs), and the hardware decoders can only fill in the
+    // second once packets start flowing. Printing both makes it obvious whether
+    // HDR metadata survived the trip instead of leaving it to guesswork.
+
+    static auto colorSpaceName(OMColorSpace c) -> const char* {
+        switch (c) {
+            case OM_COLOR_SPACE_BT601: return "BT.601";
+            case OM_COLOR_SPACE_BT709: return "BT.709";
+            case OM_COLOR_SPACE_BT2020: return "BT.2020-NCL";
+            case OM_COLOR_SPACE_BT2020_CL: return "BT.2020-CL";
+            case OM_COLOR_SPACE_SMPTE240M: return "SMPTE 240M";
+            case OM_COLOR_SPACE_FCC: return "FCC";
+            case OM_COLOR_SPACE_YCGCO: return "YCgCo";
+            case OM_COLOR_SPACE_SMPTE428: return "SMPTE 428";
+            case OM_COLOR_SPACE_CHROMA_DERIVED_NCL: return "chroma-derived NCL";
+            case OM_COLOR_SPACE_CHROMA_DERIVED_CL: return "chroma-derived CL";
+            case OM_COLOR_SPACE_ICTCP: return "ICtCp";
+            case OM_COLOR_SPACE_RGB: return "RGB";
+            default: return "unknown";
+        }
+    }
+
+    static auto transferName(OMTransferCharacteristic t) -> const char* {
+        switch (t) {
+            case OM_TRANSFER_BT709: return "BT.709";
+            case OM_TRANSFER_GAMMA22: return "gamma 2.2";
+            case OM_TRANSFER_GAMMA28: return "gamma 2.8";
+            case OM_TRANSFER_BT601: return "BT.601";
+            case OM_TRANSFER_SMPTE240M: return "SMPTE 240M";
+            case OM_TRANSFER_LINEAR: return "linear";
+            case OM_TRANSFER_LOG: return "log";
+            case OM_TRANSFER_LOG_SQRT: return "log sqrt";
+            case OM_TRANSFER_IEC61966_2_4: return "xvYCC";
+            case OM_TRANSFER_BT1361_ECG: return "BT.1361";
+            case OM_TRANSFER_IEC61966_2_1: return "sRGB";
+            case OM_TRANSFER_BT2020_10: return "BT.2020 10-bit";
+            case OM_TRANSFER_BT2020_12: return "BT.2020 12-bit";
+            case OM_TRANSFER_SMPTE2084: return "PQ (SMPTE 2084)";
+            case OM_TRANSFER_SMPTE428: return "SMPTE 428";
+            case OM_TRANSFER_ARIB_STD_B67: return "HLG";
+            default: return "unknown";
+        }
+    }
+
+    static auto primariesName(OMColorPrimaries p) -> const char* {
+        switch (p) {
+            case OM_PRIMARIES_BT709: return "BT.709";
+            case OM_PRIMARIES_BT470M: return "BT.470M";
+            case OM_PRIMARIES_BT470BG: return "BT.470BG";
+            case OM_PRIMARIES_BT601: return "BT.601";
+            case OM_PRIMARIES_SMPTE240M: return "SMPTE 240M";
+            case OM_PRIMARIES_FILM: return "film";
+            case OM_PRIMARIES_BT2020: return "BT.2020";
+            case OM_PRIMARIES_SMPTE428: return "SMPTE 428";
+            case OM_PRIMARIES_SMPTE431: return "DCI-P3";
+            case OM_PRIMARIES_SMPTE432: return "Display P3";
+            case OM_PRIMARIES_EBU3213: return "EBU 3213";
+            default: return "unknown";
+        }
+    }
+
+    static auto rangeName(OMColorRange r) -> const char* {
+        switch (r) {
+            case OM_COLOR_RANGE_LIMITED: return "limited";
+            case OM_COLOR_RANGE_FULL: return "full";
+            default: return "unspecified";
+        }
+    }
+
+    void reportColor(const char* source,
+                     OMColorSpace matrix, OMTransferCharacteristic transfer,
+                     OMColorPrimaries primaries, OMColorRange range,
+                     const OMMasteringDisplayMetadata& mastering,
+                     const OMContentLightLevel& light) {
+        // Only speak up when something changed, otherwise every frame logs.
+        const uint64_t key =
+            (uint64_t(matrix) << 40) | (uint64_t(transfer) << 32) |
+            (uint64_t(primaries) << 24) | (uint64_t(range) << 16) |
+            (uint64_t(mastering.has_value) << 8) | uint64_t(light.has_value);
+        if (key == last_color_key_ && last_color_source_ == source) return;
+        last_color_key_ = key;
+        last_color_source_ = source;
+
+        SDL_Log("[Player] Colour (%s): primaries=%s transfer=%s matrix=%s range=%s",
+                source, primariesName(primaries), transferName(transfer),
+                colorSpaceName(matrix), rangeName(range));
+
+        if (mastering.has_value) {
+            // SEI fixed point: chromaticities in 0.00002 units, luminance in
+            // 0.0001 cd/m2, primaries ordered green, blue, red.
+            SDL_Log("[Player]   Mastering display: G(%.4f,%.4f) B(%.4f,%.4f) "
+                    "R(%.4f,%.4f) WP(%.4f,%.4f) luminance %.4f to %.1f cd/m2",
+                    mastering.display_primaries[0][0] / 50000.0,
+                    mastering.display_primaries[0][1] / 50000.0,
+                    mastering.display_primaries[1][0] / 50000.0,
+                    mastering.display_primaries[1][1] / 50000.0,
+                    mastering.display_primaries[2][0] / 50000.0,
+                    mastering.display_primaries[2][1] / 50000.0,
+                    mastering.white_point[0] / 50000.0,
+                    mastering.white_point[1] / 50000.0,
+                    mastering.min_display_mastering_luminance / 10000.0,
+                    mastering.max_display_mastering_luminance / 10000.0);
+        }
+        if (light.has_value) {
+            SDL_Log("[Player]   Content light level: MaxCLL %u, MaxFALL %u",
+                    light.max_content_light_level,
+                    light.max_pic_average_light_level);
+        }
+        if (!mastering.has_value && !light.has_value &&
+            transfer == OM_TRANSFER_SMPTE2084) {
+            SDL_Log("[Player]   PQ transfer but no HDR10 static metadata.");
+        }
+    }
+
+    uint64_t last_color_key_ = ~0ull;
+    const char* last_color_source_ = nullptr;
+
     // The demuxers parse the Dolby Vision configuration box, but nothing here
     // applies the per-frame RPU metadata. Whether that matters depends entirely
     // on the profile, so say which case the user is in instead of quietly
@@ -1042,10 +1191,17 @@ private:
         total_duration_secs_ = static_cast<double>(track.duration) *
                                 track.time_base.num / track.time_base.den;
         has_video_       = true;
-        SDL_Log("[Player] Video %dx%d codec=%s tb=%d/%d",
+        SDL_Log("[Player] Video %dx%d codec=%.*s tb=%d/%d",
                 track.format.video.width, track.format.video.height,
-                desc->name.data(),
+                int(desc->name.size()), desc->name.data(),
                 track.time_base.num, track.time_base.den);
+
+        reportColor("container", track.format.video.color_space,
+                    track.format.video.transfer_char,
+                    track.format.video.color_primaries,
+                    track.format.video.color_range,
+                    track.format.video.mastering_display,
+                    track.format.video.content_light_level);
     }
 
     void setupAudioDecoder(const Track& track) {
@@ -1062,8 +1218,8 @@ private:
                                    track.time_base.num / track.time_base.den;
         }
         has_audio_       = true;
-        SDL_Log("[Player] Audio codec=%s tb=%d/%d",
-                desc->name.data(),
+        SDL_Log("[Player] Audio codec=%.*s tb=%d/%d",
+                int(desc->name.size()), desc->name.data(),
                 track.time_base.num, track.time_base.den);
     }
 
@@ -1165,10 +1321,8 @@ private:
 
             // ---- back-pressure (ffplay: infinite_buffer check) ----
             // Both packet queues are well-fed — yield without spinning.
-            const bool audio_ok = !has_audio_ ||
-                audio_packet_queue_.size() < kPacketQueueCapacity * 3 / 4;
-            const bool video_ok = !has_video_ ||
-                video_packet_queue_.size() < kPacketQueueCapacity * 3 / 4;
+            const bool audio_ok = !has_audio_ || !audio_packet_queue_.wellFed();
+            const bool video_ok = !has_video_ || !video_packet_queue_.wellFed();
 
             if (!audio_ok && !video_ok) {
                 idleWait(10ms);
@@ -1353,6 +1507,10 @@ private:
                 if (!std::holds_alternative<Picture>(frame.data)) continue;
                 const Picture& pic = std::get<Picture>(frame.data);
                 if (pic.width == 0 || pic.height == 0) continue;
+
+                reportColor("decoded", pic.color_space, pic.transfer_char,
+                            pic.color_primaries, pic.color_range,
+                            pic.mastering_display, pic.content_light_level);
 
                 VideoFrame vf;
                 vf.width   = pic.width;
