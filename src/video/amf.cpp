@@ -483,7 +483,9 @@ private:
         const size_t row_bytes = std::min<size_t>(static_cast<size_t>(plane->GetWidth()) * plane->GetPixelSizeInBytes(), dst_stride);
         const size_t rows = std::min<size_t>(static_cast<size_t>(plane->GetHeight()), pic.getPlaneDimensions(static_cast<uint32_t>(i)).second);
         const int src_pitch = plane->GetHPitch();
-        for (size_t row = 0; row < rows; ++row) std::memcpy(dst + row * dst_stride, src + row * src_pitch, row_bytes);
+        for (size_t row = 0; row < rows; ++row) {
+          std::memcpy(dst + row * dst_stride, src + row * src_pitch, row_bytes);
+        }
       }
       frames.push_back(std::move(frame));
       empty_queries = 0;

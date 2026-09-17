@@ -887,12 +887,12 @@ public:
         if (sps.scaling_list_enabled_flag) {
           VAIQMatrixBufferHEVC iq_matrix = {};
           const auto& sl = pps.pps_scaling_list_data_present_flag ? pps.scaling_list_data : sps.scaling_list_data;
-          std::memcpy(iq_matrix.ScalingList4x4, sl.scaling_list_4x4, sizeof(iq_matrix.ScalingList4x4));
-          std::memcpy(iq_matrix.ScalingList8x8, sl.scaling_list_8x8, sizeof(iq_matrix.ScalingList8x8));
-          std::memcpy(iq_matrix.ScalingList16x16, sl.scaling_list_16x16, sizeof(iq_matrix.ScalingList16x16));
-          std::memcpy(iq_matrix.ScalingList32x32, sl.scaling_list_32x32, sizeof(iq_matrix.ScalingList32x32));
-          std::memcpy(iq_matrix.ScalingListDC16x16, sl.scaling_list_dc_coef_16x16, sizeof(iq_matrix.ScalingListDC16x16));
-          std::memcpy(iq_matrix.ScalingListDC32x32, sl.scaling_list_dc_coef_32x32, sizeof(iq_matrix.ScalingListDC32x32));
+          memcpy(iq_matrix.ScalingList4x4, sl.scaling_list_4x4, sizeof(iq_matrix.ScalingList4x4));
+          memcpy(iq_matrix.ScalingList8x8, sl.scaling_list_8x8, sizeof(iq_matrix.ScalingList8x8));
+          memcpy(iq_matrix.ScalingList16x16, sl.scaling_list_16x16, sizeof(iq_matrix.ScalingList16x16));
+          memcpy(iq_matrix.ScalingList32x32, sl.scaling_list_32x32, sizeof(iq_matrix.ScalingList32x32));
+          memcpy(iq_matrix.ScalingListDC16x16, sl.scaling_list_dc_coef_16x16, sizeof(iq_matrix.ScalingListDC16x16));
+          memcpy(iq_matrix.ScalingListDC32x32, sl.scaling_list_dc_coef_32x32, sizeof(iq_matrix.ScalingListDC32x32));
           
           VABufferID iq_buf;
           libva.vaCreateBuffer(display_, context_, VAIQMatrixBufferType, sizeof(iq_matrix), 1, &iq_matrix, &iq_buf);
@@ -1242,7 +1242,7 @@ public:
       void* ptr = nullptr;
       libva.vaMapBuffer(display_, image.buf, &ptr);
       if (ptr) {
-        std::memcpy(ptr, host.buffer->bytes().data(), std::min((size_t) image.data_size, host.buffer->bytes().size()));
+        memcpy(ptr, host.buffer->bytes().data(), std::min((size_t) image.data_size, host.buffer->bytes().size()));
         libva.vaUnmapBuffer(display_, image.buf);
       }
       libva.vaDestroyImage(display_, image.image_id);
@@ -1315,7 +1315,7 @@ public:
     if (slice_param_buf != VA_INVALID_ID) libva.vaDestroyBuffer(display_, slice_param_buf);
     Packet pkt;
     pkt.allocate(coded_data.size());
-    std::memcpy(pkt.bytes.data(), coded_data.data(), coded_data.size());
+    memcpy(pkt.bytes.data(), coded_data.data(), coded_data.size());
     pkt.pts = frame.pts;
     pkt.dts = frame.pts;
     frame_count_++;
