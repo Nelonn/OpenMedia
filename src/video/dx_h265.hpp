@@ -23,6 +23,18 @@ using Pps = video_parser::H265AccessUnitParser::Pps;
 using SliceHeader = video_parser::H265SliceHeader;
 using ParsedFrame = video_parser::H265ParsedFrame;
 
+// How many pictures a stream may hold back before the earliest of them can be shown. HEVC states
+// it outright in the SPS, per temporal sub-layer; the highest sub-layer is the one a decoder taking
+// the whole stream has to allow for. Zero means none, and a stream that says so is emitted as it
+// is decoded.
+//
+// Without this the pictures come out in decode order, which for anything with B-frames means their
+// timestamps run backwards -- the same fault the H.264 path had; see dx_h264::reorderDepth.
+static auto reorderDepth(const Sps& sps) -> size_t {
+  const int layer = std::clamp(sps.max_sub_layers_minus1, 0, 7);
+  return static_cast<size_t>(std::clamp(sps.sps_max_num_reorder_pics[layer], 0, 16));
+}
+
 #ifdef _WIN32
 struct SliceData {
   std::vector<uint8_t> bitstream;

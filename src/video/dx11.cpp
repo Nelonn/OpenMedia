@@ -1004,7 +1004,9 @@ class DX11Decoder final : public Decoder {
   uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
   std::vector<uint8_t> reference_usage_;
-  std::vector<ReorderEntry> h264_reorder_queue_;
+  // Pictures waiting for the ones that come before them in presentation order. H.264 and HEVC
+  // both hold back; which of them is decoding decides only how the depth is read.
+  std::vector<ReorderEntry> reorder_queue_;
 
 public:
   ~DX11Decoder() override { release(); }
@@ -1163,15 +1165,12 @@ public:
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
     if (packet.bytes.empty()) {
-      if (codec_id_ == OM_CODEC_H264) {
-        std::vector<Frame> output;
-        flushReadbacksH264(output);
-        auto drained = drainH264Reordered();
-        output.insert(output.end(), std::make_move_iterator(drained.begin()),
-                      std::make_move_iterator(drained.end()));
-        return Ok(std::move(output));
-      }
-      return Ok(std::vector<Frame> {});
+      std::vector<Frame> output;
+      if (codec_id_ == OM_CODEC_H264) flushReadbacksH264(output);
+      auto drained = drainReordered();
+      output.insert(output.end(), std::make_move_iterator(drained.begin()),
+                    std::make_move_iterator(drained.end()));
+      return Ok(std::move(output));
     }
 
     if (codec_id_ == OM_CODEC_H264) return decodeH264(packet);
@@ -1188,7 +1187,7 @@ public:
     readbacks_.clear();
     staging_write_ = 0;
     reference_usage_.clear();
-    h264_reorder_queue_.clear();
+    reorder_queue_.clear();
     next_slot_ = 0;
     next_ref_ = 0;
     h264_.resetPoc();
@@ -1203,30 +1202,30 @@ public:
   }
 
 private:
-  auto pushH264Reordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
+  auto pushReordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
     if (reorder_depth == 0) return {std::move(frame)};
 
-    h264_reorder_queue_.push_back({poc, std::move(frame)});
-    if (h264_reorder_queue_.size() <= reorder_depth) return {};
+    reorder_queue_.push_back({poc, std::move(frame)});
+    if (reorder_queue_.size() <= reorder_depth) return {};
 
-    auto it = std::min_element(h264_reorder_queue_.begin(), h264_reorder_queue_.end(), [](const auto& a, const auto& b) {
+    auto it = std::min_element(reorder_queue_.begin(), reorder_queue_.end(), [](const auto& a, const auto& b) {
       return a.poc < b.poc;
     });
     std::vector<Frame> output;
     output.push_back(std::move(it->frame));
-    h264_reorder_queue_.erase(it);
+    reorder_queue_.erase(it);
     return output;
   }
 
-  auto drainH264Reordered() -> std::vector<Frame> {
-    std::sort(h264_reorder_queue_.begin(), h264_reorder_queue_.end(), [](const auto& a, const auto& b) {
+  auto drainReordered() -> std::vector<Frame> {
+    std::sort(reorder_queue_.begin(), reorder_queue_.end(), [](const auto& a, const auto& b) {
       return a.poc < b.poc;
     });
 
     std::vector<Frame> output;
-    output.reserve(h264_reorder_queue_.size());
-    for (auto& entry : h264_reorder_queue_) output.push_back(std::move(entry.frame));
-    h264_reorder_queue_.clear();
+    output.reserve(reorder_queue_.size());
+    for (auto& entry : reorder_queue_) output.push_back(std::move(entry.frame));
+    reorder_queue_.clear();
     return output;
   }
 
@@ -1254,7 +1253,7 @@ private:
     std::vector<Frame> pre_output;
     if (parsed.is_intra) {
       flushReadbacksH264(pre_output);
-      auto drained = drainH264Reordered();
+      auto drained = drainReordered();
       pre_output.insert(pre_output.end(), std::make_move_iterator(drained.begin()),
                         std::make_move_iterator(drained.end()));
       h264_dpb_.reset();
@@ -1344,7 +1343,7 @@ private:
       frame.pts = packet.pts;
       frame.dts = packet.dts;
       frame.data = std::move(*picture);
-      output = pushH264Reordered(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
+      output = pushReordered(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
     } else {
       const uint32_t staging_index = staging_write_;
       if (!queueReadback(current_slot)) return Err(OM_CODEC_DECODE_FAILED);
@@ -1377,7 +1376,7 @@ private:
     frame.dts = pending.dts;
     frame.data = std::move(*picture);
 
-    auto ready = pushH264Reordered(std::move(frame), pending.poc, pending.reorder_depth);
+    auto ready = pushReordered(std::move(frame), pending.poc, pending.reorder_depth);
     output.insert(output.end(), std::make_move_iterator(ready.begin()),
                   std::make_move_iterator(ready.end()));
     return true;
@@ -1512,6 +1511,10 @@ private:
 
       const int32_t poc = h265_poc_.compute(sps, parsed, sh);
       if (dx_h265::isIrap(parsed.nal_unit_type)) {
+        // The picture order count starts over here, so whatever is still held back belongs to the
+        // stretch before it and has to be let go first -- comparing the new counts against the old
+        // would order them against pictures they have nothing to do with.
+        for (auto& held : drainReordered()) output.push_back(std::move(held));
         for (auto& slot : slots_) slot.dpb.is_reference = false;
         reference_usage_.clear();
         next_ref_ = 0;
@@ -1592,7 +1595,9 @@ private:
       frame.pts = packet.pts;
       frame.dts = packet.dts;
       frame.data = std::move(*picture);
-      output.push_back(std::move(frame));
+      for (auto& ready : pushReordered(std::move(frame), poc, dx_h265::reorderDepth(sps))) {
+        output.push_back(std::move(ready));
+      }
     }
     return Ok(std::move(output));
   }
