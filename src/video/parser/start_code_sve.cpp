@@ -9,20 +9,16 @@ namespace openmedia::video_parser {
 #if defined(OPENMEDIA_ENABLE_SVE_START_CODE) && defined(__aarch64__)
 auto nextStartCodeSVE(const uint8_t* data, size_t size, uint32_t& bit_buffer, bool& found_start_code) -> size_t {
   size_t i = 0;
-  static constexpr int max_bytes = 256;
   const int lanes = static_cast<int>(svcntb());
 
   svbool_t pred = svwhilelt_b8_u64(i, size);
   svuint8_t vdata = svld1_u8(pred, data);
   const svuint8_t vbfr = svreinterpret_u8_u16(svdup_n_u16(((bit_buffer << 8u) & 0xff00u) | ((bit_buffer >> 8u) & 0xffu)));
 
-  static uint8_t indexes[max_bytes];
-  static bool indexes_filled = false;
-  if (!indexes_filled) {
-    for (int idx = 0; idx < lanes && idx < max_bytes; ++idx) indexes[idx] = static_cast<uint8_t>(idx);
-    indexes_filled = true;
-  }
-  const svuint8_t v0n = svld1_u8(svptrue_b8(), indexes);
+  // 0, 1, 2, ... as a vector. This used to be a function-local static table that
+  // every thread raced to fill, and that silently stopped covering the vector
+  // once it was wider than the table.
+  const svuint8_t v0n = svindex_u8(0, 1);
   const svbool_t ext15_mask = svcmpge_n_u8(svptrue_b8(), v0n, lanes - 1);
   const svbool_t ext14_mask = svcmpge_n_u8(svptrue_b8(), v0n, lanes - 2);
   svuint8_t vprev1 = svsplice_u8(ext15_mask, vbfr, vdata);
