@@ -62,6 +62,15 @@ public:
     return makeFilteredBitstream(std::move(converted), converted_size, false, true);
   }
 
+  // In-place rewriting only works when each length prefix is exactly as wide
+  // as the start code replacing it; narrower prefixes would have to grow the
+  // payload, which is what the copying path in filter() is for.
+  auto filterInPlace(std::span<uint8_t> bytes) const -> std::optional<size_t> override {
+    const uint8_t length_size = lengthPrefixSizeOf(bytes);
+    if (length_size == 0) return bytes.size(); // already Annex-B, nothing to do
+    return rewriteLengthPrefixedInPlace(bytes, length_size, start_code_length_);
+  }
+
   static auto isAnnexB(std::span<const uint8_t> data) noexcept -> bool {
     return data.size() >= 3 && data[0] == 0x00 && data[1] == 0x00 &&
            (data[2] == 0x01 || (data.size() >= 4 && data[2] == 0x00 && data[3] == 0x01));
@@ -165,6 +174,10 @@ private:
 public:
   AnnexBFilter(uint8_t nalu_len_sz, std::vector<uint8_t> annexb_extra)
       : AnnexBBitStreamFilter(nalu_len_sz, 0, 4), annexb_extra_(std::move(annexb_extra)) {}
+
+  auto keyframePrefix() const noexcept -> std::span<const uint8_t> override {
+    return annexb_extra_;
+  }
 
   auto convert(std::span<const uint8_t> input, bool is_keyframe) const -> std::vector<uint8_t> override {
     auto filtered = filter(input);

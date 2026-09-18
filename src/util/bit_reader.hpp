@@ -127,6 +127,17 @@ public:
     bit_offset_ += count;
   }
 
+  // Jump to an absolute bit position, e.g. to undo a speculative read.
+  // Clears the sticky error when the position is in range.
+  void seekBits(size_t bit_offset) noexcept {
+    if (bit_offset > data_.size() * 8u) {
+      fail();
+      return;
+    }
+    bit_offset_ = bit_offset;
+    ok_ = true;
+  }
+
   void alignToByte() noexcept {
     skipBits((8u - (bit_offset_ & 7u)) & 7u);
   }

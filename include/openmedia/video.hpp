@@ -69,6 +69,17 @@ OM_ENUM(OMColorRange, uint8_t) {
     OM_COLOR_RANGE_FULL = OM_COLOR_RANGE_JPEG,
 };
 
+// Interlacing, named the way the container reports it: the first letter is the
+// field that comes first in coding order, the second the one displayed first.
+OM_ENUM(OMFieldOrder, uint8_t) {
+    OM_FIELD_UNKNOWN = 0,
+    OM_FIELD_PROGRESSIVE = 1,
+    OM_FIELD_TT = 2, // top coded first, top displayed first
+    OM_FIELD_BB = 3, // bottom coded first, bottom displayed first
+    OM_FIELD_TB = 4, // top coded first, bottom displayed first
+    OM_FIELD_BT = 5, // bottom coded first, top displayed first
+};
+
 OM_ENUM(OMTransferCharacteristic, uint8_t) {
     OM_TRANSFER_UNKNOWN = 0,
     OM_TRANSFER_BT709 = 1,
@@ -121,6 +132,20 @@ struct OPENMEDIA_ABI OMContentLightLevel {
   uint16_t max_content_light_level;
   uint16_t max_pic_average_light_level;
   bool has_value = false;
+};
+
+// Edges to discard before display, in stored pixels. Unlike the metadata
+// structs above this needs no has_value: all zero is both "nothing was
+// signalled" and "show the whole coded picture", which are the same thing.
+struct OPENMEDIA_ABI OMCrop {
+  uint32_t left;
+  uint32_t top;
+  uint32_t right;
+  uint32_t bottom;
+
+  constexpr auto empty() const noexcept -> bool {
+    return (left | top | right | bottom) == 0;
+  }
 };
 
 namespace openmedia {

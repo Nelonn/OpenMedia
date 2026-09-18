@@ -27,6 +27,11 @@ public:
   virtual void close() = 0;
 
   virtual auto tracks() const -> const std::vector<Track>& = 0;
+
+  // Metadata describing the file as a whole - title, artist, cover art and so
+  // on. Per-track metadata lives on Track itself.
+  virtual auto metadata() const -> const Dictionary& = 0;
+
   virtual auto readPacket() -> Result<Packet, OMError> = 0;
 
   // When stream_idx is < 0 then timestamp is in microseconds (us), otherwise timestamp is in track time base

@@ -12,6 +12,7 @@ class BaseDemuxer : public Demuxer {
 protected:
   std::unique_ptr<InputStream> input_;
   std::vector<Track> tracks_;
+  Dictionary metadata_;
 
 public:
   BaseDemuxer() = default;
@@ -20,10 +21,15 @@ public:
   void close() override {
     input_.reset();
     tracks_.clear();
+    metadata_.clear();
   }
 
   auto tracks() const -> const std::vector<Track>& override {
     return tracks_;
+  }
+
+  auto metadata() const -> const Dictionary& override {
+    return metadata_;
   }
 };
 

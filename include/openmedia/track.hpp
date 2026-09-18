@@ -58,11 +58,14 @@ struct OPENMEDIA_ABI MediaFormat {
       uint32_t width;
       uint32_t height;
       Rational framerate;
+      Rational sample_aspect_ratio;
       OMPixelFormat format = OM_FORMAT_UNKNOWN;
+      OMFieldOrder field_order;
       OMColorSpace color_space;
       OMTransferCharacteristic transfer_char;
       OMColorPrimaries color_primaries;
       OMColorRange color_range;
+      OMCrop crop;
       OMMasteringDisplayMetadata mastering_display;
       OMContentLightLevel content_light_level;
     } video;

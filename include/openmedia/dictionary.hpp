@@ -104,31 +104,35 @@ private:
 };
 
 /**
- * @brief Binary data wrapper
+ * @brief Owning binary blob.
+ *
+ * A dictionary outlives whatever produced the value put into it — a demuxer
+ * hands over bytes it parsed out of a buffer it is about to drop — so this
+ * copies on construction rather than referring to the caller's storage.
  */
 struct OPENMEDIA_ABI BinaryData {
-  std::span<const uint8_t> data;
+  std::vector<uint8_t> bytes;
 
-  constexpr BinaryData() noexcept = default;
-  constexpr BinaryData(std::span<const uint8_t> d) noexcept
-      : data(d) {}
+  BinaryData() = default;
+  BinaryData(std::span<const uint8_t> d)
+      : bytes(d.begin(), d.end()) {}
 
   template<size_t N>
-  constexpr BinaryData(const uint8_t (&arr)[N]) noexcept
-      : data(arr) {}
+  BinaryData(const uint8_t (&arr)[N])
+      : bytes(arr, arr + N) {}
 
-  constexpr auto operator==(const BinaryData& other) const noexcept -> bool {
-    if (data.size() != other.data.size()) return false;
-    if (data.empty() && other.data.empty()) return true;
-    if (data.empty() || other.data.empty()) return false;
-    return std::memcmp(data.data(), other.data.data(), data.size()) == 0;
+  auto span() const noexcept -> std::span<const uint8_t> { return bytes; }
+  auto data() const noexcept -> const uint8_t* { return bytes.data(); }
+  auto size() const noexcept -> size_t { return bytes.size(); }
+  auto empty() const noexcept -> bool { return bytes.empty(); }
+
+  auto operator==(const BinaryData& other) const noexcept -> bool {
+    return bytes == other.bytes;
   }
 
-  constexpr auto operator!=(const BinaryData& other) const noexcept -> bool {
+  auto operator!=(const BinaryData& other) const noexcept -> bool {
     return !(*this == other);
   }
-
-  constexpr auto empty() const noexcept -> bool { return data.empty(); }
 };
 
 /**
@@ -245,9 +249,12 @@ public:
     if (auto* v = std::get_if<Rational>(&data_)) return *v;
     return std::nullopt;
   }
-  auto getBinary() const noexcept -> std::optional<BinaryData> {
+  // A view into the stored blob, valid for as long as this Value is. Returning
+  // the BinaryData itself would copy every byte on each read, which for cover
+  // art is megabytes.
+  auto getBinary() const noexcept -> std::optional<std::span<const uint8_t>> {
     if (auto* v = std::get_if<std::shared_ptr<BinaryData>>(&data_)) {
-      if (*v) return **v;
+      if (*v) return (*v)->span();
     }
     return std::nullopt;
   }
@@ -576,7 +583,7 @@ public:
     }
     return dv;
   }
-  auto getBinary(const Key& key) const noexcept -> std::optional<BinaryData> {
+  auto getBinary(const Key& key) const noexcept -> std::optional<std::span<const uint8_t>> {
     if (auto* v = get(key)) return v->getBinary();
     return std::nullopt;
   }
