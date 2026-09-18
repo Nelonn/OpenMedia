@@ -864,6 +864,10 @@ private:
     float                   pending_seek_progress_ = 0.0f;
     TimePoint               last_seek_time_;
 
+    // Written while the workers are down, read once by the demux thread.
+    double                  seek_target_secs_      = 0.0;
+    std::atomic<bool>       seek_landing_pending_ {false};
+
     // Lets stop() wake the demux thread out of its EOF/backpressure wait.
     std::mutex              wake_mutex_;
     std::condition_variable wake_cv_;
@@ -986,12 +990,24 @@ private:
             if (descriptor->isDecoding()) candidates.push_back(descriptor);
         }
 
-        if (track.format.type == OM_MEDIA_VIDEO && !preferred_decoder_prefix_.empty()) {
-            std::stable_partition(
-                candidates.begin(), candidates.end(),
-                [this](const CodecDescriptor* descriptor) {
-                    return descriptor->name.starts_with(preferred_decoder_prefix_);
-                });
+        if (track.format.type == OM_MEDIA_VIDEO) {
+            if (preferred_decoder_prefix_.empty()) {
+                // Registration order decided this before, and a hardware decoder
+                // that opens a device of its own when handed none wins that way --
+                // which is how "Software decoding selected" came to be printed
+                // above a clip that was being decoded on the GPU.
+                std::stable_partition(
+                    candidates.begin(), candidates.end(),
+                    [](const CodecDescriptor* descriptor) {
+                        return (descriptor->flags & HARDWARE) == 0;
+                    });
+            } else {
+                std::stable_partition(
+                    candidates.begin(), candidates.end(),
+                    [this](const CodecDescriptor* descriptor) {
+                        return descriptor->name.starts_with(preferred_decoder_prefix_);
+                    });
+            }
         }
         return candidates;
     }
@@ -1384,6 +1400,19 @@ private:
             }
 
             Packet pkt = res.unwrap();
+
+            if (seek_landing_pending_.load(std::memory_order_acquire) &&
+                (pkt.stream_index == video_stream_index_ || !has_video_)) {
+                const Rational tb = (pkt.stream_index == video_stream_index_)
+                                        ? video_time_base_ : audio_time_base_;
+                const double pts_secs = tb.den > 0
+                    ? static_cast<double>(pkt.pts) * tb.num / tb.den : 0.0;
+                SDL_Log("[Demux] Seek to %.3fs landed on stream %d pts %.3fs (%s)",
+                        seek_target_secs_, pkt.stream_index, pts_secs,
+                        pkt.is_keyframe ? "keyframe" : "not a keyframe");
+                seek_landing_pending_.store(false, std::memory_order_release);
+            }
+
             if (pkt.stream_index == audio_stream_index_)
                 audio_packet_queue_.blockingPush(std::move(pkt));
             else if (pkt.stream_index == video_stream_index_)
@@ -1688,6 +1717,10 @@ private:
         if (const OMError err = demuxer_->seek(-1, target_us); err != OM_SUCCESS) {
             SDL_Log("[Player] Seek to %.2fs failed: %s (%d)",
                     target_secs, detail::describeError(err), int(err));
+        } else {
+            // A seek landing in the wrong place looks like one that worked.
+            seek_target_secs_ = target_secs;
+            seek_landing_pending_.store(true, std::memory_order_release);
         }
         clock_.setMode(AVClock::Mode::WALL);
         clock_.reset(target_secs);
