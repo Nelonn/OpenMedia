@@ -435,9 +435,9 @@ inline void parseId3v2(std::span<const uint8_t> tag_data, Dictionary& metadata) 
           if (pic_type == 3 || !metadata.contains(COVER_ART)) {
             metadata.setBinary(COVER_ART, pic_data);
             if (iequals(fmt, "JPG")) {
-              metadata.setString(COVER_ART_MIME, "image/jpeg");
+              metadata.setString(COVER_ART_MIME, std::string_view("image/jpeg"));
             } else if (iequals(fmt, "PNG")) {
-              metadata.setString(COVER_ART_MIME, "image/png");
+              metadata.setString(COVER_ART_MIME, std::string_view("image/png"));
             }
           }
         }
