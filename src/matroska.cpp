@@ -20,12 +20,35 @@
 #include <openmedia/video.hpp>
 #include <span>
 #include <util/color_codes.hpp>
+#include <util/date_time.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 
 namespace openmedia {
 
 static constexpr uint64_t MKV_TRACK_ENTRY = 0xAE;
+static constexpr uint64_t MKV_FLAG_DEFAULT = 0x88;
+static constexpr uint64_t MKV_FLAG_FORCED = 0x55AA;
+
+static constexpr uint64_t MKV_DATE_UTC = 0x4461;
+
+static constexpr uint64_t MKV_TAG = 0x7373;
+static constexpr uint64_t MKV_TARGETS = 0x63C0;
+static constexpr uint64_t MKV_TARGET_TYPE_VALUE = 0x68CA;
+static constexpr uint64_t MKV_TAG_TRACK_UID = 0x63C5;
+static constexpr uint64_t MKV_SIMPLE_TAG = 0x67C8;
+static constexpr uint64_t MKV_TAG_NAME = 0x45A3;
+static constexpr uint64_t MKV_TAG_STRING = 0x4487;
+
+static constexpr uint64_t MKV_ATTACHMENTS = 0x1941A469;
+static constexpr uint64_t MKV_ATTACHED_FILE = 0x61A7;
+static constexpr uint64_t MKV_FILE_NAME = 0x466E;
+static constexpr uint64_t MKV_FILE_MIME_TYPE = 0x4660;
+static constexpr uint64_t MKV_FILE_DATA = 0x465C;
+
+// TargetTypeValue 50 and above describe the album or movie rather than the
+// individual track, which is what tells an ALBUM title from a TRACK title.
+static constexpr uint64_t MKV_TARGET_TYPE_ALBUM = 50;
 static constexpr uint64_t MKV_BLOCK_ADDITION_MAPPING = 0x41E4;
 static constexpr uint64_t MKV_BLOCK_ADD_ID_VALUE = 0x41F0;
 static constexpr uint64_t MKV_BLOCK_ADD_ID_TYPE = 0x41E7;
@@ -78,6 +101,78 @@ static auto readEbmlUInt(std::span<const uint8_t> data) -> std::optional<uint64_
   uint64_t value = 0;
   for (const uint8_t b : data) value = (value << 8u) | b;
   return value;
+}
+
+static auto ebmlString(std::span<const uint8_t> data) -> std::string {
+  // Matroska pads strings with trailing NULs rather than trimming the element.
+  size_t size = data.size();
+  while (size > 0 && data[size - 1] == 0) --size;
+  return std::string(reinterpret_cast<const char*>(data.data()), size);
+}
+
+// EBML dates count nanoseconds from 2001-01-01T00:00:00 UTC and may be
+// negative.
+static auto ebmlDateToIso(std::span<const uint8_t> data) -> std::string {
+  if (data.empty() || data.size() > 8) return {};
+
+  int64_t nanoseconds = (data[0] & 0x80u) ? -1 : 0; // sign-extend
+  for (const uint8_t b : data) nanoseconds = (nanoseconds << 8) | b;
+
+  constexpr int64_t NS_PER_SECOND = 1'000'000'000LL;
+  constexpr int64_t EPOCH_2001_UNIX = 978'307'200LL; // 2001-01-01 from 1970-01-01
+
+  // Floor division, so a negative remainder still belongs to the earlier second.
+  int64_t seconds = nanoseconds / NS_PER_SECOND;
+  if (nanoseconds % NS_PER_SECOND < 0) --seconds;
+
+  return date_time::formatIso8601Utc(seconds + EPOCH_2001_UNIX);
+}
+
+// Matroska tag names are free-form, but the ones worth surfacing are a fixed
+// vocabulary. The same name means different things depending on what the tag
+// targets, so TITLE and ARTIST are resolved against the target type.
+static auto metadataKeyForTagName(std::string_view name, uint64_t target_type)
+    -> const Key* {
+  const bool album_level = target_type >= MKV_TARGET_TYPE_ALBUM;
+
+  if (name == "TITLE") return album_level ? &ALBUM : &TITLE;
+  if (name == "ARTIST" || name == "LEAD_PERFORMER") {
+    return album_level ? &ALBUM_ARTIST : &ARTIST;
+  }
+
+  static const struct {
+    std::string_view name;
+    const Key& key;
+  } TABLE[] = {
+      {"ALBUM", ALBUM},
+      {"ALBUM_ARTIST", ALBUM_ARTIST},
+      {"GENRE", GENRE},
+      {"DATE", DATE},
+      {"DATE_RELEASED", DATE},
+      {"DATE_RECORDED", DATE},
+      {"COMMENT", COMMENT},
+      {"COMMENTS", COMMENT},
+      {"DESCRIPTION", DESCRIPTION},
+      {"COMPOSER", COMPOSER},
+      {"ENCODER", ENCODER},
+      {"COPYRIGHT", COPYRIGHT},
+      {"LYRICS", LYRICS},
+      {"PUBLISHER", PUBLISHER},
+      {"LANGUAGE", LANGUAGE},
+      {"PART_NUMBER", TRACK_NUMBER},
+      {"TOTAL_PARTS", TRACK_TOTAL},
+      {"BPM", BPM},
+  };
+  for (const auto& entry : TABLE) {
+    if (entry.name == name) return &entry.key;
+  }
+  return nullptr;
+}
+
+// Keys whose values are counts rather than text.
+static auto isNumericMetadataKey(const Key& key) -> bool {
+  return key == TRACK_NUMBER || key == TRACK_TOTAL || key == DISC_NUMBER ||
+         key == DISC_TOTAL || key == BPM;
 }
 
 static void setDolbyVisionConfigurationMetadata(Dictionary& metadata, std::span<const uint8_t> data) {
@@ -186,6 +281,10 @@ public:
 
     if (OMError err = buildTrackMap(tracks); err != OM_SUCCESS)
       return err;
+
+    parseSegmentInfoMetadata();
+    parseTagsMetadata();
+    parseAttachments();
 
     if (const mkvparser::SegmentInfo* info = segment_->GetInfo()) {
       const long long duration_ns = info->GetDuration();
@@ -589,6 +688,7 @@ private:
 
         applyColour(vt, track);
         parseDolbyVisionBlockAdditionMapping(t, track);
+        applyTrackMetadata(t, track);
 
         tracks_.push_back(track);
         track_map_[static_cast<int32_t>(t->GetNumber())] = next_index++;
@@ -611,6 +711,8 @@ private:
         if (cp && cp_size) {
           track.extradata.assign(cp, cp + cp_size);
         }
+
+        applyTrackMetadata(t, track);
 
         tracks_.push_back(track);
         track_map_[static_cast<int32_t>(t->GetNumber())] = next_index++;
@@ -733,6 +835,299 @@ private:
       any = true;
     }
     md.has_value = any;
+  }
+
+  // Reads an element's bytes through the same reader mkvparser uses. Returns an
+  // empty buffer when the range is unreadable or implausibly large.
+  auto readElement(long long start, long long size) -> std::vector<uint8_t> {
+    constexpr long long MAX_ELEMENT_SIZE = 64LL * 1024 * 1024;
+    if (!mkv_reader_ || start < 0 || size <= 0 || size > MAX_ELEMENT_SIZE) return {};
+
+    std::vector<uint8_t> buffer(static_cast<size_t>(size));
+    if (mkv_reader_->Read(start, static_cast<long>(buffer.size()), buffer.data()) != 0) {
+      return {};
+    }
+    return buffer;
+  }
+
+  // Title, writing application and creation date, all of which describe the
+  // file rather than any one track. mkvparser exposes the first two directly
+  // but not the date, so the element is walked for that.
+  void parseSegmentInfoMetadata() {
+    const mkvparser::SegmentInfo* info = segment_->GetInfo();
+    if (!info) return;
+
+    if (const char* title = info->GetTitleAsUTF8(); title && *title) {
+      metadata_.setString(TITLE, std::string_view(title));
+    }
+    // The writing application is the one that produced the file; the muxing
+    // library underneath it is a less useful answer, so it only fills in.
+    const char* writing_app = info->GetWritingAppAsUTF8();
+    if (!writing_app || !*writing_app) writing_app = info->GetMuxingAppAsUTF8();
+    if (writing_app && *writing_app) {
+      metadata_.setString(ENCODER, std::string_view(writing_app));
+    }
+
+    const auto buffer = readElement(info->m_start, info->m_size);
+    if (buffer.empty()) return;
+
+    size_t pos = 0;
+    while (pos < buffer.size()) {
+      const auto child = nextEbmlElement(buffer, pos);
+      if (!child) return;
+      if (child->id != MKV_DATE_UTC) continue;
+
+      const auto payload = std::span<const uint8_t>(buffer).subspan(
+          child->payload, child->end - child->payload);
+      // DateUTC records when the file was written. The release date of the
+      // content is a tag, and the two must not overwrite each other.
+      if (auto created = ebmlDateToIso(payload); !created.empty()) {
+        metadata_.setString(CREATION_TIME, created);
+      }
+      return;
+    }
+  }
+
+  // The Tags element. Each Tag states what it is about through its Targets
+  // child: a TagTrackUID naming one track, or nothing at all, which means the
+  // whole file. mkvparser parses SimpleTags but drops the targets, so the
+  // element is walked here instead.
+  void parseTagsMetadata() {
+    const mkvparser::Tags* tags = segment_->GetTags();
+    if (!tags) return;
+
+    const auto buffer = readElement(tags->m_start, tags->m_size);
+    if (buffer.empty()) return;
+
+    const auto root = std::span<const uint8_t>(buffer);
+    size_t pos = 0;
+    while (pos < root.size()) {
+      const auto tag = nextEbmlElement(root, pos);
+      if (!tag) return;
+      if (tag->id != MKV_TAG) continue;
+      applyTag(root.subspan(tag->payload, tag->end - tag->payload));
+    }
+  }
+
+  void applyTag(std::span<const uint8_t> tag) {
+    uint64_t target_type = 0;
+    uint64_t track_uid = 0;
+
+    // Targets comes first in every file worth reading, but the element order is
+    // not guaranteed, so the targets are collected before anything is applied.
+    size_t pos = 0;
+    while (pos < tag.size()) {
+      const auto child = nextEbmlElement(tag, pos);
+      if (!child) return;
+      if (child->id != MKV_TARGETS) continue;
+
+      const auto targets = tag.subspan(child->payload, child->end - child->payload);
+      size_t target_pos = 0;
+      while (target_pos < targets.size()) {
+        const auto item = nextEbmlElement(targets, target_pos);
+        if (!item) break;
+        const auto payload = targets.subspan(item->payload, item->end - item->payload);
+        if (item->id == MKV_TARGET_TYPE_VALUE) {
+          target_type = readEbmlUInt(payload).value_or(0);
+        } else if (item->id == MKV_TAG_TRACK_UID) {
+          track_uid = readEbmlUInt(payload).value_or(0);
+        }
+      }
+    }
+
+    // A UID of zero, or one naming a track that was not published, means the
+    // tag belongs to the file as a whole.
+    Dictionary* target = &metadata_;
+    if (track_uid != 0) {
+      target = metadataForTrackUid(track_uid);
+      if (!target) return;
+    }
+
+    pos = 0;
+    while (pos < tag.size()) {
+      const auto child = nextEbmlElement(tag, pos);
+      if (!child) return;
+      if (child->id != MKV_SIMPLE_TAG) continue;
+      applySimpleTag(tag.subspan(child->payload, child->end - child->payload), *target,
+                     target_type);
+    }
+  }
+
+  void applySimpleTag(std::span<const uint8_t> simple_tag, Dictionary& target,
+                      uint64_t target_type) {
+    std::string name;
+    std::string value;
+    bool has_value = false;
+
+    size_t pos = 0;
+    while (pos < simple_tag.size()) {
+      const auto child = nextEbmlElement(simple_tag, pos);
+      if (!child) return;
+      const auto payload = simple_tag.subspan(child->payload, child->end - child->payload);
+
+      if (child->id == MKV_TAG_NAME) {
+        name = ebmlString(payload);
+      } else if (child->id == MKV_TAG_STRING) {
+        value = ebmlString(payload);
+        has_value = true;
+      }
+      // Nested SimpleTags qualify their parent rather than standing alone, and
+      // there is nowhere to express that, so they are left out.
+    }
+
+    if (name.empty() || !has_value || value.empty()) return;
+
+    // Dictionary keys are non-owning views, so only the predefined constants
+    // can be stored; a tag outside the vocabulary has no key to live under.
+    const Key* key = metadataKeyForTagName(name, target_type);
+    if (!key) return;
+
+    if (isNumericMetadataKey(*key)) {
+      if (const int32_t number = std::atoi(value.c_str()); number > 0) {
+        target.setInt32(*key, number);
+      }
+      return;
+    }
+    target.setString(*key, value);
+  }
+
+  auto metadataForTrackUid(uint64_t uid) -> Dictionary* {
+    const mkvparser::Tracks* tracks = segment_->GetTracks();
+    if (!tracks) return nullptr;
+
+    for (unsigned long i = 0; i < tracks->GetTracksCount(); ++i) {
+      const mkvparser::Track* t = tracks->GetTrackByIndex(i);
+      if (!t || t->GetUid() != uid) continue;
+
+      const auto it = track_map_.find(static_cast<int32_t>(t->GetNumber()));
+      if (it == track_map_.end()) return nullptr;
+      return &tracks_[static_cast<size_t>(it->second)].metadata;
+    }
+    return nullptr;
+  }
+
+  // Cover art travels as an attachment. mkvparser does not parse the
+  // Attachments element at all, so the segment's top-level children are walked
+  // for it - headers only, so stepping over the clusters costs one read each.
+  void parseAttachments() {
+    if (!mkv_reader_ || segment_->m_size <= 0) return;
+
+    const long long segment_end = segment_->m_start + segment_->m_size;
+    long long pos = segment_->m_start;
+
+    while (pos < segment_end) {
+      uint8_t header[16] = {};
+      const auto want = static_cast<long>(
+          std::min<long long>(sizeof(header), segment_end - pos));
+      if (want <= 0 || mkv_reader_->Read(pos, want, header) != 0) return;
+
+      size_t cursor = 0;
+      const auto span = std::span<const uint8_t>(header, static_cast<size_t>(want));
+      const auto id = readEbmlVint(span, cursor, false);
+      const auto size = readEbmlVint(span, cursor, true);
+      if (!id || !size) return;
+
+      const long long payload = pos + static_cast<long long>(cursor);
+      if (*size > static_cast<uint64_t>(segment_end - payload)) return;
+
+      if (*id == MKV_ATTACHMENTS) {
+        applyAttachments(readElement(payload, static_cast<long long>(*size)));
+        return;
+      }
+      pos = payload + static_cast<long long>(*size);
+    }
+  }
+
+  void applyAttachments(const std::vector<uint8_t>& buffer) {
+    if (buffer.empty()) return;
+
+    const auto root = std::span<const uint8_t>(buffer);
+    size_t pos = 0;
+    while (pos < root.size()) {
+      const auto file = nextEbmlElement(root, pos);
+      if (!file) return;
+      if (file->id != MKV_ATTACHED_FILE) continue;
+
+      const auto attachment = root.subspan(file->payload, file->end - file->payload);
+      std::string name;
+      std::string mime;
+      std::span<const uint8_t> data;
+
+      size_t item_pos = 0;
+      while (item_pos < attachment.size()) {
+        const auto item = nextEbmlElement(attachment, item_pos);
+        if (!item) break;
+        const auto payload = attachment.subspan(item->payload, item->end - item->payload);
+
+        if (item->id == MKV_FILE_NAME) {
+          name = ebmlString(payload);
+        } else if (item->id == MKV_FILE_MIME_TYPE) {
+          mime = ebmlString(payload);
+        } else if (item->id == MKV_FILE_DATA) {
+          data = payload;
+        }
+      }
+
+      // The convention is a file named "cover" with an image type. Anything
+      // else attached to a Matroska file is a font, a script or a chapter
+      // image, none of which is artwork for the whole recording.
+      if (data.empty() || !mime.starts_with("image/")) continue;
+      if (name.size() < 5 || tolowerAscii(name.substr(0, 5)) != "cover") continue;
+
+      metadata_.setBinary(COVER_ART, data);
+      metadata_.setString(COVER_ART_MIME, mime);
+      return;
+    }
+  }
+
+  static auto tolowerAscii(std::string text) -> std::string {
+    for (char& c : text) {
+      if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return text;
+  }
+
+  // Name, language and the flags that say which track a player should pick.
+  // Unlike MP4's track_enabled, FlagDefault really does single one track out of
+  // several, which is what OM_DISPOSITION_DEFAULT means.
+  void applyTrackMetadata(const mkvparser::Track* parser_track, Track& track) {
+    if (const char* name = parser_track->GetNameAsUTF8(); name && *name) {
+      track.metadata.setString(TITLE, std::string_view(name));
+    }
+    if (const char* language = parser_track->GetLanguage();
+        language && *language && std::string_view(language) != "und") {
+      track.metadata.setString(LANGUAGE, std::string_view(language));
+    }
+
+    // FlagDefault is 1 unless the file says otherwise; FlagForced is 0.
+    bool flag_default = true;
+    bool flag_forced = false;
+
+    const auto buffer = readElement(parser_track->m_element_start,
+                                    parser_track->m_element_size);
+    if (!buffer.empty()) {
+      size_t pos = 0;
+      if (const auto root = nextEbmlElement(buffer, pos); root && root->id == MKV_TRACK_ENTRY) {
+        const auto entry = std::span<const uint8_t>(buffer).subspan(
+            root->payload, root->end - root->payload);
+        size_t entry_pos = 0;
+        while (entry_pos < entry.size()) {
+          const auto child = nextEbmlElement(entry, entry_pos);
+          if (!child) break;
+          const auto payload = entry.subspan(child->payload, child->end - child->payload);
+          if (child->id == MKV_FLAG_DEFAULT) {
+            flag_default = readEbmlUInt(payload).value_or(1) != 0;
+          } else if (child->id == MKV_FLAG_FORCED) {
+            flag_forced = readEbmlUInt(payload).value_or(0) != 0;
+          }
+        }
+      }
+    }
+
+    auto disposition = static_cast<uint16_t>(track.disposition);
+    if (flag_default) disposition |= OM_DISPOSITION_DEFAULT;
+    if (flag_forced) disposition |= OM_DISPOSITION_FORCED;
+    track.disposition = static_cast<OMDisposition>(disposition);
   }
 
   void parseDolbyVisionBlockAdditionMapping(const mkvparser::Track* parser_track, Track& track) {

@@ -14,6 +14,7 @@
 #include <util/bit_reader.hpp>
 #include <util/byte_reader.hpp>
 #include <util/color_codes.hpp>
+#include <util/date_time.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/id3_genres.hpp>
 #include <util/io_util.hpp>
@@ -567,12 +568,25 @@ struct BMFFTrack {
 // Leaf-box parsers - accept a pre-read buffer
 // ---------------------------------------------------------------------------
 
-inline void parseMvhd(std::span<const uint8_t> body, uint32_t& out_movie_timescale) {
+// MovieHeaderBox: creation and modification times, then the timescale. The
+// times count seconds from 1904-01-01 UTC rather than the Unix epoch.
+inline void parseMvhd(std::span<const uint8_t> body, uint32_t& out_movie_timescale,
+                      Dictionary& metadata) {
+  constexpr int64_t EPOCH_1904_UNIX = -2'082'844'800LL;
+
   ByteReader r(body);
   const uint8_t version = r.u8();
   r.skip(3);
-  r.skip(version == 1 ? 16 : 8);
+
+  const int64_t creation_time = (version == 1) ? static_cast<int64_t>(r.u64be())
+                                               : static_cast<int64_t>(r.u32be());
+  r.skip(version == 1 ? 8 : 4); // modification_time
   out_movie_timescale = r.u32be();
+
+  if (creation_time > 0 && r.ok()) {
+    metadata.setString(CREATION_TIME,
+                       date_time::formatIso8601Utc(creation_time + EPOCH_1904_UNIX));
+  }
 }
 
 inline void parseTkhd(std::span<const uint8_t> body, BMFFTrack& track) {
@@ -2148,7 +2162,7 @@ private:
     if (fatal_) return;
 
     if (type == ATOM('m', 'v', 'h', 'd')) {
-      parseMvhd(body, movie_timescale_);
+      parseMvhd(body, movie_timescale_, metadata_);
       return;
     }
 

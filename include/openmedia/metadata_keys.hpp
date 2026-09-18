@@ -34,6 +34,9 @@ constexpr Key GROUPING = "grouping";
 constexpr Key PUBLISHER = "publisher";
 // string - ISO 639-2/T language code of a track
 constexpr Key LANGUAGE = "language";
+// string - When the file itself was written, as an ISO 8601 UTC timestamp.
+// Distinct from DATE, which is when the content was released.
+constexpr Key CREATION_TIME = "creation_time";
 
 // int32 - Position of this track within its album
 constexpr Key TRACK_NUMBER = "track";
