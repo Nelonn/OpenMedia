@@ -10,7 +10,9 @@
 #include <util/byte_reader.hpp>
 #include <util/byte_writer.hpp>
 #include <util/demuxer_base.hpp>
+#include <util/id3_parser.hpp>
 #include <util/io_util.hpp>
+#include <util/vorbis_comment.hpp>
 #include <vector>
 
 namespace openmedia {
@@ -146,7 +148,7 @@ static auto parseStreamInfo(std::span<const uint8_t> body, FLACStreamInfo& strea
   stream.total_samples = br.readBits64(36);
 
   const auto md5 = r.bytes(sizeof(stream.md5sum));
-  std::memcpy(stream.md5sum, md5.data(), md5.size());
+  memcpy(stream.md5sum, md5.data(), md5.size());
   return r.ok();
 }
 
@@ -191,10 +193,6 @@ static void parsePicture(std::span<const uint8_t> body, FLACPicture& picture) {
   picture.cover_art.assign(data.begin(), data.end());
   picture.width = width;
   picture.height = height;
-}
-
-static void parseVorbisComment(const std::vector<uint8_t>& body) {
-  if (body.size() < 4) return;
 }
 
 struct FLACFrameInfo {
@@ -271,12 +269,21 @@ public:
         return OM_IO_NOT_ENOUGH_DATA;
       }
       if (!(id3hdr[2] & 0x80) && !(id3hdr[3] & 0x80) && !(id3hdr[4] & 0x80) && !(id3hdr[5] & 0x80)) {
-        size_t tag_size = ((size_t) (id3hdr[2] & 0x7F) << 21) |
-                          ((size_t) (id3hdr[3] & 0x7F) << 14) |
-                          ((size_t) (id3hdr[4] & 0x7F) << 7) |
-                          (size_t) (id3hdr[5] & 0x7F);
+        size_t tag_size = (static_cast<size_t>(id3hdr[2] & 0x7F) << 21) |
+                          (static_cast<size_t>(id3hdr[3] & 0x7F) << 14) |
+                          (static_cast<size_t>(id3hdr[4] & 0x7F) << 7) |
+                          static_cast<size_t>(id3hdr[5] & 0x7F);
         tag_size += 10;
         if (id3hdr[1] & 0x10) tag_size += 10;
+        std::vector<uint8_t> id3_data(tag_size);
+        memcpy(id3_data.data(), marker, 4);
+        memcpy(id3_data.data() + 4, id3hdr, 6);
+        if (tag_size > 10) {
+          if (readExact(id3_data.data() + 10, tag_size - 10) != tag_size - 10) {
+            return OM_IO_NOT_ENOUGH_DATA;
+          }
+        }
+        parseId3v2(id3_data, metadata_);
         if (!input_->seek(static_cast<int64_t>(tag_size), Whence::BEG)) {
           return OM_IO_SEEK_FAILED;
         }
@@ -325,10 +332,18 @@ public:
           parseSeektable(body, seek_points_);
           break;
         case FLACMetadataType::VORBIS_COMMENT:
-          parseVorbisComment(body);
+          parseVorbisComment(body, metadata_);
           break;
         case FLACMetadataType::PICTURE:
           parsePicture(body, cover_art_);
+          if (!cover_art_.cover_art.empty()) {
+            metadata_.setBinary(COVER_ART, cover_art_.cover_art);
+            if (cover_art_.codec_id == OM_CODEC_JPEG) {
+              metadata_.setString(COVER_ART_MIME, std::string_view("image/jpeg"));
+            } else if (cover_art_.codec_id == OM_CODEC_PNG) {
+              metadata_.setString(COVER_ART_MIME, std::string_view("image/png"));
+            }
+          }
           break;
         default:
           break;
@@ -354,6 +369,7 @@ public:
     track.time_base = {1, static_cast<int>(stream_info_.sample_rate)};
     track.duration = stream_info_.total_samples;
     track.extradata = std::move(extradata);
+    track.metadata = metadata_;
 
     tracks_.push_back(track);
 
@@ -394,7 +410,7 @@ public:
       cover_art_sent_ = true;
       Packet pkt;
       pkt.allocate(cover_art_.cover_art.size());
-      std::memcpy(pkt.bytes.data(), cover_art_.cover_art.data(), cover_art_.cover_art.size());
+      memcpy(pkt.bytes.data(), cover_art_.cover_art.data(), cover_art_.cover_art.size());
       pkt.stream_index = cover_art_track_index_ >= 0 ? cover_art_track_index_ : 1;
       pkt.pos = 0;
       pkt.pts = 0;
@@ -644,7 +660,7 @@ private:
 
     Packet pkt;
     pkt.allocate(frame_size);
-    std::memcpy(pkt.bytes.data(), read_buf_.data() + frame_start_in_buf, frame_size);
+    memcpy(pkt.bytes.data(), read_buf_.data() + frame_start_in_buf, frame_size);
 
     pkt.stream_index = 0;
     pkt.pos = read_buf_origin_ + static_cast<int64_t>(frame_start_in_buf);
@@ -1209,7 +1225,7 @@ private:
     } else {
       streaminfo_bytes_.assign(34, 0);
       if (track.extradata.size() == 34) {
-        std::memcpy(streaminfo_bytes_.data(), track.extradata.data(), 34);
+        memcpy(streaminfo_bytes_.data(), track.extradata.data(), 34);
       } else {
         const uint32_t sr = track.format.audio.sample_rate ? track.format.audio.sample_rate : 44100;
         const uint32_t ch = track.format.audio.channels ? track.format.audio.channels : 2;

@@ -5,6 +5,7 @@
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
 #include <util/demuxer_base.hpp>
+#include <util/id3_parser.hpp>
 #include <util/io_util.hpp>
 
 namespace openmedia {
@@ -227,7 +228,8 @@ public:
     bool found_fmt = false;
 
     int64_t chunk_pos = 12;
-    while (chunk_pos + 8 <= static_cast<int64_t>(input_->size())) {
+    int64_t stream_size = input_->size();
+    while (stream_size <= 0 || chunk_pos + 8 <= stream_size) {
       if (!input_->seek(chunk_pos, Whence::BEG)) break;
 
       uint8_t chunk_header[8];
@@ -252,16 +254,69 @@ public:
         found_fmt = true;
 
       } else if (memcmp(chunk_header, "data", 4) == 0) {
-        if (!found_fmt) {
-          return OM_FORMAT_PARSE_FAILED;
-        }
         data_size_ = chunk_size;
         data_offset_ = chunk_pos + 8;
-        break;
+
+      } else if (memcmp(chunk_header, "LIST", 4) == 0 && chunk_size >= 4) {
+        uint8_t list_type[4];
+        if (input_->read(list_type) == 4 && memcmp(list_type, "INFO", 4) == 0) {
+          int64_t sub_pos = chunk_pos + 12;
+          int64_t list_end = chunk_pos + 8 + chunk_size;
+          while (sub_pos + 8 <= list_end) {
+            if (!input_->seek(sub_pos, Whence::BEG)) break;
+            uint8_t sub_hdr[8];
+            if (input_->read(sub_hdr) < 8) break;
+            uint32_t sub_size = sub_hdr[4] | (sub_hdr[5] << 8) | (sub_hdr[6] << 16) | (sub_hdr[7] << 24);
+            if (sub_pos + 8 + sub_size > list_end) break;
+            std::vector<uint8_t> val_buf(sub_size);
+            if (sub_size > 0 && readExact(*input_, val_buf) == sub_size) {
+              size_t len = val_buf.size();
+              while (len > 0 && (val_buf[len - 1] == 0 || std::isspace(val_buf[len - 1]))) {
+                --len;
+              }
+              std::string text = latin1ToUtf8(std::span<const uint8_t>(val_buf.data(), len));
+              if (!text.empty()) {
+                if (memcmp(sub_hdr, "INAM", 4) == 0) {
+                  metadata_.setString(TITLE, text);
+                } else if (memcmp(sub_hdr, "IART", 4) == 0) {
+                  metadata_.setString(ARTIST, text);
+                } else if (memcmp(sub_hdr, "IPRD", 4) == 0) {
+                  metadata_.setString(ALBUM, text);
+                } else if (memcmp(sub_hdr, "ICRD", 4) == 0) {
+                  metadata_.setString(DATE, text);
+                } else if (memcmp(sub_hdr, "IGNR", 4) == 0) {
+                  metadata_.setString(GENRE, text);
+                } else if (memcmp(sub_hdr, "ICMT", 4) == 0) {
+                  metadata_.setString(COMMENT, text);
+                } else if (memcmp(sub_hdr, "ICOP", 4) == 0) {
+                  metadata_.setString(COPYRIGHT, text);
+                } else if (memcmp(sub_hdr, "IENG", 4) == 0) {
+                  if (!metadata_.contains(ENCODER)) metadata_.setString(ENCODER, text);
+                } else if (memcmp(sub_hdr, "ISFT", 4) == 0) {
+                  metadata_.setString(ENCODER, text);
+                } else if (memcmp(sub_hdr, "IMUS", 4) == 0) {
+                  metadata_.setString(COMPOSER, text);
+                } else if (memcmp(sub_hdr, "ITRK", 4) == 0) {
+                  int trk = 0;
+                  auto [p, ec] = std::from_chars(text.data(), text.data() + text.size(), trk);
+                  if (ec == std::errc {} && trk > 0) metadata_.setInt32(TRACK_NUMBER, trk);
+                }
+              }
+            }
+            sub_pos += 8 + sub_size;
+            if (sub_size & 1) sub_pos++;
+          }
+        }
+
+      } else if ((memcmp(chunk_header, "id3 ", 4) == 0 || memcmp(chunk_header, "ID3 ", 4) == 0) && chunk_size > 0) {
+        std::vector<uint8_t> id3_data(chunk_size);
+        if (readExact(*input_, id3_data) == chunk_size) {
+          parseId3v2(id3_data, metadata_);
+        }
       }
 
       chunk_pos += 8 + chunk_size;
-      if (chunk_size & 1) chunk_pos++; // RIFF word-alignment
+      if (chunk_size & 1) chunk_pos++;
     }
 
     if (!found_fmt || data_size_ == 0 || channels == 0) {
@@ -300,10 +355,18 @@ public:
 
     track.time_base = {1, static_cast<int>(sample_rate)};
     track.duration = data_size_ / (channels * (bits_per_sample_ / 8));
+    track.metadata = metadata_;
     tracks_.push_back(track);
 
     input_->seek(data_offset_, Whence::BEG);
     return OM_SUCCESS;
+  }
+
+  void close() override {
+    BaseDemuxer::close();
+    bits_per_sample_ = 0;
+    data_offset_ = 0;
+    data_size_ = 0;
   }
 
   auto readPacket() -> Result<Packet, OMError> override {

@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <future>
+#include <deque>
 #include <map>
 #include <openmedia/format_api.hpp>
 #include <openmedia/packet.hpp>
@@ -10,6 +11,7 @@
 #include <string_view>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
+#include <util/vorbis_comment.hpp>
 #include <vector>
 
 namespace openmedia {
@@ -250,6 +252,8 @@ class OggDemuxer final : public BaseDemuxer {
   std::map<int, ogg_stream_state> streams_state_;
   std::map<int, int> stream_id_to_index_;
   std::map<int, bool> streams_header_complete_;
+  std::map<int, int> streams_packet_count_;
+  std::deque<Packet> buffered_packets_;
 
 public:
   OggDemuxer() {
@@ -257,13 +261,25 @@ public:
   }
 
   ~OggDemuxer() override {
+    close();
+  }
+
+  void close() override {
+    BaseDemuxer::close();
+    buffered_packets_.clear();
     for (auto& pair : streams_state_) {
       ogg_stream_clear(&pair.second);
     }
+    streams_state_.clear();
+    stream_id_to_index_.clear();
+    streams_header_complete_.clear();
+    streams_packet_count_.clear();
     ogg_sync_clear(&sync_);
+    ogg_sync_init(&sync_);
   }
 
   auto open(std::unique_ptr<InputStream> input) -> OMError override {
+    close();
     input_ = std::move(input);
     if (!input_ || !input_->isValid()) {
       return OM_IO_INVALID_STREAM;
@@ -278,6 +294,11 @@ public:
   }
 
   auto readPacket() -> Result<Packet, OMError> override {
+    if (!buffered_packets_.empty()) {
+      Packet pkt = std::move(buffered_packets_.front());
+      buffered_packets_.pop_front();
+      return Ok(std::move(pkt));
+    }
     while (true) {
       for (auto& pair : streams_state_) {
         ogg_packet op;
@@ -297,6 +318,7 @@ public:
 
   auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
     if (timestamp == 0) {
+      buffered_packets_.clear();
       input_->seek(0, Whence::BEG);
       ogg_sync_reset(&sync_);
       for (auto& pair : streams_state_) {
@@ -308,6 +330,62 @@ public:
   }
 
 private:
+  void process_headers(int serial) {
+    auto& stream = streams_state_[serial];
+    int track_idx = stream_id_to_index_[serial];
+    Track& track = tracks_[track_idx];
+
+    ogg_packet op;
+    while (!streams_header_complete_[serial] && ogg_stream_packetout(&stream, &op) == 1) {
+      int count = streams_packet_count_[serial]++;
+      Packet pkt;
+      pkt.allocate(op.bytes);
+      memcpy(pkt.bytes.data(), op.packet, op.bytes);
+      pkt.stream_index = track.index;
+      pkt.pts = op.granulepos;
+      pkt.dts = pkt.pts;
+      buffered_packets_.push_back(std::move(pkt));
+
+      if (count == 0) {
+        if (op.bytes >= 7 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
+          track.format.type = OM_MEDIA_AUDIO;
+          track.format.codec_id = OM_CODEC_VORBIS;
+          if (op.bytes >= 30) {
+            track.format.audio.channels = op.packet[11];
+            track.format.audio.sample_rate = load_u32_le(op.packet + 12);
+            track.bitrate = load_u32_le(op.packet + 20);
+            track.time_base = {1, static_cast<int32_t>(track.format.audio.sample_rate)};
+          }
+        } else if (op.bytes >= 8 && memcmp(op.packet, "OpusHead", 8) == 0) {
+          track.format.type = OM_MEDIA_AUDIO;
+          track.format.codec_id = OM_CODEC_OPUS;
+          if (op.bytes >= 19) {
+            track.format.audio.channels = op.packet[9];
+            track.format.audio.sample_rate = load_u32_le(op.packet + 12);
+            track.time_base = {1, 48000};
+          }
+        } else {
+          streams_header_complete_[serial] = true;
+        }
+      } else if (count == 1) {
+        if (op.bytes >= 7 && op.packet[0] == 3 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
+          parseVorbisComment(std::span<const uint8_t>(op.packet + 7, op.bytes - 7), metadata_);
+          track.metadata = metadata_;
+        } else if (op.bytes >= 8 && memcmp(op.packet, "OpusTags", 8) == 0) {
+          parseVorbisComment(std::span<const uint8_t>(op.packet + 8, op.bytes - 8), metadata_);
+          track.metadata = metadata_;
+        }
+        if (track.format.codec_id == OM_CODEC_OPUS) {
+          streams_header_complete_[serial] = true;
+        }
+      } else if (count == 2) {
+        if (track.format.codec_id == OM_CODEC_VORBIS) {
+          streams_header_complete_[serial] = true;
+        }
+      }
+    }
+  }
+
   auto read_more_and_process() -> bool {
     char* buffer = ogg_sync_buffer(&sync_, 8192);
     size_t n = input_->read({reinterpret_cast<uint8_t*>(buffer), 8192});
@@ -325,34 +403,14 @@ private:
         track.index = static_cast<int32_t>(tracks_.size());
         track.id = serial;
         stream_id_to_index_[serial] = track.index;
-
-        ogg_stream_pagein(&streams_state_[serial], &og);
-
-        ogg_packet op;
-        if (ogg_stream_packetpeek(&streams_state_[serial], &op) == 1) {
-          if (op.bytes >= 7 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
-            track.format.type = OM_MEDIA_AUDIO;
-            track.format.codec_id = OM_CODEC_VORBIS;
-            if (op.bytes >= 30) {
-              track.format.audio.channels = op.packet[11];
-              track.format.audio.sample_rate = load_u32_le(op.packet + 12);
-              track.bitrate = load_u32_le(op.packet + 20);
-              track.time_base = {1, static_cast<int32_t>(track.format.audio.sample_rate)};
-            }
-          } else if (op.bytes >= 8 && memcmp(op.packet, "OpusHead", 8) == 0) {
-            track.format.type = OM_MEDIA_AUDIO;
-            track.format.codec_id = OM_CODEC_OPUS;
-            if (op.bytes >= 19) {
-              track.format.audio.channels = op.packet[9];
-              track.format.audio.sample_rate = load_u32_le(op.packet + 12);
-              track.time_base = {1, 48000};
-            }
-          }
-        }
         tracks_.push_back(track);
-        streams_header_complete_[serial] = true;
-      } else {
-        ogg_stream_pagein(&streams_state_[serial], &og);
+        streams_header_complete_[serial] = false;
+        streams_packet_count_[serial] = 0;
+      }
+      ogg_stream_pagein(&streams_state_[serial], &og);
+
+      if (!streams_header_complete_[serial]) {
+        process_headers(serial);
       }
     }
     return true;
@@ -361,7 +419,7 @@ private:
   auto all_headers_read() const -> bool {
     if (tracks_.empty()) return false;
     for (const auto& stream : tracks_) {
-      if (!streams_header_complete_.contains(stream.id)) return false;
+      if (!streams_header_complete_.contains(stream.id) || !streams_header_complete_.at(stream.id)) return false;
     }
     return true;
   }

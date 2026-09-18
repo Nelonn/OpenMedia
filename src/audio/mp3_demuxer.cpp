@@ -4,6 +4,7 @@
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
 #include <util/demuxer_base.hpp>
+#include <util/id3_parser.hpp>
 #include <util/io_util.hpp>
 #include <vector>
 
@@ -12,17 +13,14 @@
 
 namespace openmedia {
 
-// Xing/VBRI header offsets within the first MP3 frame
-static const int XING_OFFSET_STEREO = 4 + 32; // MPEG1 stereo
-static const int XING_OFFSET_MONO = 4 + 17;   // MPEG1 mono
+static constexpr int XING_OFFSET_STEREO = 4 + 32;
+static constexpr int XING_OFFSET_MONO = 4 + 17;
 
 static auto samplesPerFrame(const mp3dec_frame_info_t& info) -> int {
-  // MPEG2/2.5 Layer III = 576, everything else Layer III = 1152
   if (info.layer == 3 && info.hz < 32000) return 576;
   return 1152;
 }
 
-// Returns total sample count from Xing/Info/VBRI header, or 0 if not found.
 static auto parseVbrHeader(const uint8_t* frame_start, size_t frame_len,
                            const mp3dec_frame_info_t& info) -> int64_t {
   if (frame_len < 180) return 0;
@@ -40,7 +38,6 @@ static auto parseVbrHeader(const uint8_t* frame_start, size_t frame_len,
     }
   }
 
-  // VBRI tag is always at byte 36 from the frame start (after the 4-byte header + 32 bytes)
   const uint8_t* vbri = frame_start + 4 + 32;
   if (frame_len > static_cast<size_t>(4 + 32 + 18) && memcmp(vbri, "VBRI", 4) == 0) {
     uint32_t total_frames = (vbri[14] << 24) | (vbri[15] << 16) | (vbri[16] << 8) | vbri[17];
@@ -51,10 +48,9 @@ static auto parseVbrHeader(const uint8_t* frame_start, size_t frame_len,
   return 0;
 }
 
-// Fallback: estimate duration from file size and bitrate.
 static auto estimateDurationFromBitrate(InputStream* input, const mp3dec_frame_info_t& info) -> int64_t {
   if (info.bitrate_kbps <= 0) return 0;
-  int64_t file_size = input->size(); // must return -1 if unknown
+  int64_t file_size = input->size();
   if (file_size <= 0) return 0;
 
   double seconds = static_cast<double>(file_size) / (info.bitrate_kbps * 125.0);
@@ -64,6 +60,7 @@ static auto estimateDurationFromBitrate(InputStream* input, const mp3dec_frame_i
 class MP3Demuxer final : public BaseDemuxer {
   mp3dec_t decoder_ = {};
   int64_t pts_counter_ = 0;
+  int64_t audio_data_offset_ = 0;
 
 public:
   MP3Demuxer() {
@@ -74,6 +71,38 @@ public:
     input_ = std::move(input);
     if (!input_ || !input_->isValid()) {
       return OM_IO_INVALID_STREAM;
+    }
+
+    uint8_t id3hdr[10];
+    int64_t audio_start_pos = 0;
+    if (readExact(*input_, id3hdr) == 10 && std::memcmp(id3hdr, "ID3", 3) == 0 &&
+        id3hdr[3] <= 4 && !(id3hdr[6] & 0x80) && !(id3hdr[7] & 0x80) &&
+        !(id3hdr[8] & 0x80) && !(id3hdr[9] & 0x80)) {
+      size_t tag_size = (static_cast<size_t>(id3hdr[6] & 0x7F) << 21) |
+                        (static_cast<size_t>(id3hdr[7] & 0x7F) << 14) |
+                        (static_cast<size_t>(id3hdr[8] & 0x7F) << 7) |
+                        static_cast<size_t>(id3hdr[9] & 0x7F);
+      tag_size += 10;
+      if (id3hdr[5] & 0x10) tag_size += 10;
+      std::vector<uint8_t> tag_bytes(tag_size);
+      memcpy(tag_bytes.data(), id3hdr, 10);
+      if (tag_size > 10) {
+        readExact(*input_, std::span<uint8_t>(tag_bytes.data() + 10, tag_size - 10));
+      }
+      parseId3v2(tag_bytes, metadata_);
+      audio_start_pos = static_cast<int64_t>(tag_size);
+    }
+    input_->seek(audio_start_pos, Whence::BEG);
+
+    if (input_->canSeek() && input_->size() >= 128) {
+      int64_t saved_pos = input_->tell();
+      if (input_->seek(input_->size() - 128, Whence::BEG)) {
+        uint8_t id3v1[128];
+        if (readExact(*input_, id3v1) == 128) {
+          parseId3v1(id3v1, metadata_);
+        }
+      }
+      input_->seek(saved_pos, Whence::BEG);
     }
 
     uint8_t buffer[16384];
@@ -93,18 +122,20 @@ public:
           mp3dec_decode_frame(&decoder_, buffer + i, n - i, nullptr, &info);
           if (info.frame_bytes > 0) {
             frame_offset = i;
-            input_->seek(static_cast<int64_t>(i), Whence::BEG);
+            input_->seek(audio_start_pos + static_cast<int64_t>(i), Whence::BEG);
             break;
           }
         }
       }
     } else {
-      input_->seek(0, Whence::BEG);
+      input_->seek(audio_start_pos, Whence::BEG);
     }
 
     if (info.frame_bytes == 0) {
       return OM_FORMAT_PARSE_FAILED;
     }
+
+    audio_data_offset_ = audio_start_pos + static_cast<int64_t>(frame_offset);
 
     int64_t duration = parseVbrHeader(buffer + frame_offset, n - frame_offset, info);
     if (duration == 0) {
@@ -120,10 +151,18 @@ public:
     track.bitrate = info.bitrate_kbps * 1000;
     track.time_base = {1, info.hz};
     track.duration = duration;
+    track.metadata = metadata_;
 
     tracks_.push_back(track);
 
     return OM_SUCCESS;
+  }
+
+  void close() override {
+    BaseDemuxer::close();
+    pts_counter_ = 0;
+    audio_data_offset_ = 0;
+    mp3dec_init(&decoder_);
   }
 
   auto readPacket() -> Result<Packet, OMError> override {
@@ -171,7 +210,7 @@ public:
 
     if (timestamp == 0) {
       pts_counter_ = 0;
-      return input_->seek(0, Whence::BEG) ? OM_SUCCESS : OM_IO_SEEK_FAILED;
+      return input_->seek(audio_data_offset_, Whence::BEG) ? OM_SUCCESS : OM_IO_SEEK_FAILED;
     }
 
     const Track& track = tracks_[0];
@@ -180,31 +219,23 @@ public:
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
-    // Convert timestamp to sample position.
-    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
     int64_t target_sample;
     if (stream_idx < 0) {
-      // timestamp is in microseconds
-      // double gives 53-bit mantissa precision, exact to within 1 sample for practical file lengths.
       const double target_sample_d = static_cast<double>(timestamp) * static_cast<double>(sample_rate) / 1.0e6;
       target_sample = static_cast<int64_t>(target_sample_d);
     } else {
-      // timestamp is already in track time base (samples for MP3)
       target_sample = timestamp;
     }
 
-    // Clamp to known duration.
     if (track.duration > 0 && target_sample >= track.duration) {
       return OM_COMMON_INVALID_ARGUMENT;
     }
 
     const int bitrate_kbps = track.bitrate / 1000;
 
-    // Estimate byte offset from the CBR/average bitrate.
-    // byte_offset = target_sample / sample_rate * bitrate_kbps * 125
-    int64_t byte_offset = 0;
+    int64_t byte_offset = audio_data_offset_;
     if (bitrate_kbps > 0) {
-      byte_offset = static_cast<int64_t>(
+      byte_offset += static_cast<int64_t>(
           static_cast<double>(target_sample) * static_cast<double>(bitrate_kbps) * 125.0 / static_cast<double>(sample_rate));
     }
 
