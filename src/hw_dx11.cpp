@@ -80,6 +80,11 @@ auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
     if (FAILED(hr)) {
       return false;
     }
+
+    ComPtr<ID3D10Multithread> multithread;
+    if (SUCCEEDED(device_context.As(&multithread))) {
+      multithread->SetMultithreadProtected(TRUE);
+    }
   }
 
   // Get video device interfaces
