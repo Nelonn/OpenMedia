@@ -18,6 +18,7 @@
 #include <openmedia/result.hpp>
 #include <openmedia/track.hpp>
 #include <openmedia/video.hpp>
+#include <openmedia/metadata_keys.hpp>
 #include <span>
 #include <util/color_codes.hpp>
 #include <util/date_time.hpp>

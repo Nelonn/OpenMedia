@@ -9,6 +9,7 @@
 #include <openmedia/io.hpp>
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
+#include <openmedia/metadata_keys.hpp>
 #include <span>
 #include <string>
 #include <util/bit_reader.hpp>
