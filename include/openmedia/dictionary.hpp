@@ -513,7 +513,7 @@ public:
   auto setInt64(const Key& key, int64_t v) -> Value& { return set(key, Value(v)); }
   auto setFloat(const Key& key, float v) -> Value& { return set(key, Value(v)); }
   auto setDouble(const Key& key, double v) -> Value& { return set(key, Value(v)); }
-  auto setString(const Key& key, const std::string& v) -> Value& { return set(key, Value(v)); }
+  auto setString(const Key& key, std::string&& v) -> Value& { return set(key, Value(std::move(v))); }
   auto setString(const Key& key, std::string_view v) -> Value& { return set(key, Value(std::string(v))); }
   auto setRational(const Key& key, Rational v) -> Value& { return set(key, Value(v)); }
   auto setBinary(const Key& key, std::span<const uint8_t> d) -> Value& { return set(key, Value(d)); }
