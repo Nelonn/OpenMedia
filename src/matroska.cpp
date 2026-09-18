@@ -3,6 +3,7 @@
 #include <mkvparser/mkvparser.h>
 #include <mkvparser/mkvreader.h>
 #include <annexb.hpp>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <limits>
@@ -140,7 +141,8 @@ class MatroskaDemuxer final : public BaseDemuxer {
 
   const mkvparser::Cluster* current_cluster_ = nullptr;
   const mkvparser::BlockEntry* current_block_entry_ = nullptr;
-  long long next_cluster_pos_ = 0;
+  // A seek leaves current_block_entry_ on the entry to read, not on a read one.
+  bool resume_at_entry_ = false;
 
   long long timecode_scale_ = 1'000'000LL;
 
@@ -194,12 +196,11 @@ public:
       }
     }
 
-    long long cluster_pos = 0;
-    long cluster_size = 0;
-    if (segment_->LoadCluster(cluster_pos, cluster_size) < 0)
+    long long load_pos = 0;
+    long load_size = 0;
+    if (segment_->LoadCluster(load_pos, load_size) < 0)
       return OM_FORMAT_PARSE_FAILED;
 
-    next_cluster_pos_ = cluster_pos;
     current_cluster_ = segment_->GetFirst();
 
     return OM_SUCCESS;
@@ -209,8 +210,8 @@ public:
     current_block_ = nullptr;
     current_frame_index_ = 0;
     current_block_entry_ = nullptr;
+    resume_at_entry_ = false;
     current_cluster_ = nullptr;
-    next_cluster_pos_ = 0;
     timecode_scale_ = 1'000'000LL;
     segment_.reset();
     mkv_reader_.reset();
@@ -228,7 +229,10 @@ public:
         return Err(OM_FORMAT_END_OF_FILE);
 
       const mkvparser::BlockEntry* entry = nullptr;
-      if (!current_block_entry_) {
+      if (resume_at_entry_) {
+        entry = current_block_entry_;
+        resume_at_entry_ = false;
+      } else if (!current_block_entry_) {
         if (current_cluster_->GetFirst(entry) < 0)
           return Err(OM_FORMAT_PARSE_FAILED);
       } else {
@@ -237,18 +241,10 @@ public:
       }
 
       if (!entry || entry->EOS()) {
-        long load_size = 0;
-        const int rc = segment_->LoadCluster(next_cluster_pos_, load_size);
+        auto next = advanceCluster(current_cluster_);
+        if (next.isErr()) return Err(std::move(next).unwrapErr());
 
-        if (rc < 0)
-          return Err(OM_FORMAT_PARSE_FAILED);
-
-        if (rc == 1) {
-          current_cluster_ = nullptr;
-        } else {
-          current_cluster_ = segment_->GetLast();
-        }
-
+        current_cluster_ = next.unwrap();
         current_block_entry_ = nullptr;
         continue;
       }
@@ -277,63 +273,237 @@ public:
   }
 
   auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
-    if (!segment_) return OM_FORMAT_PARSE_FAILED;
-    if (track_map_.empty()) return OM_FORMAT_PARSE_FAILED;
+    if (!segment_ || track_map_.empty()) return OM_FORMAT_PARSE_FAILED;
+    if (timestamp < 0) return OM_COMMON_INVALID_ARGUMENT;
+
+    const mkvparser::Tracks* tracks = segment_->GetTracks();
+    if (!tracks) return OM_FORMAT_PARSE_FAILED;
+
+    long long target_track_num = track_map_.begin()->first;
+    if (stream_idx >= 0) {
+      bool found = false;
+      for (const auto& [num, idx] : track_map_) {
+        if (idx == stream_idx) {
+          target_track_num = num;
+          found = true;
+          break;
+        }
+      }
+      if (!found) return OM_FORMAT_STREAM_NOT_FOUND;
+    }
+
+    const long long target_ns =
+        (stream_idx < 0) ? timestamp * 1'000LL : timestamp * timecode_scale_;
 
     current_block_ = nullptr;
     current_frame_index_ = 0;
+    current_block_entry_ = nullptr;
+    resume_at_entry_ = false;
+    current_cluster_ = nullptr;
 
-    long long target_track_num = track_map_.begin()->first;
-
+    const mkvparser::Track* track = tracks->GetTrackByNumber(target_track_num);
     const mkvparser::Cues* cues = segment_->GetCues();
 
-    // Convert timestamp to nanoseconds for Matroska seek.
-    // If stream_idx < 0, timestamp is in microseconds; otherwise it's in track time base.
-    long long target_ns;
-    if (stream_idx < 0) {
-      // timestamp is in microseconds, convert to nanoseconds
-      target_ns = timestamp * 1'000LL;
-    } else {
-      // timestamp is in track time base (timecode_scale units), convert to nanoseconds
-      target_ns = timestamp * timecode_scale_;
+    const bool positioned = cues && track && seekWithCues(*cues, *track, target_ns, mode);
+    if (!positioned) {
+      if (const OMError err = seekByClusterScan(target_ns, mode); err != OM_SUCCESS)
+        return err;
     }
 
-    if (cues) {
-      while (!cues->DoneParsing()) {
-        cues->LoadCuePoint();
-      }
+    // Matroska indexes clusters; only DONT_SYNC asks for finer than that.
+    if (mode == SeekMode::DONT_SYNC) skipToNearestBlock(target_ns, target_track_num);
 
-      const mkvparser::Tracks* tracks = segment_->GetTracks();
-      const mkvparser::Track* track = tracks->GetTrackByNumber(target_track_num);
-
-      const mkvparser::CuePoint* cue_point = nullptr;
-      const mkvparser::CuePoint::TrackPosition* track_pos = nullptr;
-
-      if (cues->Find(target_ns, track, cue_point, track_pos) && track_pos) {
-        const long long abs_pos =
-            segment_->m_start + static_cast<long long>(track_pos->m_pos);
-        current_cluster_ = segment_->FindOrPreloadCluster(abs_pos);
-        next_cluster_pos_ = abs_pos;
-      } else {
-        current_cluster_ = segment_->GetFirst();
-        next_cluster_pos_ = 0;
-      }
-    } else {
-      current_cluster_ = segment_->GetFirst();
-      next_cluster_pos_ = 0;
-
-      while (current_cluster_ && !current_cluster_->EOS()) {
-        const long long cluster_ns = current_cluster_->GetTimeCode() * timecode_scale_;
-        if (cluster_ns >= target_ns) break;
-        current_cluster_ = segment_->GetNext(current_cluster_);
-      }
-    }
-
-    current_block_entry_ = nullptr;
     return OM_SUCCESS;
   }
 
 private:
+  // A seek preloads its cluster by position, which leaves it outside the
+  // sequential parse LoadCluster() continues (its position is an out-parameter,
+  // not a request), so only GetNext() knows what follows. Null means exhausted.
+  auto advanceCluster(const mkvparser::Cluster* cluster)
+      -> Result<const mkvparser::Cluster*, OMError> {
+    const mkvparser::Cluster* next = segment_->GetNext(cluster);
+
+    while (next && next->EOS()) {
+      long long load_pos = 0;
+      long load_size = 0;
+      const long rc = segment_->LoadCluster(load_pos, load_size);
+      if (rc < 0) return Err(OM_FORMAT_PARSE_FAILED);
+      if (rc > 0) {
+        next = nullptr;
+        break;
+      }
+      next = segment_->GetNext(cluster);
+    }
+
+    return Ok(next);
+  }
+
+  // False when the cues cannot answer the seek and the caller should scan.
+  auto seekWithCues(const mkvparser::Cues& cues, const mkvparser::Track& track,
+                    long long target_ns, SeekMode mode) -> bool {
+    // A damaged element leaves the parse position untouched, which DoneParsing()
+    // alone never escapes.
+    while (!cues.DoneParsing()) {
+      if (!cues.LoadCuePoint()) break;
+    }
+
+    // Cues::Find() only ever returns the cue at or before the target, and cue
+    // points need not index every track.
+    const mkvparser::CuePoint::TrackPosition* prev_pos = nullptr;
+    const mkvparser::CuePoint::TrackPosition* next_pos = nullptr;
+    long long prev_ns = 0;
+    long long next_ns = 0;
+
+    for (const mkvparser::CuePoint* cp = cues.GetFirst(); cp != nullptr;
+         cp = cues.GetNext(cp)) {
+      const mkvparser::CuePoint::TrackPosition* tp = cp->Find(&track);
+      if (!tp) continue;
+
+      const long long cue_ns = cp->GetTime(segment_.get());
+      if (cue_ns <= target_ns) {
+        prev_pos = tp;
+        prev_ns = cue_ns;
+      } else {
+        next_pos = tp;
+        next_ns = cue_ns;
+        break;
+      }
+    }
+
+    const mkvparser::CuePoint::TrackPosition* chosen = nullptr;
+    switch (mode) {
+      case SeekMode::PREVIOUS_SYNC:
+      case SeekMode::DONT_SYNC:
+        chosen = prev_pos ? prev_pos : next_pos;
+        break;
+
+      case SeekMode::NEXT_SYNC:
+        // A cue on the target already is the next sync point.
+        chosen = (prev_pos && prev_ns == target_ns) ? prev_pos : next_pos;
+        if (!chosen && prev_pos) {
+          current_cluster_ = nullptr; // past the last sync point
+          return true;
+        }
+        break;
+
+      case SeekMode::CLOSEST_SYNC:
+        if (prev_pos && next_pos) {
+          chosen = (target_ns - prev_ns <= next_ns - target_ns) ? prev_pos : next_pos;
+        } else {
+          chosen = prev_pos ? prev_pos : next_pos;
+        }
+        break;
+    }
+
+    if (!chosen) return false;
+
+    // CueClusterPosition and FindOrPreloadCluster() are both relative to the
+    // start of the segment payload, so adding m_start would count it twice.
+    current_cluster_ = segment_->FindOrPreloadCluster(chosen->m_pos);
+    return current_cluster_ != nullptr;
+  }
+
+  // Without cues the only index is the cluster timecode, which in practice
+  // lands on a keyframe just as the cues would have.
+  auto seekByClusterScan(long long target_ns, SeekMode mode) -> OMError {
+    const mkvparser::Cluster* prev = nullptr;
+    const mkvparser::Cluster* next = nullptr;
+    long long prev_ns = 0;
+    long long next_ns = 0;
+
+    for (const mkvparser::Cluster* cluster = segment_->GetFirst();
+         cluster && !cluster->EOS();) {
+      const long long timecode = cluster->GetTimeCode();
+      if (timecode < 0) break; // the cluster could not be loaded
+
+      const long long cluster_ns = timecode * timecode_scale_;
+      if (cluster_ns > target_ns) {
+        next = cluster;
+        next_ns = cluster_ns;
+        break;
+      }
+
+      prev = cluster;
+      prev_ns = cluster_ns;
+
+      auto advanced = advanceCluster(cluster);
+      if (advanced.isErr()) return std::move(advanced).unwrapErr();
+      cluster = advanced.unwrap();
+    }
+
+    switch (mode) {
+      case SeekMode::NEXT_SYNC:
+        current_cluster_ = (prev && prev_ns == target_ns) ? prev : next;
+        break;
+
+      case SeekMode::CLOSEST_SYNC:
+        if (prev && next) {
+          current_cluster_ = (target_ns - prev_ns <= next_ns - target_ns) ? prev : next;
+        } else {
+          current_cluster_ = prev ? prev : next;
+        }
+        break;
+
+      default: // PREVIOUS_SYNC, DONT_SYNC
+        current_cluster_ = prev ? prev : next;
+        break;
+    }
+
+    return OM_SUCCESS;
+  }
+
+  // DONT_SYNC wants the nearest block, not the nearest sync point, and only the
+  // cluster it sits in is indexed.
+  void skipToNearestBlock(long long target_ns, long long track_num) {
+    const mkvparser::Cluster* cluster = current_cluster_;
+
+    const mkvparser::Cluster* best_cluster = nullptr;
+    const mkvparser::BlockEntry* best_entry = nullptr;
+    long long best_delta = std::numeric_limits<long long>::max();
+
+    bool finished = false;
+    while (!finished && cluster && !cluster->EOS()) {
+      const mkvparser::BlockEntry* entry = nullptr;
+      if (cluster->GetFirst(entry) < 0) break;
+
+      while (entry && !entry->EOS()) {
+        const mkvparser::Block* block = entry->GetBlock();
+        if (block && block->GetTrackNumber() == track_num) {
+          const long long block_ns = block->GetTime(cluster);
+          const long long delta = std::llabs(block_ns - target_ns);
+          if (delta < best_delta) {
+            best_delta = delta;
+            best_entry = entry;
+            best_cluster = cluster;
+          } else if (block_ns > target_ns) {
+            finished = true; // past the target and no longer improving
+            break;
+          }
+        }
+
+        const mkvparser::BlockEntry* following = nullptr;
+        if (cluster->GetNext(entry, following) < 0) {
+          finished = true;
+          break;
+        }
+        entry = following;
+      }
+
+      if (finished) break;
+
+      auto advanced = advanceCluster(cluster);
+      if (advanced.isErr()) break;
+      cluster = advanced.unwrap();
+    }
+
+    if (!best_entry) return;
+
+    current_cluster_ = best_cluster;
+    current_block_entry_ = best_entry;
+    resume_at_entry_ = true;
+  }
+
   auto readFrameFromCurrentBlock() -> Result<Packet, OMError> {
     const mkvparser::Block::Frame& frame =
         current_block_->GetFrame(current_frame_index_++);
