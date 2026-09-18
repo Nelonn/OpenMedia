@@ -209,7 +209,9 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device) -> AMFConte
   if (ctx1) {
     result.context1 = ctx1;
     ctx1->QueryInterface(amf::AMFContext2::IID(), reinterpret_cast<void**>(&ctx2));
-    if (ctx2) result.context2 = ctx2;
+    if (ctx2) {
+      result.context2 = ctx2;
+    }
   }
 
   auto initDefaultDX11 = [&]() -> AMF_RESULT {
@@ -237,7 +239,9 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device) -> AMFConte
       case HWDeviceType::DX11: {
         ID3D11Device* d3d11_dev = HWD3D11Context_getDevice(static_cast<OMDX11Context*>(hw_device->context));
         res = result.context->InitDX11(d3d11_dev);
-        if (res == AMF_OK) result.device_type = HWDeviceType::DX11;
+        if (res == AMF_OK) {
+          result.device_type = HWDeviceType::DX11;
+        }
         break;
       }
       case HWDeviceType::DX12: {
@@ -245,8 +249,9 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device) -> AMFConte
           ID3D12CommandQueue* queue = HWD3D12Context_getCommandQueue(static_cast<OMDX12Context*>(hw_device->context));
           res = result.context2->InitDX12(queue);
           if (res == AMF_OK) result.device_type = HWDeviceType::DX12;
-        } else
+        } else {
           res = AMF_NOT_SUPPORTED;
+        }
         break;
       }
       case HWDeviceType::VULKAN: {
@@ -259,8 +264,9 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device) -> AMFConte
           amf_vk_dev.hDevice = HWVulkanContext_getDevice(vk_ctx);
           res = result.context1->InitVulkan(&amf_vk_dev);
           if (res == AMF_OK) result.device_type = HWDeviceType::VULKAN;
-        } else
+        } else {
           res = AMF_NOT_SUPPORTED;
+        }
         break;
       }
       case HWDeviceType::NONE:
@@ -269,9 +275,12 @@ static auto initAMFContext(const std::optional<HWDevice>& hw_device) -> AMFConte
         break;
       default: res = initDefaultDX11(); break;
     }
-    if (res != AMF_OK && hw_device->type != HWDeviceType::NONE) res = initDefaultDX11();
-  } else
+    if (res != AMF_OK && hw_device->type != HWDeviceType::NONE) {
+      res = initDefaultDX11();
+    }
+  } else {
     res = initDefaultDX11();
+  }
 
   result.status = res;
   return result;
