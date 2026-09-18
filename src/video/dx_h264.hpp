@@ -6,6 +6,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #ifdef _WIN32
@@ -21,19 +22,18 @@
 namespace openmedia::dx_h264 {
 
 template<typename T>
-static auto alignUp(T value, T alignment) -> T {
+constexpr auto alignUp(T value, T alignment) -> T {
   if (alignment <= 1) return value;
   return ((value + alignment - 1) / alignment) * alignment;
 }
 
-static auto isAnnexB(std::span<const uint8_t> data) -> bool {
+inline auto isAnnexB(std::span<const uint8_t> data) -> bool {
   return data.size() >= 3 && data[0] == 0 && data[1] == 0 &&
          (data[2] == 1 || (data.size() >= 4 && data[2] == 0 && data[3] == 1));
 }
 
 struct ParsedFrame {
   std::span<const uint8_t> bitstream;
-  std::vector<uint8_t> owned_bitstream;
   std::vector<uint32_t> slice_offsets;
   h264::NALHeader nal = {};
   h264::SliceHeader slice = {};
@@ -49,15 +49,20 @@ struct State {
   bool pps_valid[256] = {};
   bool has_sps = false;
   bool has_pps = false;
-  uint8_t nal_length_size = 0;
   int prev_pic_order_cnt_lsb = 0;
   int prev_pic_order_cnt_msb = 0;
+  // pic_order_cnt_type 1 and 2 derive the count from frame_num instead, and
+  // need the previous picture's frame_num and its wrap offset to do it.
+  int prev_frame_num = 0;
+  int prev_frame_num_offset = 0;
   bool have_prev_poc = false;
   openmedia::RbspBuffer rbsp_scratch;
 
   void resetPoc() {
     prev_pic_order_cnt_lsb = 0;
     prev_pic_order_cnt_msb = 0;
+    prev_frame_num = 0;
+    prev_frame_num_offset = 0;
     have_prev_poc = false;
   }
 
@@ -88,8 +93,7 @@ struct State {
   void parseExtradata(std::span<const uint8_t> extradata) {
     if (extradata.empty()) return;
     if (extradata.size() >= 7 && extradata[0] == 1) {
-      nal_length_size = static_cast<uint8_t>((extradata[4] & 0x03u) + 1);
-      size_t offset = 5;
+      size_t offset = 5; // configurationVersion, profile, compat, level, lengthSize
       const uint8_t sps_count = extradata[offset++] & 0x1fu;
       for (uint8_t i = 0; i < sps_count && offset + 2 <= extradata.size(); ++i) {
         const size_t size = (static_cast<size_t>(extradata[offset]) << 8u) | extradata[offset + 1];
@@ -131,12 +135,16 @@ struct State {
     }
   }
 
-  // 8.2.1.1. prevPicOrderCntMsb/Lsb come from the previous *reference* picture
-  // in decoding order; letting non-reference pictures update them made the MSB
-  // step at the wrong moment once pic_order_cnt_lsb wrapped, which put the
-  // reordering queue and the DXVA field order counts out of step with the
-  // stream.
-  auto computePoc(const h264::SliceHeader& slice, bool is_reference) -> int32_t {
+  // 8.2.1. All three pic_order_cnt_types, because only type 0 keeps the count
+  // in the slice header: types 1 and 2 derive it from frame_num, and returning
+  // slice.pic_order_cnt_lsb for them handed back a hard 0 for every picture in
+  // the stream — the field is never read when the SPS does not use type 0. A
+  // constant POC leaves DXVA's CurrFieldOrderCnt and FieldOrderCntList flat,
+  // which is what the driver uses to tell the pictures in the DPB apart.
+  //
+  // Type 2 in particular is what NVENC and the Windows game capture encoders
+  // emit for their B-frame-free streams, so this was not an exotic corner.
+  auto computePoc(const h264::SliceHeader& slice, bool is_idr, bool is_reference) -> int32_t {
     if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !pps_valid[slice.pic_parameter_set_id]) {
       return slice.pic_order_cnt_lsb;
     }
@@ -145,7 +153,58 @@ struct State {
       return slice.pic_order_cnt_lsb;
     }
     const auto& s = sps[p.seq_parameter_set_id];
-    if (s.pic_order_cnt_type != 0) return slice.pic_order_cnt_lsb;
+
+    // 8.2.1.2/8.2.1.3: frame_num wraps, so both derived types carry an offset
+    // that steps by MaxFrameNum every time it does.
+    const auto frameNumOffset = [&]() -> int {
+      if (is_idr) return 0;
+      const int max_frame_num = 1 << (s.log2_max_frame_num_minus4 + 4);
+      if (prev_frame_num > slice.frame_num) return prev_frame_num_offset + max_frame_num;
+      return prev_frame_num_offset;
+    };
+    const auto rememberFrameNum = [&](int frame_num_offset) {
+      prev_frame_num = slice.mmco5 ? 0 : slice.frame_num;
+      prev_frame_num_offset = slice.mmco5 ? 0 : frame_num_offset;
+    };
+
+    if (s.pic_order_cnt_type == 1) {
+      const int frame_num_offset = frameNumOffset();
+      int abs_frame_num = 0;
+      if (s.num_ref_frames_in_pic_order_cnt_cycle > 0) abs_frame_num = frame_num_offset + slice.frame_num;
+      if (!is_reference && abs_frame_num > 0) abs_frame_num--;
+
+      int expected_poc = 0;
+      if (abs_frame_num > 0) {
+        const int cycle_cnt = (abs_frame_num - 1) / s.num_ref_frames_in_pic_order_cnt_cycle;
+        const int frame_num_in_cycle = (abs_frame_num - 1) % s.num_ref_frames_in_pic_order_cnt_cycle;
+        int expected_delta_per_cycle = 0;
+        for (int i = 0; i < s.num_ref_frames_in_pic_order_cnt_cycle; ++i) expected_delta_per_cycle += s.offset_for_ref_frame[i];
+        expected_poc = cycle_cnt * expected_delta_per_cycle;
+        for (int i = 0; i <= frame_num_in_cycle; ++i) expected_poc += s.offset_for_ref_frame[i];
+      }
+      if (!is_reference) expected_poc += s.offset_for_non_ref_pic;
+
+      const int top_foc = expected_poc + slice.delta_pic_order_cnt[0];
+      const int bottom_foc = top_foc + s.offset_for_top_to_bottom_field + slice.delta_pic_order_cnt[1];
+      rememberFrameNum(frame_num_offset);
+      return slice.mmco5 ? 0 : std::min(top_foc, bottom_foc);
+    }
+
+    if (s.pic_order_cnt_type == 2) {
+      const int frame_num_offset = frameNumOffset();
+      const int abs_frame_num = frame_num_offset + slice.frame_num;
+      rememberFrameNum(frame_num_offset);
+      if (slice.mmco5 || is_idr) return 0;
+      // Decoding order is output order here, so a non-reference picture sits
+      // immediately before the reference picture that follows it.
+      return is_reference ? 2 * abs_frame_num : 2 * abs_frame_num - 1;
+    }
+
+    // Type 0. prevPicOrderCntMsb/Lsb come from the previous *reference* picture
+    // in decoding order; letting non-reference pictures update them made the MSB
+    // step at the wrong moment once pic_order_cnt_lsb wrapped, which put the
+    // reordering queue and the DXVA field order counts out of step with the
+    // stream.
     const int max_pic_order_cnt_lsb = 1 << (s.log2_max_pic_order_cnt_lsb_minus4 + 4);
     int pic_order_cnt_msb = 0;
     if (have_prev_poc) {
@@ -164,7 +223,9 @@ struct State {
       prev_pic_order_cnt_msb = pic_order_cnt_msb;
       have_prev_poc = true;
     }
-    return pic_order_cnt_msb + slice.pic_order_cnt_lsb;
+    const int top_foc = pic_order_cnt_msb + slice.pic_order_cnt_lsb;
+    const int bottom_foc = top_foc + slice.delta_pic_order_cnt_bottom;
+    return slice.mmco5 ? 0 : std::min(top_foc, bottom_foc);
   }
 
   auto parseFrame(std::span<const uint8_t> packet) -> ParsedFrame {
@@ -202,14 +263,69 @@ struct State {
 
     frame.is_intra = frame.nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
     frame.is_reference = frame.nal.idc != h264::NAL_REF_IDC_PRIORITY_DISPOSABLE;
-    frame.poc = computePoc(frame.slice, frame.is_reference);
+    frame.poc = computePoc(frame.slice, frame.is_intra, frame.is_reference);
     return frame;
   }
 };
 
+// Why a parsed frame cannot be handed to the hardware, when it cannot.
+enum class ParameterSetStatus {
+  ok,
+  unknown_pps,        // the slice names a picture parameter set never sent
+  unknown_sps,        // that PPS names a sequence parameter set never sent
+  unsupported_coding, // more than 8 bits per sample, or more than one slice group
+};
+
+inline auto describe(ParameterSetStatus status) -> std::string_view {
+  switch (status) {
+    case ParameterSetStatus::unknown_pps:
+      return "the slice refers to a picture parameter set the stream has not sent";
+    case ParameterSetStatus::unknown_sps:
+      return "the picture parameter set refers to a sequence parameter set the stream has not sent";
+    case ParameterSetStatus::unsupported_coding:
+      return "this DXVA path decodes 8-bit, single-slice-group H.264 only";
+    case ParameterSetStatus::ok:
+      return "";
+  }
+  return "";
+}
+
+// The parameter sets a frame decodes against.
+//
+// D3D11 and D3D12 both have to resolve and vet exactly these before they can
+// fill in a DXVA picture parameter structure, and a caller that leaves one of
+// the checks out ends up reading a parameter set the stream never sent.
+struct ActiveParameterSets {
+  const h264::SPS* sps = nullptr;
+  const h264::PPS* pps = nullptr;
+  ParameterSetStatus status = ParameterSetStatus::ok;
+
+  explicit operator bool() const { return status == ParameterSetStatus::ok; }
+};
+
+inline auto activeParameterSets(const State& state, const h264::SliceHeader& slice) -> ActiveParameterSets {
+  const int pps_id = slice.pic_parameter_set_id;
+  if (pps_id < 0 || pps_id >= 256 || !state.pps_valid[pps_id]) {
+    return {.status = ParameterSetStatus::unknown_pps};
+  }
+  const h264::PPS& pps = state.pps[pps_id];
+
+  const int sps_id = pps.seq_parameter_set_id;
+  if (sps_id < 0 || sps_id >= 32 || !state.sps_valid[sps_id]) {
+    return {.status = ParameterSetStatus::unknown_sps};
+  }
+  const h264::SPS& sps = state.sps[sps_id];
+
+  if (sps.bit_depth_luma_minus8 != 0 || sps.bit_depth_chroma_minus8 != 0 ||
+      pps.num_slice_groups_minus1 != 0) {
+    return {.status = ParameterSetStatus::unsupported_coding};
+  }
+  return {.sps = &sps, .pps = &pps};
+}
+
 // Annex A Table A-1: the DPB capacity, in macroblocks, that each level
 // guarantees a decoder will provide.
-static auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
+inline auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
   switch (level_idc) {
     case 10: return 396;
     case 11: return 900;
@@ -238,7 +354,7 @@ static auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
 // B-frames was emitted in decode order and its timestamps ran backwards. The
 // fallback is the DPB capacity the stream's own level guarantees, which is what
 // a decoder is entitled to assume when the stream stays silent.
-static auto reorderDepth(const h264::SPS& sps) -> size_t {
+inline auto reorderDepth(const h264::SPS& sps) -> size_t {
   if (sps.vui_parameters_present_flag && sps.vui.bitstream_restriction_flag) {
     return static_cast<size_t>(std::clamp(sps.vui.num_reorder_frames, 0, 16));
   }
@@ -469,10 +585,29 @@ private:
   uint32_t max_frame_num_ = 16;
 };
 
+// An IDR restarts the stream: the reference buffer is emptied and the picture
+// counts begin again from it. The count parseFrame worked out for this frame
+// was derived against the stretch that just ended, so it has to be taken again
+// once the state is cleared -- which is the part a caller doing this by hand is
+// most likely to leave out.
+//
+// `Dpb` is passed separately because `State` holds the parameter sets and the
+// parser's own bookkeeping, while the reference buffer belongs to whichever
+// decoder owns the surfaces.
+inline void restartAtIdr(State& state, Dpb& dpb, ParsedFrame& frame) {
+  dpb.reset();
+  state.resetPoc();
+  frame.poc = state.computePoc(frame.slice, frame.is_intra, frame.is_reference);
+}
+
 #ifdef _WIN32
-static void fillQMatrix(const h264::SPS& sps, const h264::PPS& pps, DXVA_Qmatrix_H264& qmatrix) {
+// DXVA_PicParams_H264 describes the reference picture buffer with a fixed
+// 16-entry list, whatever the stream's own DPB capacity is.
+inline constexpr size_t MAX_REF_FRAMES = 16;
+
+inline void fillQMatrix(const h264::SPS& sps, const h264::PPS& pps, DXVA_Qmatrix_H264& qmatrix) {
   if (!sps.seq_scaling_matrix_present_flag && !pps.pic_scaling_matrix_present_flag) {
-    std::memset(&qmatrix, 16, sizeof(qmatrix));
+    memset(&qmatrix, 16, sizeof(qmatrix));
     return;
   }
   static constexpr int z4[] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
@@ -481,11 +616,15 @@ static void fillQMatrix(const h264::SPS& sps, const h264::PPS& pps, DXVA_Qmatrix
       12,19,26,33,40,48,41,34, 27,20,13, 6, 7,14,21,28,
       35,42,49,56,57,50,43,36, 29,22,15,23,30,37,44,51,
       58,59,52,45,38,31,39,46, 53,60,61,54,47,55,62,63};
-  for (int i = 0; i < 6; ++i) for (int j = 0; j < 16; ++j) qmatrix.bScalingLists4x4[i][j] = (UCHAR)pps.ScalingList4x4[i][z4[j]];
-  for (int i = 0; i < 2; ++i) for (int j = 0; j < 64; ++j) qmatrix.bScalingLists8x8[i][j] = (UCHAR)pps.ScalingList8x8[i][z8[j]];
+  for (int i = 0; i < 6; ++i) for (int j = 0; j < 16; ++j) {
+    qmatrix.bScalingLists4x4[i][j] = static_cast<UCHAR>(pps.ScalingList4x4[i][z4[j]]);
+  }
+  for (int i = 0; i < 2; ++i) for (int j = 0; j < 64; ++j) {
+    qmatrix.bScalingLists8x8[i][j] = static_cast<UCHAR>(pps.ScalingList8x8[i][z8[j]]);
+  }
 }
 
-static void fillPicParams(const h264::SPS& sps,
+inline void fillPicParams(const h264::SPS& sps,
                           const h264::PPS& pps,
                           const h264::SliceHeader& slice,
                           const ParsedFrame& frame,
@@ -494,20 +633,20 @@ static void fillPicParams(const h264::SPS& sps,
                           uint32_t feedback,
                           DXVA_PicParams_H264& pic) {
   pic = {};
-  pic.wFrameWidthInMbsMinus1 = (USHORT)sps.pic_width_in_mbs_minus1;
-  pic.wFrameHeightInMbsMinus1 = (USHORT)sps.pic_height_in_map_units_minus1;
+  pic.wFrameWidthInMbsMinus1 = static_cast<USHORT>(sps.pic_width_in_mbs_minus1);
+  pic.wFrameHeightInMbsMinus1 = static_cast<USHORT>(sps.pic_height_in_map_units_minus1);
   pic.IntraPicFlag = frame.is_intra ? 1 : 0;
   pic.MbaffFrameFlag = 0;
   pic.field_pic_flag = 0;
   pic.chroma_format_idc = 1;
-  pic.bit_depth_chroma_minus8 = (UCHAR)sps.bit_depth_chroma_minus8;
-  pic.bit_depth_luma_minus8 = (UCHAR)sps.bit_depth_luma_minus8;
-  pic.residual_colour_transform_flag = (UCHAR)sps.separate_colour_plane_flag;
+  pic.bit_depth_chroma_minus8 = static_cast<UCHAR>(sps.bit_depth_chroma_minus8);
+  pic.bit_depth_luma_minus8 = static_cast<UCHAR>(sps.bit_depth_luma_minus8);
+  pic.residual_colour_transform_flag = static_cast<UCHAR>(sps.separate_colour_plane_flag);
   pic.CurrPic.AssociatedFlag = 0;
-  pic.CurrPic.Index7Bits = (UCHAR)current_slot;
+  pic.CurrPic.Index7Bits = static_cast<UCHAR>(current_slot);
   pic.CurrFieldOrderCnt[0] = frame.poc;
   pic.CurrFieldOrderCnt[1] = frame.poc;
-  for (uint32_t i = 0; i < 16; ++i) {
+  for (size_t i = 0; i < MAX_REF_FRAMES; ++i) {
     pic.RefFrameList[i].bPicEntry = 0xff;
     pic.FieldOrderCntList[i][0] = 0;
     pic.FieldOrderCntList[i][1] = 0;
@@ -518,50 +657,50 @@ static void fillPicParams(const h264::SPS& sps,
   // such and carry their LongTermFrameIdx in place of a frame_num, which is what
   // the driver needs to build the slice reference lists itself.
   size_t ref_index = 0;
-  for (uint32_t slot = 0; slot < dpb.slotCount() && ref_index < 16; ++slot) {
+  for (uint32_t slot = 0; slot < dpb.slotCount() && ref_index < MAX_REF_FRAMES; ++slot) {
     const auto& entry = dpb.entries()[slot];
     if (!entry.is_reference || slot == current_slot) continue;
     pic.RefFrameList[ref_index].AssociatedFlag = entry.is_long_term ? 1 : 0;
-    pic.RefFrameList[ref_index].Index7Bits = (UCHAR)slot;
+    pic.RefFrameList[ref_index].Index7Bits = static_cast<UCHAR>(slot);
     pic.FieldOrderCntList[ref_index][0] = entry.poc;
     pic.FieldOrderCntList[ref_index][1] = entry.poc;
     pic.UsedForReferenceFlags |= 1u << (ref_index * 2 + 0);
     pic.UsedForReferenceFlags |= 1u << (ref_index * 2 + 1);
     pic.FrameNumList[ref_index] =
-        (USHORT)(entry.is_long_term ? entry.long_term_frame_idx : static_cast<int32_t>(entry.frame_num));
+        static_cast<USHORT>((entry.is_long_term ? entry.long_term_frame_idx : static_cast<int32_t>(entry.frame_num)));
     ++ref_index;
   }
-  pic.weighted_pred_flag = (UCHAR)pps.weighted_pred_flag;
-  pic.weighted_bipred_idc = (UCHAR)pps.weighted_bipred_idc;
-  pic.transform_8x8_mode_flag = (UCHAR)pps.transform_8x8_mode_flag;
-  pic.constrained_intra_pred_flag = (UCHAR)pps.constrained_intra_pred_flag;
-  pic.num_ref_frames = (UCHAR)sps.num_ref_frames;
+  pic.weighted_pred_flag = static_cast<UCHAR>(pps.weighted_pred_flag);
+  pic.weighted_bipred_idc = static_cast<UCHAR>(pps.weighted_bipred_idc);
+  pic.transform_8x8_mode_flag = static_cast<UCHAR>(pps.transform_8x8_mode_flag);
+  pic.constrained_intra_pred_flag = static_cast<UCHAR>(pps.constrained_intra_pred_flag);
+  pic.num_ref_frames = static_cast<UCHAR>(sps.num_ref_frames);
   pic.MbsConsecutiveFlag = 1;
-  pic.frame_mbs_only_flag = (UCHAR)sps.frame_mbs_only_flag;
+  pic.frame_mbs_only_flag = static_cast<UCHAR>(sps.frame_mbs_only_flag);
   pic.MinLumaBipredSize8x8Flag = sps.level_idc >= 31;
   pic.RefPicFlag = frame.is_reference ? 1 : 0;
-  pic.frame_num = (USHORT)slice.frame_num;
-  pic.pic_init_qp_minus26 = (CHAR)pps.pic_init_qp_minus26;
-  pic.pic_init_qs_minus26 = (CHAR)pps.pic_init_qs_minus26;
-  pic.chroma_qp_index_offset = (CHAR)pps.chroma_qp_index_offset;
-  pic.second_chroma_qp_index_offset = (CHAR)pps.second_chroma_qp_index_offset;
-  pic.log2_max_frame_num_minus4 = (UCHAR)sps.log2_max_frame_num_minus4;
-  pic.pic_order_cnt_type = (UCHAR)sps.pic_order_cnt_type;
-  pic.log2_max_pic_order_cnt_lsb_minus4 = (UCHAR)sps.log2_max_pic_order_cnt_lsb_minus4;
-  pic.delta_pic_order_always_zero_flag = (UCHAR)sps.delta_pic_order_always_zero_flag;
-  pic.direct_8x8_inference_flag = (UCHAR)sps.direct_8x8_inference_flag;
-  pic.entropy_coding_mode_flag = (UCHAR)pps.entropy_coding_mode_flag;
-  pic.pic_order_present_flag = (UCHAR)pps.pic_order_present_flag;
-  pic.num_slice_groups_minus1 = (UCHAR)pps.num_slice_groups_minus1;
-  pic.slice_group_map_type = (UCHAR)pps.slice_group_map_type;
-  pic.deblocking_filter_control_present_flag = (UCHAR)pps.deblocking_filter_control_present_flag;
-  pic.redundant_pic_cnt_present_flag = (UCHAR)pps.redundant_pic_cnt_present_flag;
-  pic.slice_group_change_rate_minus1 = (USHORT)pps.slice_group_change_rate_minus1;
+  pic.frame_num = static_cast<USHORT>(slice.frame_num);
+  pic.pic_init_qp_minus26 = static_cast<CHAR>(pps.pic_init_qp_minus26);
+  pic.pic_init_qs_minus26 = static_cast<CHAR>(pps.pic_init_qs_minus26);
+  pic.chroma_qp_index_offset = static_cast<CHAR>(pps.chroma_qp_index_offset);
+  pic.second_chroma_qp_index_offset = static_cast<CHAR>(pps.second_chroma_qp_index_offset);
+  pic.log2_max_frame_num_minus4 = static_cast<UCHAR>(sps.log2_max_frame_num_minus4);
+  pic.pic_order_cnt_type = static_cast<UCHAR>(sps.pic_order_cnt_type);
+  pic.log2_max_pic_order_cnt_lsb_minus4 = static_cast<UCHAR>(sps.log2_max_pic_order_cnt_lsb_minus4);
+  pic.delta_pic_order_always_zero_flag = static_cast<UCHAR>(sps.delta_pic_order_always_zero_flag);
+  pic.direct_8x8_inference_flag = static_cast<UCHAR>(sps.direct_8x8_inference_flag);
+  pic.entropy_coding_mode_flag = static_cast<UCHAR>(pps.entropy_coding_mode_flag);
+  pic.pic_order_present_flag = static_cast<UCHAR>(pps.pic_order_present_flag);
+  pic.num_slice_groups_minus1 = static_cast<UCHAR>(pps.num_slice_groups_minus1);
+  pic.slice_group_map_type = static_cast<UCHAR>(pps.slice_group_map_type);
+  pic.deblocking_filter_control_present_flag = static_cast<UCHAR>(pps.deblocking_filter_control_present_flag);
+  pic.redundant_pic_cnt_present_flag = static_cast<UCHAR>(pps.redundant_pic_cnt_present_flag);
+  pic.slice_group_change_rate_minus1 = static_cast<USHORT>(pps.slice_group_change_rate_minus1);
   pic.Reserved16Bits = 3;
   pic.StatusReportFeedbackNumber = feedback == 0 ? 1 : feedback;
   pic.ContinuationFlag = 1;
-  pic.num_ref_idx_l0_active_minus1 = (UCHAR)pps.num_ref_idx_l0_active_minus1;
-  pic.num_ref_idx_l1_active_minus1 = (UCHAR)pps.num_ref_idx_l1_active_minus1;
+  pic.num_ref_idx_l0_active_minus1 = static_cast<UCHAR>(pps.num_ref_idx_l0_active_minus1);
+  pic.num_ref_idx_l1_active_minus1 = static_cast<UCHAR>(pps.num_ref_idx_l1_active_minus1);
 }
 #endif
 

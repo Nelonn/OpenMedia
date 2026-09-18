@@ -152,10 +152,10 @@ static auto parseStreamInfo(std::span<const uint8_t> body, FLACStreamInfo& strea
 
 static void parseSeektable(std::span<const uint8_t> body,
                            std::vector<FLACSeekPoint>& seek_table) {
-  constexpr size_t K_POINT_SIZE = 18;
+  constexpr size_t POINT_SIZE = 18;
   ByteReader r(body);
-  seek_table.reserve(seek_table.size() + body.size() / K_POINT_SIZE);
-  while (r.canRead(K_POINT_SIZE)) {
+  seek_table.reserve(seek_table.size() + body.size() / POINT_SIZE);
+  while (r.canRead(POINT_SIZE)) {
     const uint64_t sample_number = r.u64be();
     const uint64_t stream_offset = r.u64be();
     const uint16_t num_samples = r.u16be();
@@ -898,9 +898,9 @@ private:
     while (current_sample_pos_ < target_sample) {
 
       // Read ahead in large chunks, not 2 bytes at a time.
-      constexpr size_t K_CHUNK = 65536;
+      constexpr size_t CHUNK_SIZE = 65536;
       if (read_buf_.size() < 16) {
-        if (!ensureBytes(K_CHUNK)) return;
+        if (!ensureBytes(CHUNK_SIZE)) return;
       }
 
       // Scan for sync word.
@@ -920,7 +920,7 @@ private:
           read_buf_ = {read_buf_.back()};
         else
           read_buf_.clear();
-        if (!ensureBytes(K_CHUNK)) return;
+        if (!ensureBytes(CHUNK_SIZE)) return;
         continue;
       }
 

@@ -30,23 +30,28 @@ using ParsedFrame = video_parser::H265ParsedFrame;
 //
 // Without this the pictures come out in decode order, which for anything with B-frames means their
 // timestamps run backwards -- the same fault the H.264 path had; see dx_h264::reorderDepth.
-static auto reorderDepth(const Sps& sps) -> size_t {
+inline auto reorderDepth(const Sps& sps) -> size_t {
   const int layer = std::clamp(sps.max_sub_layers_minus1, 0, 7);
   return static_cast<size_t>(std::clamp(sps.sps_max_num_reorder_pics[layer], 0, 16));
 }
 
 #ifdef _WIN32
+// DXVA_PicParams_HEVC carries a fixed 15-entry reference picture list, and
+// each of the reference sets that index into it holds at most 8.
+inline constexpr uint8_t MAX_REF_PICS = 15;
+inline constexpr uint8_t MAX_REF_SET_ENTRIES = 8;
+
 struct SliceData {
   std::vector<uint8_t> bitstream;
   std::vector<DXVA_Slice_HEVC_Short> slices;
 };
 #endif
 
-static auto isIdr(int nal_type) noexcept -> bool {
+inline auto isIdr(int nal_type) noexcept -> bool {
   return nal_type == video_parser::NAL_IDR_W_RADL || nal_type == video_parser::NAL_IDR_N_LP;
 }
 
-static auto isIrap(int nal_type) noexcept -> bool {
+inline auto isIrap(int nal_type) noexcept -> bool {
   return nal_type >= video_parser::NAL_BLA_W_LP && nal_type <= video_parser::NAL_CRA_NUT;
 }
 
@@ -87,20 +92,20 @@ struct PocState {
 };
 
 #ifdef _WIN32
-static auto isStartCode(const std::vector<uint8_t>& data, size_t offset) noexcept -> size_t {
+inline auto isStartCode(const std::vector<uint8_t>& data, size_t offset) noexcept -> size_t {
   if (offset + 3 <= data.size() && data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1) return 3;
   if (offset + 4 <= data.size() && data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 0 && data[offset + 3] == 1) return 4;
   return 0;
 }
 
-static auto findNextStartCode(const std::vector<uint8_t>& data, size_t offset) noexcept -> size_t {
+inline auto findNextStartCode(const std::vector<uint8_t>& data, size_t offset) noexcept -> size_t {
   for (size_t i = offset; i + 3 <= data.size(); ++i) {
     if (isStartCode(data, i) != 0) return i;
   }
   return data.size();
 }
 
-static auto buildSliceData(const ParsedFrame& frame) -> SliceData {
+inline auto buildSliceData(const ParsedFrame& frame) -> SliceData {
   SliceData out;
   out.slices.reserve(frame.slice_offsets.size());
   out.bitstream.reserve(frame.bitstream.size());
@@ -125,35 +130,31 @@ static auto buildSliceData(const ParsedFrame& frame) -> SliceData {
   return out;
 }
 
-static auto appendBitstreamAndSliceDataWithStartCode(const ParsedFrame& frame) -> SliceData {
-  return buildSliceData(frame);
-}
-
-static void fillQMatrix(const Sps& sps, const Pps& pps, DXVA_Qmatrix_HEVC& qmatrix) {
-  std::memset(&qmatrix, 16, sizeof(qmatrix));
+inline void fillQMatrix(const Sps& sps, const Pps& pps, DXVA_Qmatrix_HEVC& qmatrix) {
+  memset(&qmatrix, 16, sizeof(qmatrix));
   if (!sps.scaling_list_enabled_flag) return;
   if (!pps.pps_scaling_list_data_present_flag && !sps.sps_scaling_list_data_present_flag) return;
 
   const auto& sl = pps.pps_scaling_list_data_present_flag ? pps.scaling_list_data : sps.scaling_list_data;
-  std::memcpy(qmatrix.ucScalingLists0, sl.scaling_list_4x4, sizeof(qmatrix.ucScalingLists0));
-  std::memcpy(qmatrix.ucScalingLists1, sl.scaling_list_8x8, sizeof(qmatrix.ucScalingLists1));
-  std::memcpy(qmatrix.ucScalingLists2, sl.scaling_list_16x16, sizeof(qmatrix.ucScalingLists2));
-  std::memcpy(qmatrix.ucScalingLists3[0], sl.scaling_list_32x32[0], sizeof(qmatrix.ucScalingLists3[0]));
-  std::memcpy(qmatrix.ucScalingLists3[1], sl.scaling_list_32x32[1], sizeof(qmatrix.ucScalingLists3[1]));
-  std::memcpy(qmatrix.ucScalingListDCCoefSizeID2, sl.scaling_list_dc_coef_16x16, sizeof(qmatrix.ucScalingListDCCoefSizeID2));
+  memcpy(qmatrix.ucScalingLists0, sl.scaling_list_4x4, sizeof(qmatrix.ucScalingLists0));
+  memcpy(qmatrix.ucScalingLists1, sl.scaling_list_8x8, sizeof(qmatrix.ucScalingLists1));
+  memcpy(qmatrix.ucScalingLists2, sl.scaling_list_16x16, sizeof(qmatrix.ucScalingLists2));
+  memcpy(qmatrix.ucScalingLists3[0], sl.scaling_list_32x32[0], sizeof(qmatrix.ucScalingLists3[0]));
+  memcpy(qmatrix.ucScalingLists3[1], sl.scaling_list_32x32[1], sizeof(qmatrix.ucScalingLists3[1]));
+  memcpy(qmatrix.ucScalingListDCCoefSizeID2, sl.scaling_list_dc_coef_16x16, sizeof(qmatrix.ucScalingListDCCoefSizeID2));
   qmatrix.ucScalingListDCCoefSizeID3[0] = sl.scaling_list_dc_coef_32x32[0];
   qmatrix.ucScalingListDCCoefSizeID3[1] = sl.scaling_list_dc_coef_32x32[1];
 }
 
-static auto findRefIndex(uint32_t slot, const DXVA_PicParams_HEVC& pic) -> uint8_t {
-  for (uint8_t i = 0; i < 15; ++i) {
+inline auto findRefIndex(uint32_t slot, const DXVA_PicParams_HEVC& pic) -> uint8_t {
+  for (uint8_t i = 0; i < MAX_REF_PICS; ++i) {
     if (pic.RefPicList[i].Index7Bits == slot) return i;
   }
   return 0xff;
 }
 
-static auto addRefPic(uint32_t slot, const std::vector<dx_h264::DpbEntry>& dpb, uint8_t& ref_count, DXVA_PicParams_HEVC& pic) -> uint8_t {
-  if (slot >= dpb.size() || ref_count >= 15) return 0xff;
+inline auto addRefPic(uint32_t slot, const std::vector<dx_h264::DpbEntry>& dpb, uint8_t& ref_count, DXVA_PicParams_HEVC& pic) -> uint8_t {
+  if (slot >= dpb.size() || ref_count >= MAX_REF_PICS) return 0xff;
   const uint8_t existing = findRefIndex(slot, pic);
   if (existing != 0xff) return existing;
   const uint8_t idx = ref_count++;
@@ -163,13 +164,13 @@ static auto addRefPic(uint32_t slot, const std::vector<dx_h264::DpbEntry>& dpb, 
   return idx;
 }
 
-static void fillRefSet(const video_parser::H265StRefPicSet& st,
+inline void fillRefSet(const video_parser::H265StRefPicSet& st,
                        const std::vector<dx_h264::DpbEntry>& dpb,
                        int32_t poc,
                        uint8_t& ref_count,
                        DXVA_PicParams_HEVC& out) {
   uint8_t before = 0;
-  for (int i = 0; i < st.num_negative_pics && before < 8; ++i) {
+  for (int i = 0; i < st.num_negative_pics && before < MAX_REF_SET_ENTRIES; ++i) {
     if (!st.used_by_curr_pic_s0_flag[i]) continue;
     const int target_poc = poc + st.delta_poc_s0[i];
     for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
@@ -181,7 +182,7 @@ static void fillRefSet(const video_parser::H265StRefPicSet& st,
   }
 
   uint8_t after = 0;
-  for (int i = 0; i < st.num_positive_pics && after < 8; ++i) {
+  for (int i = 0; i < st.num_positive_pics && after < MAX_REF_SET_ENTRIES; ++i) {
     if (!st.used_by_curr_pic_s1_flag[i]) continue;
     const int target_poc = poc + st.delta_poc_s1[i];
     for (uint32_t slot = 0; slot < dpb.size(); ++slot) {
@@ -193,13 +194,12 @@ static void fillRefSet(const video_parser::H265StRefPicSet& st,
   }
 }
 
-static void fillPicParams(const Sps& sps,
+inline void fillPicParams(const Sps& sps,
                           const Pps& pps,
                           const SliceHeader& sh,
                           const ParsedFrame& frame,
                           int32_t poc,
                           uint32_t current_slot,
-                          const std::vector<uint8_t>& reference_usage,
                           const std::vector<dx_h264::DpbEntry>& dpb,
                           uint32_t feedback,
                           DXVA_PicParams_HEVC& pic) {
@@ -218,17 +218,16 @@ static void fillPicParams(const Sps& sps,
   pic.CurrPic.Index7Bits = static_cast<UCHAR>(current_slot);
   pic.CurrPic.AssociatedFlag = 0;
   pic.CurrPicOrderCntVal = poc;
-  for (int i = 0; i < 15; ++i) {
+  for (int i = 0; i < MAX_REF_PICS; ++i) {
     pic.RefPicList[i].bPicEntry = 0xff;
     pic.PicOrderCntValList[i] = 0;
   }
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < MAX_REF_SET_ENTRIES; ++i) {
     pic.RefPicSetStCurrBefore[i] = 0xff;
     pic.RefPicSetStCurrAfter[i] = 0xff;
     pic.RefPicSetLtCurr[i] = 0xff;
   }
 
-  (void) reference_usage;
   uint8_t ref_count = 0;
 
   const auto& st = sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set;
@@ -289,8 +288,12 @@ static void fillPicParams(const Sps& sps,
   pic.num_tile_columns_minus1 = static_cast<UCHAR>(pps.tiles_enabled_flag ? pps.num_tile_columns_minus1 : 0);
   pic.num_tile_rows_minus1 = static_cast<UCHAR>(pps.tiles_enabled_flag ? pps.num_tile_rows_minus1 : 0);
   if (pps.tiles_enabled_flag && !pps.uniform_spacing_flag) {
-    for (int i = 0; i <= pps.num_tile_columns_minus1 && i < 20; ++i) pic.column_width_minus1[i] = static_cast<USHORT>(pps.column_width_minus1[i]);
-    for (int i = 0; i <= pps.num_tile_rows_minus1 && i < 22; ++i) pic.row_height_minus1[i] = static_cast<USHORT>(pps.row_height_minus1[i]);
+    for (int i = 0; i <= pps.num_tile_columns_minus1 && i < 20; ++i) {
+      pic.column_width_minus1[i] = static_cast<USHORT>(pps.column_width_minus1[i]);
+    }
+    for (int i = 0; i <= pps.num_tile_rows_minus1 && i < 22; ++i) {
+      pic.row_height_minus1[i] = static_cast<USHORT>(pps.row_height_minus1[i]);
+    }
   }
 
   pic.ucNumDeltaPocsOfRefRpsIdx = sh.short_term_ref_pic_set_sps_flag ? 0 : static_cast<UCHAR>(st.num_delta_pocs);

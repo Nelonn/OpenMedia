@@ -33,6 +33,7 @@
 #ifdef OPENMEDIA_VAAPI
 #include <openmedia/hw_vaapi.h>
 #endif
+#include <openmedia/log.hpp>
 #include <openmedia/io.hpp>
 #include <openmedia/video.hpp>
 #include <queue>
@@ -269,6 +270,42 @@ static auto buildPixels(const Picture& pic) -> std::vector<uint32_t> {
 } // namespace detail
 
 // ---------------------------------------------------------------------------
+// Library log bridge
+//
+// Everything the library has to say — a decoder rejecting frames, a demuxer
+// giving up on a box — goes through openmedia::log, and without a Logger
+// installed it went nowhere. A decoder that quietly drops every second frame
+// then looks exactly like a slow one, so there was no way to tell the two
+// apart from the player.
+// ---------------------------------------------------------------------------
+class SdlLogger final : public openmedia::Logger {
+public:
+    void log(OMLogCategory category, OMLogLevel level, std::string_view message) override {
+        const char* where = "openmedia";
+        switch (category) {
+            case OM_CATEGORY_IO:       where = "io";       break;
+            case OM_CATEGORY_MUXER:    where = "muxer";    break;
+            case OM_CATEGORY_DEMUXER:  where = "demuxer";  break;
+            case OM_CATEGORY_ENCODER:  where = "encoder";  break;
+            case OM_CATEGORY_DECODER:  where = "decoder";  break;
+            case OM_CATEGORY_HARDWARE: where = "hardware"; break;
+            default: break;
+        }
+        SDL_LogPriority priority = SDL_LOG_PRIORITY_INFO;
+        switch (level) {
+            case OM_LEVEL_FATAL:
+            case OM_LEVEL_ERROR:   priority = SDL_LOG_PRIORITY_ERROR; break;
+            case OM_LEVEL_WARNING: priority = SDL_LOG_PRIORITY_WARN;  break;
+            case OM_LEVEL_VERBOSE:
+            case OM_LEVEL_DEBUG:   priority = SDL_LOG_PRIORITY_DEBUG; break;
+            default: break;
+        }
+        SDL_LogMessage(SDL_LOG_CATEGORY_APPLICATION, priority, "[%s] %.*s",
+                       where, int(message.size()), message.data());
+    }
+};
+
+// ---------------------------------------------------------------------------
 // MediaPlayer
 // ---------------------------------------------------------------------------
 class MediaPlayer {
@@ -279,6 +316,7 @@ public:
         format_detector_.addAllStandard();
         registerBuiltInCodecs(&codec_registry_);
         registerBuiltInFormats(&format_registry_);
+        openmedia::setLogger(std::make_unique<SdlLogger>());
     }
 
     ~MediaPlayer() {

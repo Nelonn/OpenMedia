@@ -1,11 +1,14 @@
 #include <openmedia/hw_dx11.h>
+#include <openmedia/log.hpp>
 #include <openmedia/video.hpp>
 
 #include <d3d11_3.h>
 #include <dxva.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <chrono>
 #include <deque>
+#include <thread>
 #include <mutex>
 #include <codecs.hpp>
 #include <cstdint>
@@ -17,6 +20,7 @@
 #include <video/parser/vp9_parser.hpp>
 #include <video/parser/h265_parser.hpp>
 #include <video/hdr_sei.hpp>
+#include <video/reorder_queue.hpp>
 #include <util/color_codes.hpp>
 
 #include <mfapi.h>
@@ -582,7 +586,7 @@ class DX11Encoder final : public Encoder {
           continue;
         }
         for (uint32_t y = 0; y < rows; ++y) {
-          std::memcpy(data, src + y * src_stride, row_bytes);
+          memcpy(data, src + y * src_stride, row_bytes);
           data += row_bytes;
         }
       }
@@ -636,7 +640,7 @@ class DX11Encoder final : public Encoder {
         if (SUCCEEDED(buf->Lock(&data, nullptr, &len))) {
           Packet pkt;
           pkt.allocate(len);
-          std::memcpy(pkt.bytes.data(), data, len);
+          memcpy(pkt.bytes.data(), data, len);
           buf->Unlock();
 
           LONGLONG time = 0;
@@ -662,9 +666,9 @@ class DX11Encoder final : public Encoder {
                                   : 0;
             Packet with_hdr;
             with_hdr.allocate(hdr_sei_.size() + pkt.bytes.size());
-            std::memcpy(with_hdr.bytes.data(), pkt.bytes.data(), at);
-            std::memcpy(with_hdr.bytes.data() + at, hdr_sei_.data(), hdr_sei_.size());
-            std::memcpy(with_hdr.bytes.data() + at + hdr_sei_.size(),
+            memcpy(with_hdr.bytes.data(), pkt.bytes.data(), at);
+            memcpy(with_hdr.bytes.data() + at, hdr_sei_.data(), hdr_sei_.size());
+            memcpy(with_hdr.bytes.data() + at + hdr_sei_.size(),
                         pkt.bytes.data() + at, pkt.bytes.size() - at);
             with_hdr.pts = pkt.pts;
             with_hdr.dts = pkt.dts;
@@ -936,11 +940,6 @@ class DX11Decoder final : public Decoder {
     ComPtr<ID3D11VideoDecoderOutputView> view;
   };
 
-  struct ReorderEntry {
-    int32_t poc = 0;
-    Frame frame = {};
-  };
-
   OMDX11Context* hw_context_ = nullptr;
   bool owns_hw_context_ = false;
   bool initialized_ = false;
@@ -998,15 +997,13 @@ class DX11Decoder final : public Decoder {
   uint32_t padded_height_ = 0;
   uint32_t dpb_slot_count_ = 17;
   // H.264 reference picture buffer and its marking process. The other codecs
-  // still use next_slot_/reference_usage_ below.
+  // hand out slots round-robin through next_slot_ below.
   dx_h264::Dpb h264_dpb_;
   uint32_t next_slot_ = 0;
-  uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
-  std::vector<uint8_t> reference_usage_;
-  // Pictures waiting for the ones that come before them in presentation order. H.264 and HEVC
-  // both hold back; which of them is decoding decides only how the depth is read.
-  std::vector<ReorderEntry> reorder_queue_;
+  // Pictures waiting for the ones that come before them in presentation order. H.264 and
+  // HEVC both hold back; which of them is decoding decides only how the depth is read.
+  ReorderQueue reorder_;
 
 public:
   ~DX11Decoder() override { release(); }
@@ -1167,7 +1164,7 @@ public:
     if (packet.bytes.empty()) {
       std::vector<Frame> output;
       if (codec_id_ == OM_CODEC_H264) flushReadbacksH264(output);
-      auto drained = drainReordered();
+      auto drained = reorder_.drain();
       output.insert(output.end(), std::make_move_iterator(drained.begin()),
                     std::make_move_iterator(drained.end()));
       return Ok(std::move(output));
@@ -1186,10 +1183,8 @@ public:
     h264_dpb_.reset();
     readbacks_.clear();
     staging_write_ = 0;
-    reference_usage_.clear();
-    reorder_queue_.clear();
+    reorder_.clear();
     next_slot_ = 0;
-    next_ref_ = 0;
     h264_.resetPoc();
     h265_poc_.reset();
     if (av1_) av1_->reset();
@@ -1202,31 +1197,86 @@ public:
   }
 
 private:
-  auto pushReordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
-    if (reorder_depth == 0) return {std::move(frame)};
-
-    reorder_queue_.push_back({poc, std::move(frame)});
-    if (reorder_queue_.size() <= reorder_depth) return {};
-
-    auto it = std::min_element(reorder_queue_.begin(), reorder_queue_.end(), [](const auto& a, const auto& b) {
-      return a.poc < b.poc;
-    });
-    std::vector<Frame> output;
-    output.push_back(std::move(it->frame));
-    reorder_queue_.erase(it);
-    return output;
+  // Every rejection below used to be a bare error return. A stream the parser
+  // or the driver will not take then yields no pictures at all, and the only
+  // symptom the player can show for that is a frame rate that never comes up —
+  // which is indistinguishable from slow decoding. Say what went wrong instead,
+  // throttled, because a stream that fails does so on every single frame.
+  template<typename... Args>
+  auto rejectFrame(OMError error, std::format_string<Args...> fmt, Args&&... args) -> OMError {
+    if ((rejected_frames_++ % 120) == 0) {
+      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "dx11: {} ({} frames rejected so far)",
+          std::format(fmt, std::forward<Args>(args)...), rejected_frames_);
+    }
+    return error;
   }
 
-  auto drainReordered() -> std::vector<Frame> {
-    std::sort(reorder_queue_.begin(), reorder_queue_.end(), [](const auto& a, const auto& b) {
-      return a.poc < b.poc;
-    });
+  uint64_t rejected_frames_ = 0;
 
-    std::vector<Frame> output;
-    output.reserve(reorder_queue_.size());
-    for (auto& entry : reorder_queue_) output.push_back(std::move(entry.frame));
-    reorder_queue_.clear();
-    return output;
+  // One payload on its way into a driver-owned decode buffer.
+  struct BufferUpload {
+    D3D11_VIDEO_DECODER_BUFFER_TYPE type;
+    const void* data;
+    size_t size;
+    // Zero-filled out to here when it is larger than `size`. DXVA wants the
+    // bitstream buffer in whole 128-byte blocks; the other buffers pass 0.
+    size_t padded;
+    std::string_view what; // names the buffer if the driver's is too small
+  };
+
+  // Copies each payload into the driver's buffer of its type and builds the
+  // descriptor that goes with it.
+  //
+  // The driver decides how big its buffers are, so the capacity check belongs
+  // here rather than repeated at each of the eight call sites this replaces —
+  // and with it the message saying which buffer fell short and by how much,
+  // which is the one thing that distinguishes a clip the driver cannot take
+  // from one it simply decodes slowly.
+  auto uploadDecoderBuffers(std::span<const BufferUpload> uploads,
+                            D3D11_VIDEO_DECODER_BUFFER_DESC* descs, UINT& count) -> OMError {
+    count = 0;
+    for (const BufferUpload& upload : uploads) {
+      const size_t total = std::max(upload.size, upload.padded);
+
+      UINT capacity = 0;
+      void* buffer = nullptr;
+      const HRESULT hr = video_context_->GetDecoderBuffer(decoder_.Get(), upload.type, &capacity, &buffer);
+      if (FAILED(hr) || buffer == nullptr) {
+        return rejectFrame(OM_CODEC_DECODE_FAILED, "{} buffer unavailable (hr=0x{:08X})",
+                           upload.what, static_cast<uint32_t>(hr));
+      }
+      if (total > capacity) {
+        video_context_->ReleaseDecoderBuffer(decoder_.Get(), upload.type);
+        return rejectFrame(OM_CODEC_DECODE_FAILED, "{} needs {} bytes, the driver's buffer holds {}",
+                           upload.what, total, capacity);
+      }
+
+      memcpy(buffer, upload.data, upload.size);
+      if (total > upload.size) {
+        std::memset(static_cast<uint8_t*>(buffer) + upload.size, 0, total - upload.size);
+      }
+      video_context_->ReleaseDecoderBuffer(decoder_.Get(), upload.type);
+
+      descs[count].BufferType = upload.type;
+      descs[count].DataSize = static_cast<UINT>(total);
+      ++count;
+    }
+    return OM_SUCCESS;
+  }
+
+  // DecoderBeginFrame answers E_PENDING while the GPU still has the surface, and
+  // the caller is expected to come back rather than treat it as a failure. We
+  // used to give up on the frame, which turns a busy GPU into lost pictures —
+  // the more work in flight, the more of them, so it shows up as a frame rate
+  // that will not come up rather than as an error.
+  auto beginFrame(uint32_t slot) -> HRESULT {
+    HRESULT hr = E_PENDING;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+      hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[slot].view.Get(), 0, nullptr);
+      if (hr != E_PENDING) return hr;
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    return hr;
   }
 
   auto decodeH264(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
@@ -1235,30 +1285,35 @@ private:
     hdr_sei::parseAnnexB(packet.bytes, false, output_format_.mastering_display,
                          output_format_.content_light_level);
 
-
     auto parsed = h264_.parseFrame(packet.bytes);
-    if (parsed.slice_offsets.empty()) return Ok(std::vector<Frame> {});
-    if (parsed.slice.pic_parameter_set_id < 0 || parsed.slice.pic_parameter_set_id >= 256 || !h264_.pps_valid[parsed.slice.pic_parameter_set_id]) {
-      return Err(OM_CODEC_DECODE_FAILED);
+    if (parsed.slice_offsets.empty()) {
+      // No slice in the access unit: either the packet held only parameter sets
+      // and SEI, or the slice header would not parse. The first is normal, the
+      // second silently costs a picture, so only complain once the parser has
+      // parameter sets and should have been able to read it.
+      if (h264_.has_sps && h264_.has_pps) {
+        rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 packet of {} bytes carried no decodable slice",
+                    packet.bytes.size());
+      }
+      return Ok(std::vector<Frame> {});
     }
-    const auto& pps = h264_.pps[parsed.slice.pic_parameter_set_id];
-    if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32 || !h264_.sps_valid[pps.seq_parameter_set_id]) {
-      return Err(OM_CODEC_DECODE_FAILED);
+    const auto active = dx_h264::activeParameterSets(h264_, parsed.slice);
+    if (!active) {
+      const OMError error = active.status == dx_h264::ParameterSetStatus::unsupported_coding
+                                ? OM_CODEC_NOT_SUPPORTED
+                                : OM_CODEC_DECODE_FAILED;
+      return Err(rejectFrame(error, "H.264: {}", dx_h264::describe(active.status)));
     }
-    const auto& sps = h264_.sps[pps.seq_parameter_set_id];
-    if (sps.bit_depth_luma_minus8 != 0 || sps.bit_depth_chroma_minus8 != 0 || pps.num_slice_groups_minus1 != 0) {
-      return Err(OM_CODEC_NOT_SUPPORTED);
-    }
+    const h264::SPS& sps = *active.sps;
+    const h264::PPS& pps = *active.pps;
 
     std::vector<Frame> pre_output;
     if (parsed.is_intra) {
       flushReadbacksH264(pre_output);
-      auto drained = drainReordered();
+      auto drained = reorder_.drain();
       pre_output.insert(pre_output.end(), std::make_move_iterator(drained.begin()),
                         std::make_move_iterator(drained.end()));
-      h264_dpb_.reset();
-      h264_.resetPoc();
-      parsed.poc = h264_.computePoc(parsed.slice, parsed.is_reference);
+      dx_h264::restartAtIdr(h264_, h264_dpb_, parsed);
     }
 
     // Resolve the short-term pictures against this frame_num before anything
@@ -1283,8 +1338,17 @@ private:
       slices[i].wBadSliceChopping = 0;
     }
 
-    HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
-    if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+    HRESULT hr = beginFrame(current_slot);
+    if (FAILED(hr)) {
+      return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 DecoderBeginFrame on slot {} failed (hr=0x{:08X})",
+                             current_slot, static_cast<uint32_t>(hr)));
+    }
+
+    // Once the frame is open the decoder stays in it until DecoderEndFrame, and
+    // a decoder left mid-frame fails every DecoderBeginFrame afterwards — one
+    // bad frame would take the rest of the stream down with it. So every exit
+    // from here on closes the frame first.
+    const auto endFrame = [&] { video_context_->DecoderEndFrame(decoder_.Get()); };
 
     // DXVA wants the bitstream buffer a multiple of 128 bytes, zero-padded, with
     // the padding counted into the last slice. Handing over an unpadded buffer
@@ -1296,64 +1360,62 @@ private:
       slices.back().SliceBytesInBuffer += static_cast<UINT>(padded_size - bitstream_size);
     }
 
-    UINT buffer_size = 0;
-    void* buffer = nullptr;
-    hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-    if (FAILED(hr) || padded_size > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-    std::memcpy(buffer, parsed.bitstream.data(), bitstream_size);
-    std::memset(static_cast<uint8_t*>(buffer) + bitstream_size, 0, padded_size - bitstream_size);
-    video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
+    const BufferUpload uploads[] = {
+        {D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, parsed.bitstream.data(), bitstream_size, padded_size,
+         "H.264 bitstream"},
+        {D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &pic_params, sizeof(pic_params), 0,
+         "H.264 picture parameters"},
+        {D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &qmatrix, sizeof(qmatrix), 0,
+         "H.264 quantisation matrix"},
+        {D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, slices.data(),
+         slices.size() * sizeof(DXVA_Slice_H264_Short), 0, "H.264 slice control"},
+    };
 
-    hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
-    if (FAILED(hr) || sizeof(pic_params) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-    std::memcpy(buffer, &pic_params, sizeof(pic_params));
-    video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
+    D3D11_VIDEO_DECODER_BUFFER_DESC descs[std::size(uploads)] = {};
+    UINT desc_count = 0;
+    if (const OMError error = uploadDecoderBuffers(uploads, descs, desc_count); error != OM_SUCCESS) {
+      endFrame();
+      return Err(error);
+    }
 
-    hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &buffer_size, &buffer);
-    if (FAILED(hr) || sizeof(qmatrix) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-    std::memcpy(buffer, &qmatrix, sizeof(qmatrix));
-    video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX);
-
-    hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
-    if (FAILED(hr) || slices.size() * sizeof(DXVA_Slice_H264_Short) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-    std::memcpy(buffer, slices.data(), slices.size() * sizeof(DXVA_Slice_H264_Short));
-    video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
-
-    D3D11_VIDEO_DECODER_BUFFER_DESC descs[4] = {};
-    descs[0].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
-    descs[0].DataSize = static_cast<UINT>(padded_size);
-    descs[1].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
-    descs[1].DataSize = sizeof(pic_params);
-    descs[2].BufferType = D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX;
-    descs[2].DataSize = sizeof(qmatrix);
-    descs[3].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
-    descs[3].DataSize = static_cast<UINT>(slices.size() * sizeof(DXVA_Slice_H264_Short));
-    hr = video_context_->SubmitDecoderBuffers(decoder_.Get(), 4, descs);
-    if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+    hr = video_context_->SubmitDecoderBuffers(decoder_.Get(), desc_count, descs);
+    if (FAILED(hr)) {
+      endFrame();
+      return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 SubmitDecoderBuffers failed (hr=0x{:08X})",
+                             static_cast<uint32_t>(hr)));
+    }
     hr = video_context_->DecoderEndFrame(decoder_.Get());
-    if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+    if (FAILED(hr)) {
+      return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 DecoderEndFrame failed (hr=0x{:08X})",
+                             static_cast<uint32_t>(hr)));
+    }
 
     std::vector<Frame> output;
     if (hardware_output_) {
       auto picture = makeHardwarePicture(current_slot);
-      if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+      if (!picture.has_value()) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 could not wrap slot {} as a hardware picture",
+                               current_slot));
+      }
       h264_dpb_.store(current_slot, parsed.poc, parsed.slice, parsed.is_intra, parsed.is_reference);
 
       Frame frame = {};
       frame.pts = packet.pts;
       frame.dts = packet.dts;
       frame.data = std::move(*picture);
-      output = pushReordered(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
+      output = reorder_.push(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
     } else {
       const uint32_t staging_index = staging_write_;
-      if (!queueReadback(current_slot)) return Err(OM_CODEC_DECODE_FAILED);
+      if (!queueReadback(current_slot)) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 could not queue the read-back of slot {}", current_slot));
+      }
       readbacks_.push_back({staging_index, packet.pts, packet.dts, parsed.poc,
                             dx_h264::reorderDepth(sps)});
 
       h264_dpb_.store(current_slot, parsed.poc, parsed.slice, parsed.is_intra, parsed.is_reference);
 
       if (readbacks_.size() > kReadbackLatency && !takeReadbackH264(output)) {
-        return Err(OM_CODEC_DECODE_FAILED);
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 read-back of the staging texture failed"));
       }
     }
     if (!pre_output.empty()) {
@@ -1376,7 +1438,7 @@ private:
     frame.dts = pending.dts;
     frame.data = std::move(*picture);
 
-    auto ready = pushReordered(std::move(frame), pending.poc, pending.reorder_depth);
+    auto ready = reorder_.push(std::move(frame), pending.poc, pending.reorder_depth);
     output.insert(output.end(), std::make_move_iterator(ready.begin()),
                   std::make_move_iterator(ready.end()));
     return true;
@@ -1502,8 +1564,6 @@ private:
         padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
         padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
         dpb_slot_count_ = 16;
-        reference_usage_.clear();
-        next_ref_ = 0;
         next_slot_ = 0;
         h265_poc_.reset();
         if (!createDecoderResources(bit_depth)) return Err(OM_CODEC_HWACCEL_FAILED);
@@ -1514,10 +1574,12 @@ private:
         // The picture order count starts over here, so whatever is still held back belongs to the
         // stretch before it and has to be let go first -- comparing the new counts against the old
         // would order them against pictures they have nothing to do with.
-        for (auto& held : drainReordered()) output.push_back(std::move(held));
-        for (auto& slot : slots_) slot.dpb.is_reference = false;
-        reference_usage_.clear();
-        next_ref_ = 0;
+        for (auto& held : reorder_.drain()) {
+          output.push_back(std::move(held));
+        }
+        for (auto& slot : slots_) {
+          slot.dpb.is_reference = false;
+        }
         next_slot_ = 0;
       }
 
@@ -1527,75 +1589,78 @@ private:
       for (const auto& slot : slots_) dpb.push_back(slot.dpb);
 
       DXVA_PicParams_HEVC pic_params = {};
-      dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb, feedback_++, pic_params);
-      const auto slice_data = dx_h265::appendBitstreamAndSliceDataWithStartCode(parsed);
-      if (slice_data.bitstream.empty() || slice_data.slices.empty()) return Err(OM_CODEC_DECODE_FAILED);
+      dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, dpb, feedback_++, pic_params);
+      const auto slice_data = dx_h265::buildSliceData(parsed);
+      if (slice_data.bitstream.empty() || slice_data.slices.empty()) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 access unit produced no slice data"));
+      }
       DXVA_Qmatrix_HEVC qmatrix = {};
       const bool submit_qmatrix = sps.scaling_list_enabled_flag;
       if (submit_qmatrix) dx_h265::fillQMatrix(sps, pps, qmatrix);
 
-      HRESULT hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[current_slot].view.Get(), 0, nullptr);
-      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
-
-      UINT buffer_size = 0;
-      void* buffer = nullptr;
-      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-      if (FAILED(hr) || slice_data.bitstream.size() > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-      std::memcpy(buffer, slice_data.bitstream.data(), slice_data.bitstream.size());
-      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
-
-      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
-      if (FAILED(hr) || sizeof(pic_params) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-      std::memcpy(buffer, &pic_params, sizeof(pic_params));
-      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
-
-      if (submit_qmatrix) {
-        hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &buffer_size, &buffer);
-        if (FAILED(hr) || sizeof(qmatrix) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-        std::memcpy(buffer, &qmatrix, sizeof(qmatrix));
-        video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX);
+      HRESULT hr = beginFrame(current_slot);
+      if (FAILED(hr)) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 DecoderBeginFrame on slot {} failed (hr=0x{:08X})",
+                               current_slot, static_cast<uint32_t>(hr)));
       }
 
-      hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
-      if (FAILED(hr) || slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short) > buffer_size) return Err(OM_CODEC_DECODE_FAILED);
-      std::memcpy(buffer, slice_data.slices.data(), slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short));
-      video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
+      // As in the H.264 path: the decoder stays inside the frame until
+      // DecoderEndFrame, and one left open fails every DecoderBeginFrame after
+      // it, so a single bad frame would silently end the stream.
+      const auto endFrame = [&] { video_context_->DecoderEndFrame(decoder_.Get()); };
 
-      D3D11_VIDEO_DECODER_BUFFER_DESC descs[4] = {};
+      // The quantisation matrix is only sent when the stream enables scaling
+      // lists, so the list is built rather than written out straight.
+      BufferUpload uploads[4] = {
+          {D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, slice_data.bitstream.data(),
+           slice_data.bitstream.size(), 0, "H.265 bitstream"},
+          {D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &pic_params, sizeof(pic_params), 0,
+           "H.265 picture parameters"},
+      };
+      size_t upload_count = 2;
+      if (submit_qmatrix) {
+        uploads[upload_count++] = {D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &qmatrix,
+                                   sizeof(qmatrix), 0, "H.265 quantisation matrix"};
+      }
+      uploads[upload_count++] = {D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, slice_data.slices.data(),
+                                 slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short), 0,
+                                 "H.265 slice control"};
+
+      D3D11_VIDEO_DECODER_BUFFER_DESC descs[std::size(uploads)] = {};
       UINT desc_count = 0;
-      descs[desc_count].BufferType = D3D11_VIDEO_DECODER_BUFFER_BITSTREAM;
-      descs[desc_count++].DataSize = static_cast<UINT>(slice_data.bitstream.size());
-      descs[desc_count].BufferType = D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS;
-      descs[desc_count++].DataSize = sizeof(pic_params);
-      if (submit_qmatrix) {
-        descs[desc_count].BufferType = D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX;
-        descs[desc_count++].DataSize = sizeof(qmatrix);
+      if (const OMError error = uploadDecoderBuffers({uploads, upload_count}, descs, desc_count);
+          error != OM_SUCCESS) {
+        endFrame();
+        return Err(error);
       }
-      descs[desc_count].BufferType = D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL;
-      descs[desc_count++].DataSize = static_cast<UINT>(slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short));
+
       hr = video_context_->SubmitDecoderBuffers(decoder_.Get(), desc_count, descs);
-      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+      if (FAILED(hr)) {
+        endFrame();
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 SubmitDecoderBuffers failed (hr=0x{:08X})",
+                               static_cast<uint32_t>(hr)));
+      }
       hr = video_context_->DecoderEndFrame(decoder_.Get());
-      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+      if (FAILED(hr)) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 DecoderEndFrame failed (hr=0x{:08X})",
+                               static_cast<uint32_t>(hr)));
+      }
 
       auto picture = download(current_slot);
-      if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+      if (!picture.has_value()) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 could not read back slot {}", current_slot));
+      }
 
       slots_[current_slot].dpb.poc = poc;
       slots_[current_slot].dpb.frame_num = static_cast<uint32_t>(poc);
       slots_[current_slot].dpb.is_reference = parsed.is_reference;
-      if (parsed.is_reference && dpb_slot_count_ > 1) {
-        if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
-        reference_usage_[next_ref_] = static_cast<uint8_t>(current_slot);
-        next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
-      }
       next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
 
       Frame frame = {};
       frame.pts = packet.pts;
       frame.dts = packet.dts;
       frame.data = std::move(*picture);
-      for (auto& ready : pushReordered(std::move(frame), poc, dx_h265::reorderDepth(sps))) {
+      for (auto& ready : reorder_.push(std::move(frame), poc, dx_h265::reorderDepth(sps))) {
         output.push_back(std::move(ready));
       }
     }
@@ -1899,11 +1964,8 @@ private:
       DXVA_PicParams_AV1 pic_params = {};
       fillAV1PicParams(parsed, slot, pic_params);
 
-      HRESULT hr = E_FAIL;
-      for (int attempt = 0; attempt < 512; ++attempt) {
-        hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[slot].view.Get(), 0, nullptr);
-        if (hr != E_PENDING) break;
-      }
+      // beginFrame() already sits out E_PENDING, so this is one attempt.
+      HRESULT hr = beginFrame(slot);
       if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
 
       void* buffer = nullptr;
@@ -1911,7 +1973,7 @@ private:
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
       if (FAILED(hr) || buffer_size < sizeof(pic_params)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
-      std::memcpy(buffer, &pic_params, sizeof(pic_params));
+      memcpy(buffer, &pic_params, sizeof(pic_params));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
 
       // The tile payloads go in back-to-back; DataOffset indexes that buffer.
@@ -1927,18 +1989,24 @@ private:
       }
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-      if (FAILED(hr) || buffer_size < total) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr) || buffer_size < total) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
       {
         auto* dst = static_cast<uint8_t*>(buffer);
         size_t off = 0;
-        for (const auto& t : tiles) { std::memcpy(dst + off, t.data, t.size); off += t.size; }
+        for (const auto& t : tiles) { memcpy(dst + off, t.data, t.size); off += t.size; }
       }
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
       const size_t tile_bytes = tile_params.size() * sizeof(DXVA_Tile_AV1);
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
-      if (FAILED(hr) || buffer_size < tile_bytes) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
-      std::memcpy(buffer, tile_params.data(), tile_bytes);
+      if (FAILED(hr) || buffer_size < tile_bytes) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+      memcpy(buffer, tile_params.data(), tile_bytes);
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
 
       D3D11_VIDEO_DECODER_BUFFER_DESC descs[3] = {};
@@ -2097,26 +2165,29 @@ private:
       DXVA_PicParams_VP9 pic_params = {};
       fillVP9PicParams(parsed, slot, pic_params);
 
-      HRESULT hr = E_FAIL;
-      for (int attempt = 0; attempt < 512; ++attempt) {
-        hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[slot].view.Get(), 0, nullptr);
-        if (hr != E_PENDING) break;
-      }
+      // beginFrame() already sits out E_PENDING, so this is one attempt.
+      HRESULT hr = beginFrame(slot);
       if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
 
       void* buffer = nullptr;
       UINT buffer_size = 0;
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
-      if (FAILED(hr) || buffer_size < sizeof(pic_params)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
-      std::memcpy(buffer, &pic_params, sizeof(pic_params));
+      if (FAILED(hr) || buffer_size < sizeof(pic_params)) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+      memcpy(buffer, &pic_params, sizeof(pic_params));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
 
       // VP9 hands the decoder the whole frame, header included, as one slice.
       const size_t frame_size = parsed.bitstream.size();
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &buffer_size, &buffer);
-      if (FAILED(hr) || buffer_size < frame_size) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
-      std::memcpy(buffer, parsed.bitstream.data(), frame_size);
+      if (FAILED(hr) || buffer_size < frame_size) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+      memcpy(buffer, parsed.bitstream.data(), frame_size);
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
       DXVA_Slice_VPx_Short slice = {};
@@ -2124,8 +2195,11 @@ private:
       slice.SliceBytesInBuffer = static_cast<UINT>(frame_size);
       slice.wBadSliceChopping = 0;
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, &buffer_size, &buffer);
-      if (FAILED(hr) || buffer_size < sizeof(slice)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
-      std::memcpy(buffer, &slice, sizeof(slice));
+      if (FAILED(hr) || buffer_size < sizeof(slice)) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
+      memcpy(buffer, &slice, sizeof(slice));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL);
 
       D3D11_VIDEO_DECODER_BUFFER_DESC descs[3] = {};
@@ -2267,8 +2341,12 @@ private:
     const auto* src_y = static_cast<const uint8_t*>(map.pData);
     const auto* src_uv = src_y + static_cast<size_t>(map.RowPitch) * padded_height_;
     const size_t bpp = getBytesPerPixel(om_fmt, 0);
-    for (uint32_t row = 0; row < height_; ++row) std::memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
-    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) std::memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
+    for (uint32_t row = 0; row < height_; ++row) {
+      memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
+    }
+    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) {
+      memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
+    }
     context_->Unmap(staging, 0);
     return pic;
   }

@@ -13,7 +13,9 @@
 #include <memory>
 #include <vector>
 #include <video/parser/h265_parser.hpp>
+#include <openmedia/log.hpp>
 #include <video/hdr_sei.hpp>
+#include <video/reorder_queue.hpp>
 #include <util/color_codes.hpp>
 
 #include <mfapi.h>
@@ -39,11 +41,6 @@ namespace openmedia {
 
 class DX12Decoder final : public Decoder {
   static constexpr uint64_t BITSTREAM_SIZE = 8ull * 1024ull * 1024ull;
-
-  struct ReorderEntry {
-    int32_t poc = 0;
-    Frame frame = {};
-  };
 
   bool initialized_ = false;
   VideoFormat output_format_ = {};
@@ -84,10 +81,10 @@ class DX12Decoder final : public Decoder {
   uint32_t padded_height_ = 0;
   uint32_t dpb_slot_count_ = 17;
   uint32_t next_slot_ = 0;
-  uint32_t next_ref_ = 0;
   uint32_t feedback_ = 1;
-  std::vector<uint8_t> reference_usage_;
-  std::vector<ReorderEntry> h264_reorder_queue_;
+  // Pictures waiting for the ones that come before them in presentation order. H.264 and
+  // HEVC both hold back; which of them is decoding decides only how the depth is read.
+  ReorderQueue reorder_;
 
 public:
   ~DX12Decoder() override { release(); }
@@ -208,10 +205,7 @@ public:
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-    if (packet.bytes.empty()) {
-      if (codec_id_ == OM_CODEC_H264) return Ok(drainH264Reordered());
-      return Ok(std::vector<Frame> {});
-    }
+    if (packet.bytes.empty()) return Ok(reorder_.drain());
 
     if (codec_id_ == OM_CODEC_H264) return decodeH264(packet);
     if (codec_id_ == OM_CODEC_H265) return decodeH265(packet);
@@ -222,41 +216,27 @@ public:
     resetReceiveState();
     for (auto& entry : dpb_) entry = {};
     h264_dpb_.reset();
-    reference_usage_.clear();
-    h264_reorder_queue_.clear();
+    reorder_.clear();
     next_slot_ = 0;
-    next_ref_ = 0;
     h264_.resetPoc();
     h265_poc_.reset();
   }
 
 private:
-  auto pushH264Reordered(Frame frame, int32_t poc, size_t reorder_depth) -> std::vector<Frame> {
-    if (reorder_depth == 0) return {std::move(frame)};
-
-    h264_reorder_queue_.push_back({poc, std::move(frame)});
-    if (h264_reorder_queue_.size() <= reorder_depth) return {};
-
-    auto it = std::min_element(h264_reorder_queue_.begin(), h264_reorder_queue_.end(), [](const auto& a, const auto& b) {
-      return a.poc < b.poc;
-    });
-    std::vector<Frame> output;
-    output.push_back(std::move(it->frame));
-    h264_reorder_queue_.erase(it);
-    return output;
+  // A stream the parser or the driver will not take yields no pictures at all,
+  // and the only symptom of that is a frame rate that never comes up, which is
+  // indistinguishable from slow decoding. Say what went wrong instead --
+  // throttled, because a stream that fails does so on every frame.
+  template<typename... Args>
+  auto rejectFrame(OMError error, std::format_string<Args...> fmt, Args&&... args) -> OMError {
+    if ((rejected_frames_++ % 120) == 0) {
+      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "dx12: {} ({} frames rejected so far)",
+                     std::format(fmt, std::forward<Args>(args)...), rejected_frames_);
+    }
+    return error;
   }
 
-  auto drainH264Reordered() -> std::vector<Frame> {
-    std::sort(h264_reorder_queue_.begin(), h264_reorder_queue_.end(), [](const auto& a, const auto& b) {
-      return a.poc < b.poc;
-    });
-
-    std::vector<Frame> output;
-    output.reserve(h264_reorder_queue_.size());
-    for (auto& entry : h264_reorder_queue_) output.push_back(std::move(entry.frame));
-    h264_reorder_queue_.clear();
-    return output;
-  }
+  uint64_t rejected_frames_ = 0;
 
   auto decodeH264(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
     // HDR10 static metadata only exists in the bitstream for H.26x; pick it
@@ -264,25 +244,30 @@ private:
     hdr_sei::parseAnnexB(packet.bytes, false, output_format_.mastering_display,
                          output_format_.content_light_level);
 
-
     auto parsed = h264_.parseFrame(packet.bytes);
     if (parsed.slice_offsets.empty()) return Ok(std::vector<Frame> {});
-    if (parsed.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_DECODE_FAILED);
-    if (parsed.slice.pic_parameter_set_id < 0 || parsed.slice.pic_parameter_set_id >= 256 || !h264_.pps_valid[parsed.slice.pic_parameter_set_id]) return Err(OM_CODEC_DECODE_FAILED);
-    const auto& pps = h264_.pps[parsed.slice.pic_parameter_set_id];
-    if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32 || !h264_.sps_valid[pps.seq_parameter_set_id]) return Err(OM_CODEC_DECODE_FAILED);
-    const auto& sps = h264_.sps[pps.seq_parameter_set_id];
-    if (sps.bit_depth_luma_minus8 != 0 || sps.bit_depth_chroma_minus8 != 0 || pps.num_slice_groups_minus1 != 0) return Err(OM_CODEC_NOT_SUPPORTED);
+    if (parsed.bitstream.size() > BITSTREAM_SIZE) {
+      return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 frame of {} bytes exceeds the {}-byte bitstream buffer",
+                             parsed.bitstream.size(), BITSTREAM_SIZE));
+    }
+
+    const auto active = dx_h264::activeParameterSets(h264_, parsed.slice);
+    if (!active) {
+      const OMError error = active.status == dx_h264::ParameterSetStatus::unsupported_coding
+                                ? OM_CODEC_NOT_SUPPORTED
+                                : OM_CODEC_DECODE_FAILED;
+      return Err(rejectFrame(error, "H.264: {}", dx_h264::describe(active.status)));
+    }
+    const h264::SPS& sps = *active.sps;
+    const h264::PPS& pps = *active.pps;
 
     std::vector<Frame> pre_output;
     if (parsed.is_intra) {
-      pre_output = drainH264Reordered();
-      h264_dpb_.reset();
-      h264_.resetPoc();
-      parsed.poc = h264_.computePoc(parsed.slice, parsed.is_reference);
+      pre_output = reorder_.drain();
+      dx_h264::restartAtIdr(h264_, h264_dpb_, parsed);
     }
 
-    std::memcpy(bitstream_ptr_, parsed.bitstream.data(), parsed.bitstream.size());
+    memcpy(bitstream_ptr_, parsed.bitstream.data(), parsed.bitstream.size());
 
     // Resolve the short-term pictures against this frame_num before anything
     // reads or marks them, then take a slot the DPB is not holding a reference
@@ -292,10 +277,15 @@ private:
     const uint32_t current_slot = h264_dpb_.acquireSlot();
 
     HRESULT hr = recordDecode(parsed, sps, pps, current_slot);
-    if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+    if (FAILED(hr)) {
+      return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 decode command failed (hr=0x{:08X})",
+                             static_cast<uint32_t>(hr)));
+    }
 
     auto picture = download(current_slot);
-    if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+    if (!picture.has_value()) {
+      return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 could not read back slot {}", current_slot));
+    }
 
     h264_dpb_.store(current_slot, parsed.poc, parsed.slice, parsed.is_intra, parsed.is_reference);
 
@@ -303,7 +293,7 @@ private:
     frame.pts = packet.pts;
     frame.dts = packet.dts;
     frame.data = std::move(*picture);
-    auto output = pushH264Reordered(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
+    auto output = reorder_.push(std::move(frame), parsed.poc, dx_h264::reorderDepth(sps));
     if (!pre_output.empty()) {
       pre_output.insert(pre_output.end(), std::make_move_iterator(output.begin()), std::make_move_iterator(output.end()));
       return Ok(std::move(pre_output));
@@ -325,14 +315,27 @@ private:
     output.reserve(frames.size());
     for (auto& parsed : frames) {
       if (parsed.slice_offsets.empty() || parsed.slice_headers.empty()) continue;
-      const auto slice_data = dx_h265::appendBitstreamAndSliceDataWithStartCode(parsed);
-      if (slice_data.bitstream.empty() || slice_data.slices.empty() || slice_data.bitstream.size() > BITSTREAM_SIZE) return Err(OM_CODEC_DECODE_FAILED);
+      const auto slice_data = dx_h265::buildSliceData(parsed);
+      if (slice_data.bitstream.empty() || slice_data.slices.empty()) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 access unit produced no slice data"));
+      }
+      if (slice_data.bitstream.size() > BITSTREAM_SIZE) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 frame of {} bytes exceeds the {}-byte bitstream buffer",
+                               slice_data.bitstream.size(), BITSTREAM_SIZE));
+      }
       const auto& sh = parsed.slice_headers.front();
-      if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
+      if (sh.pps_id < 0 || sh.pps_id >= 64 || !h265_->pps(sh.pps_id).valid) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 slice refers to PPS {}, which has not been seen", sh.pps_id));
+      }
       const auto& pps = h265_->pps(sh.pps_id);
-      if (pps.sps_id < 0 || pps.sps_id >= 16 || !h265_->sps(pps.sps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
+      if (pps.sps_id < 0 || pps.sps_id >= 16 || !h265_->sps(pps.sps_id).valid) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 PPS {} refers to SPS {}, which has not been seen",
+                               sh.pps_id, pps.sps_id));
+      }
       const auto& sps = h265_->sps(pps.sps_id);
-      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return Err(OM_CODEC_NOT_SUPPORTED);
+      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) {
+        return Err(rejectFrame(OM_CODEC_NOT_SUPPORTED, "H.265 stream is not 4:2:0 with matching luma and chroma depth"));
+      }
 
       const uint8_t bit_depth = static_cast<uint8_t>(sps.bit_depth_luma_minus8 + 8);
       const OMPixelFormat expected_format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
@@ -340,9 +343,9 @@ private:
         padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
         padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
         dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1] + 1), 2, 17);
-        for (auto& entry : dpb_) entry = {};
-        reference_usage_.clear();
-        next_ref_ = 0;
+        for (auto& entry : dpb_) {
+          entry = {};
+        }
         next_slot_ = 0;
         h265_poc_.reset();
         if (FAILED(createDecoder())) return Err(OM_CODEC_HWACCEL_FAILED);
@@ -352,35 +355,43 @@ private:
 
       const int32_t poc = h265_poc_.compute(sps, parsed, sh);
       if (dx_h265::isIrap(parsed.nal_unit_type)) {
-        for (auto& entry : dpb_) entry.is_reference = false;
-        reference_usage_.clear();
-        next_ref_ = 0;
+        // The picture counts start over here, so whatever is still held back belongs
+        // to the stretch before it and has to be let go first -- comparing the new
+        // counts against the old would order them against unrelated pictures.
+        for (auto& held : reorder_.drain()) {
+          output.push_back(std::move(held));
+        }
+        for (auto& entry : dpb_) {
+          entry.is_reference = false;
+        }
         next_slot_ = 0;
       }
 
-      std::memcpy(bitstream_ptr_, slice_data.bitstream.data(), slice_data.bitstream.size());
+      memcpy(bitstream_ptr_, slice_data.bitstream.data(), slice_data.bitstream.size());
       const uint32_t current_slot = next_slot_;
       HRESULT hr = recordDecodeH265(parsed, slice_data, sps, pps, sh, poc, current_slot);
-      if (FAILED(hr)) return Err(OM_CODEC_DECODE_FAILED);
+      if (FAILED(hr)) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 decode command failed (hr=0x{:08X})",
+                               static_cast<uint32_t>(hr)));
+      }
 
       auto picture = download(current_slot);
-      if (!picture.has_value()) return Err(OM_CODEC_DECODE_FAILED);
+      if (!picture.has_value()) {
+        return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 could not read back slot {}", current_slot));
+      }
 
       dpb_[current_slot].poc = poc;
       dpb_[current_slot].frame_num = static_cast<uint32_t>(poc);
       dpb_[current_slot].is_reference = parsed.is_reference;
-      if (parsed.is_reference && dpb_slot_count_ > 1) {
-        if (next_ref_ >= reference_usage_.size()) reference_usage_.resize(next_ref_ + 1);
-        reference_usage_[next_ref_] = static_cast<uint8_t>(current_slot);
-        next_ref_ = (next_ref_ + 1) % (dpb_slot_count_ - 1);
-      }
       next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
 
       Frame frame = {};
       frame.pts = packet.pts;
       frame.dts = packet.dts;
       frame.data = std::move(*picture);
-      output.push_back(std::move(frame));
+      for (auto& ready : reorder_.push(std::move(frame), poc, dx_h265::reorderDepth(sps))) {
+        output.push_back(std::move(ready));
+      }
     }
     return Ok(std::move(output));
   }
@@ -724,7 +735,7 @@ private:
     input.pHeap = decoder_heap_.Get();
 
     DXVA_PicParams_HEVC pic = {};
-    dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, reference_usage_, dpb_, feedback_++, pic);
+    dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, dpb_, feedback_++, pic);
     DXVA_Qmatrix_HEVC qmatrix = {};
     if (sps.scaling_list_enabled_flag) dx_h265::fillQMatrix(sps, pps, qmatrix);
     input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS, sizeof(pic), &pic};
@@ -840,8 +851,8 @@ private:
     const uint8_t* src_y = data + footprints[0].Offset;
     const uint8_t* src_uv = data + footprints[1].Offset;
     const size_t bpp = getBytesPerPixel(om_fmt, 0);
-    for (uint32_t row = 0; row < height_; ++row) std::memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * footprints[0].Footprint.RowPitch, width_ * bpp);
-    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) std::memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * footprints[1].Footprint.RowPitch, width_ * bpp);
+    for (uint32_t row = 0; row < height_; ++row) memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * footprints[0].Footprint.RowPitch, width_ * bpp);
+    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * footprints[1].Footprint.RowPitch, width_ * bpp);
     readback->Unmap(0, nullptr);
     return pic;
   }
@@ -1063,7 +1074,7 @@ public:
           size_t src_stride = picture.planes.getLinesize(i);
           size_t height = (i == 0) ? input_format_.height : (input_format_.height + 1) / 2;
           for (size_t y = 0; y < height; ++y) {
-            std::memcpy(data, src + y * src_stride, input_format_.width);
+            memcpy(data, src + y * src_stride, input_format_.width);
             data += input_format_.width;
           }
         }
@@ -1106,7 +1117,7 @@ public:
         buf->Lock(&data, nullptr, &len);
         Packet pkt;
         pkt.allocate(len);
-        std::memcpy(pkt.bytes.data(), data, len);
+        memcpy(pkt.bytes.data(), data, len);
         buf->Unlock();
 
         LONGLONG time = 0;

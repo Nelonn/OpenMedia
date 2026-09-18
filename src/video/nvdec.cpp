@@ -303,15 +303,6 @@ public:
 
     std::span<const uint8_t> bytes = packet.bytes;
 
-    static bool first_packet = true;
-    if (first_packet) {
-      if (bytes.size() >= 4) {
-        openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: pkt size {} first bytes: {:02x} {:02x} {:02x} {:02x}", bytes.size(), bytes[0], bytes[1], bytes[2], bytes[3]);
-        openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: nal_length_size: {}", h264_.nal_length_size);
-      }
-      first_packet = false;
-    }
-
     cupkt.payload = bytes.data();
     cupkt.payload_size = (uint32_t) bytes.size();
     cupkt.timestamp = packet.pts;
