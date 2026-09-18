@@ -46,6 +46,10 @@ inline constexpr int H265_MAX_SHORT_TERM_REF_PIC_SETS = 64;
 inline constexpr int H265_MAX_LONG_TERM_REF_PICS_SPS = 32;
 inline constexpr int H265_MAX_REF_PICS_PER_DIRECTION = 16;
 inline constexpr int H265_MAX_DELTA_POCS = H265_MAX_REF_PICS_PER_DIRECTION * 2;
+// At most num_long_term_ref_pics_sps entries from the SPS plus num_long_term_pics
+// of the slice header's own, which shares the bound on one short term direction.
+inline constexpr int H265_MAX_LONG_TERM_REF_PICS =
+    H265_MAX_LONG_TERM_REF_PICS_SPS + H265_MAX_REF_PICS_PER_DIRECTION;
 inline constexpr int H265_MAX_REF_IDX_ACTIVE = 15;
 inline constexpr int H265_MAX_TILE_COLUMNS = 20;
 inline constexpr int H265_MAX_TILE_ROWS = 22;
@@ -53,6 +57,9 @@ inline constexpr int H265_MAX_TILE_ROWS = 22;
 struct H265StRefPicSet {
   bool inter_ref_pic_set_prediction_flag = false;
   int delta_idx_minus1 = 0;
+  // Zero when the set was coded outright. A hardware decoder parsing a set from a
+  // slice header has nowhere else to learn how long the flag run inside it is.
+  int num_delta_pocs_of_ref_rps = 0;
   int delta_rps_sign = 0;
   int abs_delta_rps_minus1 = 0;
   int num_negative_pics = 0;
@@ -65,6 +72,18 @@ struct H265StRefPicSet {
   // Indexed by j in [0, num_delta_pocs], hence one more than MAX_DELTA_POCS.
   bool used_by_curr_pic_flag[H265_MAX_DELTA_POCS + 1] = {};
   bool use_delta_flag[H265_MAX_DELTA_POCS + 1] = {};
+};
+
+// Already resolved against the SPS list for the entries that come from there
+// (7.4.7.1).
+struct H265LongTermRef {
+  int poc_lsb_lt = 0;
+  bool used_by_curr_pic_lt_flag = false;
+  // Without it the picture is identified by the low bits of its count alone,
+  // which is all a stream that never wraps them needs to say.
+  bool delta_poc_msb_present_flag = false;
+  // DeltaPocMsbCycleLt per 7.4.7.1, not the delta the slice header carries.
+  int delta_poc_msb_cycle_lt = 0;
 };
 
 struct H265ScalingListData {
@@ -100,6 +119,8 @@ struct H265SliceHeader {
   int short_term_ref_pic_set_idx = 0;
   H265StRefPicSet st_ref_pic_set = {};
   int st_rps_bits = 0;
+  int num_long_term_refs = 0;
+  H265LongTermRef long_term_ref[H265_MAX_LONG_TERM_REF_PICS] = {};
   bool slice_temporal_mvp_enabled_flag = false;
   bool slice_sao_luma_flag = false;
   bool slice_sao_chroma_flag = false;
@@ -273,10 +294,15 @@ public:
     bool entropy_coding_sync_enabled_flag = false;
     int num_tile_columns_minus1 = 0;
     int num_tile_rows_minus1 = 0;
-    bool uniform_spacing_flag = false;
+    // 7.4.3.3 infers both to be 1 when the tiles syntax that carries them is
+    // absent, so parsePps starts them there. Handed uniform_spacing_flag = 0 with
+    // a single tile, a decoder reads tile widths that are not there and lays the
+    // picture out one coding tree block wide -- and with wavefronts that is the
+    // substream layout too.
+    bool uniform_spacing_flag = true;
     int column_width_minus1[H265_MAX_TILE_COLUMNS] = {};
     int row_height_minus1[H265_MAX_TILE_ROWS] = {};
-    bool loop_filter_across_tiles_enabled_flag = false;
+    bool loop_filter_across_tiles_enabled_flag = true;
     bool pps_loop_filter_across_slices_enabled_flag = false;
     bool deblocking_filter_control_present_flag = false;
     bool deblocking_filter_override_enabled_flag = false;

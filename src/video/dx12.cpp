@@ -13,8 +13,8 @@
 #include <memory>
 #include <vector>
 #include <video/parser/h265_parser.hpp>
-#include <openmedia/log.hpp>
 #include <video/hdr_sei.hpp>
+#include <video/decode_report.hpp>
 #include <video/reorder_queue.hpp>
 #include <util/color_codes.hpp>
 
@@ -39,7 +39,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace openmedia {
 
-class DX12Decoder final : public Decoder {
+class DX12Decoder final : public Decoder, private DecodeReport {
   static constexpr uint64_t BITSTREAM_SIZE = 8ull * 1024ull * 1024ull;
 
   bool initialized_ = false;
@@ -70,8 +70,7 @@ class DX12Decoder final : public Decoder {
 
   dx_h264::State h264_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
-  dx_h265::PocState h265_poc_;
-  std::vector<dx_h264::DpbEntry> dpb_; // HEVC
+  dx_h265::Dpb h265_dpb_;
   dx_h264::Dpb h264_dpb_;
   D3D12_RESOURCE_STATES dpb_states_[17] = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
@@ -80,13 +79,13 @@ class DX12Decoder final : public Decoder {
   uint32_t padded_width_ = 0;
   uint32_t padded_height_ = 0;
   uint32_t dpb_slot_count_ = 17;
-  uint32_t next_slot_ = 0;
   uint32_t feedback_ = 1;
   // Pictures waiting for the ones that come before them in presentation order. H.264 and
   // HEVC both hold back; which of them is decoding decides only how the depth is read.
   ReorderQueue reorder_;
 
 public:
+  DX12Decoder() : DecodeReport("dx12") {}
   ~DX12Decoder() override { release(); }
 
   auto configure(const DecoderOptions& options) -> OMError override {
@@ -214,30 +213,13 @@ public:
 
   void flush() override {
     resetReceiveState();
-    for (auto& entry : dpb_) entry = {};
     h264_dpb_.reset();
+    h265_dpb_.reset();
     reorder_.clear();
-    next_slot_ = 0;
     h264_.resetPoc();
-    h265_poc_.reset();
   }
 
 private:
-  // A stream the parser or the driver will not take yields no pictures at all,
-  // and the only symptom of that is a frame rate that never comes up, which is
-  // indistinguishable from slow decoding. Say what went wrong instead --
-  // throttled, because a stream that fails does so on every frame.
-  template<typename... Args>
-  auto rejectFrame(OMError error, std::format_string<Args...> fmt, Args&&... args) -> OMError {
-    if ((rejected_frames_++ % 120) == 0) {
-      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "dx12: {} ({} frames rejected so far)",
-                     std::format(fmt, std::forward<Args>(args)...), rejected_frames_);
-    }
-    return error;
-  }
-
-  uint64_t rejected_frames_ = 0;
-
   auto decodeH264(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
     // HDR10 static metadata only exists in the bitstream for H.26x; pick it
     // out before the packet disappears into the hardware decoder.
@@ -342,34 +324,22 @@ private:
       if (output_format_.format != expected_format) {
         padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
         padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
-        dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1] + 1), 2, 17);
-        for (auto& entry : dpb_) {
-          entry = {};
-        }
-        next_slot_ = 0;
-        h265_poc_.reset();
+        // One spare: the marking process frees a slot only once the stream has said
+        // it is done with the picture, which is one picture behind.
+        dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1] + 2), 2, 17);
         if (FAILED(createDecoder())) return Err(OM_CODEC_HWACCEL_FAILED);
         if (FAILED(createResources())) return Err(OM_CODEC_HWACCEL_FAILED);
         output_format_.format = expected_format;
       }
 
-      const int32_t poc = h265_poc_.compute(sps, parsed, sh);
-      if (dx_h265::isIrap(parsed.nal_unit_type)) {
-        // The picture counts start over here, so whatever is still held back belongs
-        // to the stretch before it and has to be let go first -- comparing the new
-        // counts against the old would order them against unrelated pictures.
-        for (auto& held : reorder_.drain()) {
-          output.push_back(std::move(held));
-        }
-        for (auto& entry : dpb_) {
-          entry.is_reference = false;
-        }
-        next_slot_ = 0;
-      }
+      // The parser is the one that knows which picture 8.3.1 makes the previous one.
+      const int32_t poc = parsed.poc;
+      const auto start = dx_h265::beginPicture(parsed, sps, sh, h265_dpb_, reorder_, output);
+      reportMissingReferences(start.missing_references, poc);
 
       memcpy(bitstream_ptr_, slice_data.bitstream.data(), slice_data.bitstream.size());
-      const uint32_t current_slot = next_slot_;
-      HRESULT hr = recordDecodeH265(parsed, slice_data, sps, pps, sh, poc, current_slot);
+      const uint32_t current_slot = start.slot;
+      HRESULT hr = recordDecodeH265(parsed, slice_data, sps, pps, sh, poc, start.reference_set, current_slot);
       if (FAILED(hr)) {
         return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 decode command failed (hr=0x{:08X})",
                                static_cast<uint32_t>(hr)));
@@ -380,10 +350,7 @@ private:
         return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 could not read back slot {}", current_slot));
       }
 
-      dpb_[current_slot].poc = poc;
-      dpb_[current_slot].frame_num = static_cast<uint32_t>(poc);
-      dpb_[current_slot].is_reference = parsed.is_reference;
-      next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
+      h265_dpb_.store(current_slot, poc, parsed.is_reference);
 
       Frame frame = {};
       frame.pts = packet.pts;
@@ -565,7 +532,7 @@ private:
       if (FAILED(hr)) return hr;
     }
 
-    dpb_.resize(dpb_slot_count_);
+    h265_dpb_.configure(dpb_slot_count_);
     std::fill(std::begin(dpb_states_), std::end(dpb_states_), D3D12_RESOURCE_STATE_COMMON);
     return S_OK;
   }
@@ -678,6 +645,7 @@ private:
                         const dx_h265::Pps& pps,
                         const dx_h265::SliceHeader& sh,
                         int32_t poc,
+                        const dx_h265::ReferenceSet& reference_set,
                         uint32_t current_slot) -> HRESULT {
     HRESULT hr = video_allocator_->Reset();
     if (FAILED(hr)) return hr;
@@ -735,7 +703,8 @@ private:
     input.pHeap = decoder_heap_.Get();
 
     DXVA_PicParams_HEVC pic = {};
-    dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, dpb_, feedback_++, pic);
+    dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, h265_dpb_, reference_set,
+                           feedback_++, pic);
     DXVA_Qmatrix_HEVC qmatrix = {};
     if (sps.scaling_list_enabled_flag) dx_h265::fillQMatrix(sps, pps, qmatrix);
     input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS, sizeof(pic), &pic};

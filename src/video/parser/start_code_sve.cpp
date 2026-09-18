@@ -15,9 +15,8 @@ auto nextStartCodeSVE(const uint8_t* data, size_t size, uint32_t& bit_buffer, bo
   svuint8_t vdata = svld1_u8(pred, data);
   const svuint8_t vbfr = svreinterpret_u8_u16(svdup_n_u16(((bit_buffer << 8u) & 0xff00u) | ((bit_buffer >> 8u) & 0xffu)));
 
-  // 0, 1, 2, ... as a vector. This used to be a function-local static table that
-  // every thread raced to fill, and that silently stopped covering the vector
-  // once it was wider than the table.
+  // Was a function-local static table that every thread raced to fill, and that
+  // silently stopped covering the vector once it grew wider than the table.
   const svuint8_t v0n = svindex_u8(0, 1);
   const svbool_t ext15_mask = svcmpge_n_u8(svptrue_b8(), v0n, lanes - 1);
   const svbool_t ext14_mask = svcmpge_n_u8(svptrue_b8(), v0n, lanes - 2);

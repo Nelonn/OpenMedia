@@ -20,6 +20,7 @@
 #include <video/parser/vp9_parser.hpp>
 #include <video/parser/h265_parser.hpp>
 #include <video/hdr_sei.hpp>
+#include <video/decode_report.hpp>
 #include <video/reorder_queue.hpp>
 #include <util/color_codes.hpp>
 
@@ -934,10 +935,11 @@ private:
   ComPtr<ID3D11Texture2D> texture_;
 };
 
-class DX11Decoder final : public Decoder {
+class DX11Decoder final : public Decoder, private DecodeReport {
   struct Slot {
-    dx_h264::DpbEntry dpb;
     ComPtr<ID3D11VideoDecoderOutputView> view;
+    ComPtr<ID3D11Texture2D> texture;
+    UINT array_slice = 0;
   };
 
   OMDX11Context* hw_context_ = nullptr;
@@ -952,7 +954,7 @@ class DX11Decoder final : public Decoder {
 
   ComPtr<ID3D11VideoDecoder> decoder_;
   D3D11_VIDEO_DECODER_CONFIG decoder_config_ = {};
-  ComPtr<ID3D11Texture2D> dpb_texture_;
+  std::vector<ComPtr<ID3D11Texture2D>> dpb_textures_;
 
   // Read-back pipeline: one staging texture per copy in flight, plus the copy
   // that is being issued this frame. See queueReadback()/mapReadback().
@@ -989,23 +991,21 @@ class DX11Decoder final : public Decoder {
   bool vp9_last_show_frame_ = false;
   // Maps each AV1 reference slot (0..7) to the DPB texture index holding it.
   int32_t av1_ref_slot_[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-  dx_h265::PocState h265_poc_;
+  dx_h265::Dpb h265_dpb_;
   OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t padded_width_ = 0;
   uint32_t padded_height_ = 0;
   uint32_t dpb_slot_count_ = 17;
-  // H.264 reference picture buffer and its marking process. The other codecs
-  // hand out slots round-robin through next_slot_ below.
   dx_h264::Dpb h264_dpb_;
-  uint32_t next_slot_ = 0;
   uint32_t feedback_ = 1;
   // Pictures waiting for the ones that come before them in presentation order. H.264 and
   // HEVC both hold back; which of them is decoding decides only how the depth is read.
   ReorderQueue reorder_;
 
 public:
+  DX11Decoder() : DecodeReport("dx11") {}
   ~DX11Decoder() override { release(); }
 
   auto configure(const DecoderOptions& options) -> OMError override {
@@ -1179,14 +1179,12 @@ public:
 
   void flush() override {
     resetReceiveState();
-    for (auto& slot : slots_) slot.dpb = {};
     h264_dpb_.reset();
+    h265_dpb_.reset();
     readbacks_.clear();
     staging_write_ = 0;
     reorder_.clear();
-    next_slot_ = 0;
     h264_.resetPoc();
-    h265_poc_.reset();
     if (av1_) av1_->reset();
     for (auto& r : av1_ref_slot_) r = -1;
     if (vp9_) vp9_->reset();
@@ -1197,22 +1195,6 @@ public:
   }
 
 private:
-  // Every rejection below used to be a bare error return. A stream the parser
-  // or the driver will not take then yields no pictures at all, and the only
-  // symptom the player can show for that is a frame rate that never comes up —
-  // which is indistinguishable from slow decoding. Say what went wrong instead,
-  // throttled, because a stream that fails does so on every single frame.
-  template<typename... Args>
-  auto rejectFrame(OMError error, std::format_string<Args...> fmt, Args&&... args) -> OMError {
-    if ((rejected_frames_++ % 120) == 0) {
-      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "dx11: {} ({} frames rejected so far)",
-          std::format(fmt, std::forward<Args>(args)...), rejected_frames_);
-    }
-    return error;
-  }
-
-  uint64_t rejected_frames_ = 0;
-
   // One payload on its way into a driver-owned decode buffer.
   struct BufferUpload {
     D3D11_VIDEO_DECODER_BUFFER_TYPE type;
@@ -1270,10 +1252,15 @@ private:
   // the more work in flight, the more of them, so it shows up as a frame rate
   // that will not come up rather than as an error.
   auto beginFrame(uint32_t slot) -> HRESULT {
+    // D3D9 error code, still what some drivers answer through the D3D11 video
+    // API. Chromium waits on it exactly as it waits on E_PENDING.
+    constexpr HRESULT kWasStillDrawing = static_cast<HRESULT>(0x8876021CL);
     HRESULT hr = E_PENDING;
-    for (int attempt = 0; attempt < 50; ++attempt) {
+    // A second of waiting is far past anything a working driver needs; it is here
+    // only so that a wedged one is reported rather than hung on.
+    for (int attempt = 0; attempt < 2000; ++attempt) {
       hr = video_context_->DecoderBeginFrame(decoder_.Get(), slots_[slot].view.Get(), 0, nullptr);
-      if (hr != E_PENDING) return hr;
+      if (hr != E_PENDING && hr != kWasStillDrawing) return hr;
       std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
     return hr;
@@ -1452,9 +1439,22 @@ private:
     }
   }
 
+  // Which scanner runs decides where every NAL unit is taken to begin, so it is
+  // worth having in the log.
+  static auto describeSimdIsa(video_parser::SimdIsa isa) -> std::string_view {
+    switch (isa) {
+      case video_parser::SimdIsa::avx512: return "AVX-512";
+      case video_parser::SimdIsa::avx2: return "AVX2";
+      case video_parser::SimdIsa::ssse3: return "SSSE3";
+      case video_parser::SimdIsa::neon: return "NEON";
+      case video_parser::SimdIsa::sve: return "SVE";
+      default: return "plain C";
+    }
+  }
+
   auto createDecoderResources(uint8_t bit_depth) -> bool {
     decoder_.Reset();
-    dpb_texture_.Reset();
+    dpb_textures_.clear();
     staging_.clear();
     staging_write_ = 0;
     readbacks_.clear();
@@ -1513,24 +1513,44 @@ private:
     if (!found_config) return false;
     if (FAILED(video_device_->CreateVideoDecoder(&decoder_desc, &decoder_config_, &decoder_))) return false;
 
+    // Bit 14 of ConfigDecoderSpecific is the driver asking for one Texture2D per
+    // reference picture rather than one array texture. Handed an array texture
+    // anyway, such a driver decodes into it wrongly without failing -- blocks
+    // simply come out carrying the wrong content. Chromium reads the same bit
+    // (D3D11VideoDecoder::use_single_video_decoder_texture_).
+    const bool texture_per_slot = (decoder_config_.ConfigDecoderSpecific & (1u << 14)) != 0;
+    openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO,
+                   "dx11: decoding into {} ({} surfaces of {}x{}), start codes found with {}",
+                   texture_per_slot ? "one texture per reference picture" : "an array texture",
+                   dpb_slot_count_, padded_width_, padded_height_,
+                   describeSimdIsa(video_parser::detectSimdIsa()));
+
     D3D11_TEXTURE2D_DESC texture_desc = {};
     texture_desc.Width = padded_width_;
     texture_desc.Height = padded_height_;
     texture_desc.MipLevels = 1;
-    texture_desc.ArraySize = dpb_slot_count_;
+    texture_desc.ArraySize = texture_per_slot ? 1 : dpb_slot_count_;
     texture_desc.Format = decoder_desc.OutputFormat;
     texture_desc.SampleDesc.Count = 1;
     texture_desc.Usage = D3D11_USAGE_DEFAULT;
     texture_desc.BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device_->CreateTexture2D(&texture_desc, nullptr, &dpb_texture_))) return false;
+
+    dpb_textures_.resize(texture_per_slot ? dpb_slot_count_ : 1);
+    for (auto& texture : dpb_textures_) {
+      if (FAILED(device_->CreateTexture2D(&texture_desc, nullptr, &texture))) return false;
+    }
 
     slots_.resize(dpb_slot_count_);
+    h265_dpb_.configure(dpb_slot_count_);
     for (uint32_t i = 0; i < dpb_slot_count_; ++i) {
+      slots_[i].texture = texture_per_slot ? dpb_textures_[i] : dpb_textures_[0];
+      slots_[i].array_slice = texture_per_slot ? 0 : i;
+
       D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC view_desc = {};
       view_desc.DecodeProfile = target_profile;
       view_desc.ViewDimension = D3D11_VDOV_DIMENSION_TEXTURE2D;
-      view_desc.Texture2D.ArraySlice = i;
-      if (FAILED(video_device_->CreateVideoDecoderOutputView(dpb_texture_.Get(), &view_desc, &slots_[i].view))) return false;
+      view_desc.Texture2D.ArraySlice = slots_[i].array_slice;
+      if (FAILED(video_device_->CreateVideoDecoderOutputView(slots_[i].texture.Get(), &view_desc, &slots_[i].view))) return false;
     }
 
     output_format_.format = static_cast<OMPixelFormat>(texture_desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
@@ -1545,7 +1565,16 @@ private:
 
     if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
     auto frames = h265_->parse(packet.bytes, true);
-    if (frames.empty()) return Ok(std::vector<Frame> {});
+    if (frames.empty()) {
+      // Parameter sets and SEI alone are normal; a slice header that would not
+      // parse costs a picture the stream goes on referring to. Only the second is
+      // worth a word, and only once the parser could have read one.
+      if (h265_->hasSps() && h265_->hasPps()) {
+        rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 packet of {} bytes carried no decodable slice",
+                    packet.bytes.size());
+      }
+      return Ok(std::vector<Frame> {});
+    }
 
     std::vector<Frame> output;
     output.reserve(frames.size());
@@ -1564,32 +1593,18 @@ private:
         padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
         padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
         dpb_slot_count_ = 16;
-        next_slot_ = 0;
-        h265_poc_.reset();
         if (!createDecoderResources(bit_depth)) return Err(OM_CODEC_HWACCEL_FAILED);
       }
 
-      const int32_t poc = h265_poc_.compute(sps, parsed, sh);
-      if (dx_h265::isIrap(parsed.nal_unit_type)) {
-        // The picture order count starts over here, so whatever is still held back belongs to the
-        // stretch before it and has to be let go first -- comparing the new counts against the old
-        // would order them against pictures they have nothing to do with.
-        for (auto& held : reorder_.drain()) {
-          output.push_back(std::move(held));
-        }
-        for (auto& slot : slots_) {
-          slot.dpb.is_reference = false;
-        }
-        next_slot_ = 0;
-      }
-
-      const uint32_t current_slot = next_slot_;
-      std::vector<dx_h264::DpbEntry> dpb;
-      dpb.reserve(slots_.size());
-      for (const auto& slot : slots_) dpb.push_back(slot.dpb);
+      // The parser is the one that knows which picture 8.3.1 makes the previous one.
+      const int32_t poc = parsed.poc;
+      const auto start = dx_h265::beginPicture(parsed, sps, sh, h265_dpb_, reorder_, output);
+      reportMissingReferences(start.missing_references, poc);
+      const uint32_t current_slot = start.slot;
 
       DXVA_PicParams_HEVC pic_params = {};
-      dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, dpb, feedback_++, pic_params);
+      dx_h265::fillPicParams(sps, pps, sh, parsed, poc, current_slot, h265_dpb_,
+                             start.reference_set, feedback_++, pic_params);
       const auto slice_data = dx_h265::buildSliceData(parsed);
       if (slice_data.bitstream.empty() || slice_data.slices.empty()) {
         return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 access unit produced no slice data"));
@@ -1597,6 +1612,8 @@ private:
       DXVA_Qmatrix_HEVC qmatrix = {};
       const bool submit_qmatrix = sps.scaling_list_enabled_flag;
       if (submit_qmatrix) dx_h265::fillQMatrix(sps, pps, qmatrix);
+
+      auto slices = slice_data.slices;
 
       HRESULT hr = beginFrame(current_slot);
       if (FAILED(hr)) {
@@ -1609,21 +1626,28 @@ private:
       // it, so a single bad frame would silently end the stream.
       const auto endFrame = [&] { video_context_->DecoderEndFrame(decoder_.Get()); };
 
+      // ffmpeg pads HEVC to a 128 byte block and asserts on it; Chromium commits
+      // exactly what it wrote and also works, so drivers differ on whether they
+      // care. Padding is the side that costs nothing.
+      const size_t bitstream_size = slice_data.bitstream.size();
+      const size_t padded_size = dx_h264::alignUp(bitstream_size, size_t {128});
+      slices.back().SliceBytesInBuffer += static_cast<UINT>(padded_size - bitstream_size);
+
       // The quantisation matrix is only sent when the stream enables scaling
       // lists, so the list is built rather than written out straight.
       BufferUpload uploads[4] = {
-          {D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, slice_data.bitstream.data(),
-           slice_data.bitstream.size(), 0, "H.265 bitstream"},
           {D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &pic_params, sizeof(pic_params), 0,
            "H.265 picture parameters"},
       };
-      size_t upload_count = 2;
+      size_t upload_count = 1;
       if (submit_qmatrix) {
         uploads[upload_count++] = {D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &qmatrix,
                                    sizeof(qmatrix), 0, "H.265 quantisation matrix"};
       }
-      uploads[upload_count++] = {D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, slice_data.slices.data(),
-                                 slice_data.slices.size() * sizeof(DXVA_Slice_HEVC_Short), 0,
+      uploads[upload_count++] = {D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, slice_data.bitstream.data(),
+                                 bitstream_size, padded_size, "H.265 bitstream"};
+      uploads[upload_count++] = {D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, slices.data(),
+                                 slices.size() * sizeof(DXVA_Slice_HEVC_Short), 0,
                                  "H.265 slice control"};
 
       D3D11_VIDEO_DECODER_BUFFER_DESC descs[std::size(uploads)] = {};
@@ -1651,10 +1675,7 @@ private:
         return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 could not read back slot {}", current_slot));
       }
 
-      slots_[current_slot].dpb.poc = poc;
-      slots_[current_slot].dpb.frame_num = static_cast<uint32_t>(poc);
-      slots_[current_slot].dpb.is_reference = parsed.is_reference;
-      next_slot_ = (next_slot_ + 1) % dpb_slot_count_;
+      h265_dpb_.store(current_slot, poc, parsed.is_reference);
 
       Frame frame = {};
       frame.pts = packet.pts;
@@ -2251,7 +2272,7 @@ private:
   auto makeHardwarePicture(uint32_t slot) -> std::optional<Picture> {
     if (!picture_pool_) {
       D3D11_TEXTURE2D_DESC desc = {};
-      dpb_texture_->GetDesc(&desc);
+      slots_[slot].texture->GetDesc(&desc);
       desc.ArraySize = 1;
       desc.Usage = D3D11_USAGE_DEFAULT;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -2262,8 +2283,8 @@ private:
 
     auto texture = picture_pool_->acquire();
     if (!texture) return std::nullopt;
-    context_->CopySubresourceRegion(texture.Get(), 0, 0, 0, 0, dpb_texture_.Get(),
-                                    D3D11CalcSubresource(0, slot, 1), nullptr);
+    context_->CopySubresourceRegion(texture.Get(), 0, 0, 0, 0, slots_[slot].texture.Get(),
+                                    D3D11CalcSubresource(0, slots_[slot].array_slice, 1), nullptr);
 
     D3D11_TEXTURE2D_DESC desc = {};
     texture->GetDesc(&desc);
@@ -2286,9 +2307,10 @@ private:
   // Starts the copy of `slot` into the next staging texture. Nothing is mapped
   // here, so the call does not wait for the GPU.
   auto queueReadback(uint32_t slot) -> bool {
+    if (slot >= slots_.size() || !slots_[slot].texture) return false;
     if (staging_.empty()) {
       D3D11_TEXTURE2D_DESC desc = {};
-      dpb_texture_->GetDesc(&desc);
+      slots_[slot].texture->GetDesc(&desc);
       desc.ArraySize = 1;
       desc.BindFlags = 0;
       desc.MiscFlags = 0;
@@ -2305,7 +2327,8 @@ private:
     }
 
     context_->CopySubresourceRegion(staging_[staging_write_].Get(), 0, 0, 0, 0,
-                                    dpb_texture_.Get(), D3D11CalcSubresource(0, slot, 1), nullptr);
+                                    slots_[slot].texture.Get(),
+                                    D3D11CalcSubresource(0, slots_[slot].array_slice, 1), nullptr);
     staging_write_ = (staging_write_ + 1) % staging_.size();
     return true;
   }
@@ -2354,7 +2377,7 @@ private:
   void release() {
     initialized_ = false;
     slots_.clear();
-    dpb_texture_.Reset();
+    dpb_textures_.clear();
     staging_.clear();
     staging_write_ = 0;
     readbacks_.clear();

@@ -9,23 +9,16 @@
 
 namespace openmedia {
 
-// Holds decoded pictures back until everything that precedes them in
-// presentation order has arrived.
+// Hardware decoders hand pictures back in decode order, which for anything with
+// B-frames means emitting them as they come makes the timestamps run backwards.
+// Every stream states how far it may reorder -- H.264 in the VUI or, failing
+// that, through the DPB capacity its level guarantees; HEVC outright in the SPS
+// -- and once that many are in hand the earliest can no longer be overtaken.
 //
-// Hardware decoders hand pictures back in decode order. For anything with
-// B-frames that is not presentation order, so emitting them as they come makes
-// the timestamps run backwards. Every stream states how far it may reorder --
-// H.264 in the VUI or, failing that, through the DPB capacity its level
-// guarantees; HEVC outright in the SPS -- and once that many pictures are in
-// hand the earliest of them can no longer be overtaken, so it is safe to show.
-//
-// The D3D11 and D3D12 decoders both need exactly this, which is why it lives in
-// neither of them.
+// The D3D11 and D3D12 decoders both need exactly this.
 class ReorderQueue {
 public:
-  // Takes `frame` and returns whichever picture is now safe to show, if any. A
-  // depth of zero means the stream never reorders, and the frame passes
-  // straight through.
+  // A depth of zero means the stream never reorders.
   auto push(Frame frame, int32_t poc, size_t depth) -> std::vector<Frame> {
     if (depth == 0) return one(std::move(frame));
 
@@ -52,8 +45,6 @@ public:
   // Drops what is held without emitting it. For a seek or a flush, where the
   // pictures belong to a part of the stream that is no longer being shown.
   void clear() { entries_.clear(); }
-
-  auto empty() const -> bool { return entries_.empty(); }
 
 private:
   struct Entry {

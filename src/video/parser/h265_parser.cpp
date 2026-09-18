@@ -363,6 +363,8 @@ auto H265AccessUnitParser::parseStRefPicSet(openmedia::BitReader& br, H265StRefP
     if (ref_idx < 0 || ref_idx >= idx) return false;
 
     const H265StRefPicSet& ref = sets[ref_idx];
+    st.delta_idx_minus1 = delta_idx_minus1;
+    st.num_delta_pocs_of_ref_rps = ref.num_delta_pocs;
     st.delta_rps_sign = static_cast<int>(br.readBit());
     st.abs_delta_rps_minus1 = static_cast<int>(br.readUE());
     if (st.abs_delta_rps_minus1 < 0 || st.abs_delta_rps_minus1 > 32767) return false;
@@ -747,8 +749,25 @@ auto H265AccessUnitParser::parsePps(openmedia::BitReader& br) -> bool {
     if (pps.num_tile_rows_minus1 < 0 || pps.num_tile_rows_minus1 >= H265_MAX_TILE_ROWS) return false;
     pps.uniform_spacing_flag = br.readBit() != 0;
     if (!pps.uniform_spacing_flag) {
-      for (int i = 0; i < pps.num_tile_columns_minus1; ++i) pps.column_width_minus1[i] = static_cast<int>(br.readUE());
-      for (int i = 0; i < pps.num_tile_rows_minus1; ++i) pps.row_height_minus1[i] = static_cast<int>(br.readUE());
+      // The stream writes down every tile but the last, and a decoder is given all
+      // of them.
+      const int ctb_log2_size_y = sps.log2_min_luma_coding_block_size_minus3 + 3 +
+                                  sps.log2_diff_max_min_luma_coding_block_size;
+      const int ctb_size_y = 1 << ctb_log2_size_y;
+      int columns_left = (sps.pic_width_in_luma_samples + ctb_size_y - 1) / ctb_size_y - 1;
+      for (int i = 0; i < pps.num_tile_columns_minus1; ++i) {
+        pps.column_width_minus1[i] = static_cast<int>(br.readUE());
+        if (pps.column_width_minus1[i] < 0 || pps.column_width_minus1[i] >= columns_left) return false;
+        columns_left -= pps.column_width_minus1[i] + 1;
+      }
+      pps.column_width_minus1[pps.num_tile_columns_minus1] = columns_left;
+      int rows_left = (sps.pic_height_in_luma_samples + ctb_size_y - 1) / ctb_size_y - 1;
+      for (int i = 0; i < pps.num_tile_rows_minus1; ++i) {
+        pps.row_height_minus1[i] = static_cast<int>(br.readUE());
+        if (pps.row_height_minus1[i] < 0 || pps.row_height_minus1[i] >= rows_left) return false;
+        rows_left -= pps.row_height_minus1[i] + 1;
+      }
+      pps.row_height_minus1[pps.num_tile_rows_minus1] = rows_left;
     }
     pps.loop_filter_across_tiles_enabled_flag = br.readBit() != 0;
   }
@@ -831,21 +850,31 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
         }
         const int num_long_term_pics = static_cast<int>(br.readUE());
         if (num_long_term_pics < 0 || num_long_term_pics > H265_MAX_REF_PICS_PER_DIRECTION) return fail();
-        for (int i = 0; i < num_long_term_sps + num_long_term_pics; ++i) {
-          bool used_by_curr_pic = false;
+        sh.num_long_term_refs = num_long_term_sps + num_long_term_pics;
+        for (int i = 0; i < sh.num_long_term_refs; ++i) {
+          H265LongTermRef& lt = sh.long_term_ref[i];
           if (i < num_long_term_sps) {
             int lt_idx_sps = 0;
             if (sps.num_long_term_ref_pics_sps > 1) {
               lt_idx_sps = static_cast<int>(br.readBits(static_cast<uint32_t>(ceilLog2(static_cast<uint32_t>(sps.num_long_term_ref_pics_sps)))));
               if (lt_idx_sps < 0 || lt_idx_sps >= sps.num_long_term_ref_pics_sps) return fail();
             }
-            used_by_curr_pic = sps.used_by_curr_pic_lt_sps_flag[lt_idx_sps];
+            lt.poc_lsb_lt = sps.lt_ref_pic_poc_lsb_sps[lt_idx_sps];
+            lt.used_by_curr_pic_lt_flag = sps.used_by_curr_pic_lt_sps_flag[lt_idx_sps];
           } else {
-            br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4)); // poc_lsb_lt
-            used_by_curr_pic = br.readBit() != 0;
+            lt.poc_lsb_lt = static_cast<int>(br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4)));
+            lt.used_by_curr_pic_lt_flag = br.readBit() != 0;
           }
-          if (used_by_curr_pic) ++sh.num_pic_total_curr;
-          if (br.readBit()) br.readUE(); // delta_poc_msb_present_flag / delta_poc_msb_cycle_lt
+          if (lt.used_by_curr_pic_lt_flag) ++sh.num_pic_total_curr;
+          lt.delta_poc_msb_present_flag = br.readBit() != 0;
+          if (lt.delta_poc_msb_present_flag) {
+            const int delta = static_cast<int>(br.readUE());
+            if (delta < 0 || delta > (1 << 16)) return fail();
+            // 7.4.7.1: the field is a delta against the previous entry, except at
+            // the first entry of each of the two runs.
+            const bool run_start = i == 0 || i == num_long_term_sps;
+            lt.delta_poc_msb_cycle_lt = run_start ? delta : delta + sh.long_term_ref[i - 1].delta_poc_msb_cycle_lt;
+          }
         }
       }
       const auto& st = sh.short_term_ref_pic_set_sps_flag ? sps.st_ref_pic_set[sh.short_term_ref_pic_set_idx] : sh.st_ref_pic_set;
@@ -1031,7 +1060,12 @@ auto H265AccessUnitParser::computePoc(const Sps& sps, const H265SliceHeader& sh,
     }
   }
 
-  if (temporal_id_ == 0 && (nal_type < NAL_RADL_N || nal_type > 14)) {
+  // 8.3.1. Letting a RASL, RADL or sub-layer non-reference picture through moves
+  // the reference the msb is derived against, which changes the outcome for the
+  // picture that straddles a wrap of the low bits.
+  const bool eligible_for_prev_tid0 =
+      temporal_id_ == 0 && !isSubLayerNonReference(nal_type) && (nal_type < NAL_RADL_N || nal_type > NAL_RASL_R);
+  if (eligible_for_prev_tid0) {
     ref_pic_order_cnt_lsb_ = sh.slice_pic_order_cnt_lsb;
     ref_pic_order_cnt_msb_ = pic_order_cnt_msb;
   }
