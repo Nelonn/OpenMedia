@@ -16,7 +16,7 @@ endfunction()
 
 function(_unideps_is_android out_var)
     if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR DEFINED ANDROID_ABI
-            OR (DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "android"))
+       OR (DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "android"))
         set(${out_var} TRUE PARENT_SCOPE)
     else()
         set(${out_var} FALSE PARENT_SCOPE)
@@ -96,54 +96,46 @@ endfunction()
 
 set(UNIDEPS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
-# unideps_setup([MANIFEST <path>] [BASE_DIR <dir>] [PRESET <name>] [TARGET_FILE <path>])
-#
-# Builds the dependencies from unideps.toml and includes the generated targets file.
-# A macro (not a function) so that <Pkg>_ROOT / CMAKE_PREFIX_PATH set by the
-# generated file are visible to the caller.
-macro(unideps_setup)
-    cmake_parse_arguments(_UNIDEPS "" "MANIFEST;BASE_DIR;PRESET;TARGET_FILE" "" ${ARGN})
-    if(_UNIDEPS_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR "UniDeps: unknown arguments to unideps_setup(): ${_UNIDEPS_UNPARSED_ARGUMENTS}")
+# Inside a package that is being built by unideps itself (UNIDEPS_ACTIVE is exported to
+# every CMake process unideps starts) running `unideps` again would wait forever for the
+# build lock. The outer run already built the dependencies of the package's own
+# unideps.toml and generated a targets file for them: UNIDEPS_NESTED_TARGETS.
+macro(_unideps_setup_nested)
+    if(UNIDEPS_NESTED_TARGETS AND EXISTS "${UNIDEPS_NESTED_TARGETS}")
+        message(STATUS "UniDeps: building inside another unideps run, using ${UNIDEPS_NESTED_TARGETS}")
+        include("${UNIDEPS_NESTED_TARGETS}")
+    else()
+        message(WARNING "UniDeps: unideps_setup() skipped: this project is built by unideps, but it has no "
+                        "unideps.toml next to its top-level CMakeLists.txt, so there are no dependencies to set up")
     endif()
-    if(NOT _UNIDEPS_MANIFEST)
-        set(_UNIDEPS_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/unideps.toml")
-    endif()
-    if(NOT _UNIDEPS_TARGET_FILE)
-        set(_UNIDEPS_TARGET_FILE "${CMAKE_CURRENT_BINARY_DIR}/unideps_targets.cmake")
-    endif()
-    if(NOT _UNIDEPS_PRESET AND DEFINED UNIDEPS_PRESET)
-        set(_UNIDEPS_PRESET "${UNIDEPS_PRESET}")
-    endif()
-    if(NOT _UNIDEPS_BASE_DIR AND DEFINED UNIDEPS_BASE_DIR)
-        set(_UNIDEPS_BASE_DIR "${UNIDEPS_BASE_DIR}")
-    endif()
+endmacro()
 
+macro(_unideps_setup_build)
     set(_unideps_search_hints
-            "${UNIDEPS_CMAKE_DIR}/../target/release"
-            "${UNIDEPS_CMAKE_DIR}/../target/debug"
-            "${CMAKE_CURRENT_SOURCE_DIR}/.unideps/bin"
+        "${UNIDEPS_CMAKE_DIR}/../target/release"
+        "${UNIDEPS_CMAKE_DIR}/../target/debug"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.unideps/bin"
     )
     find_program(UNIDEPS_EXECUTABLE NAMES unideps HINTS ${_unideps_search_hints})
     if(NOT UNIDEPS_EXECUTABLE)
         message(FATAL_ERROR "UniDeps: executable 'unideps' not found on PATH or in: ${_unideps_search_hints}. "
-                "Set UNIDEPS_EXECUTABLE to its full path.")
+                            "Set UNIDEPS_EXECUTABLE to its full path.")
     endif()
 
     get_property(_unideps_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     if(_unideps_multi_config AND NOT CMAKE_BUILD_TYPE)
         message(STATUS "UniDeps: multi-config generator detected; dependencies are built once in Release. "
-                "Pass -DCMAKE_BUILD_TYPE=<cfg> to choose a different configuration.")
+                       "Pass -DCMAKE_BUILD_TYPE=<cfg> to choose a different configuration.")
     endif()
 
     unideps_detect_target_triple(_unideps_target)
     unideps_detect_runtime(_unideps_runtime)
 
     set(_unideps_cmd
-            "${UNIDEPS_EXECUTABLE}" build
-            --manifest "${_UNIDEPS_MANIFEST}"
-            --target "${_unideps_target}"
-            --generate-targets "${_UNIDEPS_TARGET_FILE}"
+        "${UNIDEPS_EXECUTABLE}" build
+        --manifest "${_UNIDEPS_MANIFEST}"
+        --target "${_unideps_target}"
+        --generate-targets "${_UNIDEPS_TARGET_FILE}"
     )
     if(_UNIDEPS_BASE_DIR)
         list(APPEND _unideps_cmd --base-dir "${_UNIDEPS_BASE_DIR}")
@@ -210,15 +202,15 @@ macro(unideps_setup)
         endif()
         get_property(_unideps_type CACHE "${_unideps_var}" PROPERTY TYPE)
         if(_unideps_type STREQUAL "BOOL" OR _unideps_type STREQUAL "STRING"
-                OR _unideps_val MATCHES "^([Oo][Nn]|[Oo][Ff][Ff]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[01])$")
+           OR _unideps_val MATCHES "^([Oo][Nn]|[Oo][Ff][Ff]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[01])$")
             list(APPEND _unideps_cmd "--cmake-args=-D${_unideps_var}=${_unideps_val}")
         endif()
     endforeach()
 
     execute_process(
-            COMMAND ${_unideps_cmd}
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            RESULT_VARIABLE _unideps_res
+        COMMAND ${_unideps_cmd}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _unideps_res
     )
     if(NOT _unideps_res EQUAL 0)
         message(FATAL_ERROR "UniDeps: 'unideps build' failed (exit code ${_unideps_res})")
@@ -230,4 +222,34 @@ macro(unideps_setup)
         message(FATAL_ERROR "UniDeps: generated targets file not found at ${_UNIDEPS_TARGET_FILE}")
     endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_UNIDEPS_MANIFEST}")
+endmacro()
+
+# unideps_setup([MANIFEST <path>] [BASE_DIR <dir>] [PRESET <name>] [TARGET_FILE <path>])
+#
+# Builds the dependencies from unideps.toml and includes the generated targets file.
+# A macro (not a function) so that <Pkg>_ROOT / CMAKE_PREFIX_PATH set by the
+# generated file are visible to the caller.
+macro(unideps_setup)
+    cmake_parse_arguments(_UNIDEPS "" "MANIFEST;BASE_DIR;PRESET;TARGET_FILE" "" ${ARGN})
+    if(_UNIDEPS_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "UniDeps: unknown arguments to unideps_setup(): ${_UNIDEPS_UNPARSED_ARGUMENTS}")
+    endif()
+    if(NOT _UNIDEPS_MANIFEST)
+        set(_UNIDEPS_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/unideps.toml")
+    endif()
+    if(NOT _UNIDEPS_TARGET_FILE)
+        set(_UNIDEPS_TARGET_FILE "${CMAKE_CURRENT_BINARY_DIR}/unideps_targets.cmake")
+    endif()
+    if(NOT _UNIDEPS_PRESET AND DEFINED UNIDEPS_PRESET)
+        set(_UNIDEPS_PRESET "${UNIDEPS_PRESET}")
+    endif()
+    if(NOT _UNIDEPS_BASE_DIR AND DEFINED UNIDEPS_BASE_DIR)
+        set(_UNIDEPS_BASE_DIR "${UNIDEPS_BASE_DIR}")
+    endif()
+
+    if(DEFINED ENV{UNIDEPS_ACTIVE})
+        _unideps_setup_nested()
+    else()
+        _unideps_setup_build()
+    endif()
 endmacro()
