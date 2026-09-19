@@ -117,6 +117,7 @@ static auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {
     case AV_CODEC_ID_PCM_S16LE: return OM_CODEC_PCM_S16LE;
     case AV_CODEC_ID_PCM_F32LE: return OM_CODEC_PCM_F32LE;
     case AV_CODEC_ID_ALAC: return OM_CODEC_ALAC;
+    case AV_CODEC_ID_DTS: return OM_CODEC_DCA;
     case AV_CODEC_ID_AC3: return OM_CODEC_AC3;
     case AV_CODEC_ID_EAC3: return OM_CODEC_EAC3;
     case AV_CODEC_ID_AC4: return OM_CODEC_AC4;
