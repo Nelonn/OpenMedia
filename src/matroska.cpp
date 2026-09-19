@@ -703,6 +703,17 @@ private:
         track.time_base = mkv_time_base;
         track.format.type = OM_MEDIA_AUDIO;
         track.format.codec_id = mkvCodecIdToOMCodec(t->GetCodecId());
+        if (const char* cid = t->GetCodecId()) {
+          if (strcmp(cid, "A_DTS/LOSSLESS") == 0) {
+            track.format.profile = OM_PROFILE_DTS_HD_MA;
+          } else if (strcmp(cid, "A_DTS/EXPRESS") == 0) {
+            track.format.profile = OM_PROFILE_DTS_EXPRESS;
+          } else if (strcmp(cid, "A_DTS/HD") == 0) {
+            track.format.profile = OM_PROFILE_DTS_HD_HRA;
+          } else if (strcmp(cid, "A_DTS") == 0) {
+            track.format.profile = OM_PROFILE_DTS;
+          }
+        }
         track.format.audio.sample_rate = static_cast<uint32_t>(at->GetSamplingRate());
         track.format.audio.channels = static_cast<uint32_t>(at->GetChannels());
         track.format.audio.bit_depth = static_cast<uint32_t>(at->GetBitDepth());
@@ -1204,6 +1215,10 @@ private:
     if (strcmp(id, "A_PCM/INT/BIG") == 0) return OM_CODEC_PCM_S16BE;
     if (strcmp(id, "A_AC3") == 0) return OM_CODEC_AC3;
     if (strcmp(id, "A_EAC3") == 0) return OM_CODEC_EAC3;
+    if (strcmp(id, "A_DTS") == 0) return OM_CODEC_DTS;
+    if (strcmp(id, "A_DTS/EXPRESS") == 0) return OM_CODEC_DTS;
+    if (strcmp(id, "A_DTS/LOSSLESS") == 0) return OM_CODEC_DTS;
+    if (strcmp(id, "A_DTS/HD") == 0) return OM_CODEC_DTS;
 
     return OM_CODEC_NONE;
   }
@@ -1541,7 +1556,7 @@ private:
       return 0;
     }
 
-    const char* codec_id = omCodecToMkvCodec(track.format.codec_id);
+    const char* codec_id = omCodecToMkvCodec(track.format.codec_id, track.format.profile);
     if (codec_id) {
       audio_track->set_codec_id(codec_id);
     }
@@ -1558,7 +1573,7 @@ private:
     return track_number;
   }
 
-  static auto omCodecToMkvCodec(OMCodecId codec_id) -> const char* {
+  static auto omCodecToMkvCodec(OMCodecId codec_id, OMProfile profile = OM_PROFILE_NONE) -> const char* {
     switch (codec_id) {
       // Video codecs
       case OM_CODEC_VP8:
@@ -1595,6 +1610,11 @@ private:
         return "A_AC3";
       case OM_CODEC_EAC3:
         return "A_EAC3";
+      case OM_CODEC_DTS:
+        if (profile == OM_PROFILE_DTS_HD_MA) return "A_DTS/LOSSLESS";
+        if (profile == OM_PROFILE_DTS_EXPRESS) return "A_DTS/EXPRESS";
+        if (profile == OM_PROFILE_DTS_HD_HRA) return "A_DTS/HD";
+        return "A_DTS";
 
       default:
         return nullptr;
