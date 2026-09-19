@@ -2400,7 +2400,7 @@ private:
     }
     if (const auto profile = dtsProfile(fmt)) {
       st.format.profile = *profile;
-      return audio(OM_CODEC_DCA, SampleEntryKind::OtherAudio, true);
+      return audio(OM_CODEC_DTS, SampleEntryKind::OtherAudio, true);
     }
     if (isPcmVariant(fmt)) return parsePcmSampleEntry(fmt, entry_pos, entry_end, st);
 
