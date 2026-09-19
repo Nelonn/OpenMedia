@@ -96,12 +96,45 @@ endfunction()
 
 set(UNIDEPS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
+# Options for `enabled_if`: cache BOOL/STRING entries (option(), -D...) and normal
+# variables holding a boolean constant, as "KEY=VALUE" items in _unideps_option_defs.
+# Paths and internal entries are skipped to keep the command line short.
+macro(_unideps_collect_options)
+    set(_unideps_option_defs "")
+    get_cmake_property(_unideps_all_vars VARIABLES)
+    foreach(_unideps_var IN LISTS _unideps_all_vars)
+        if(_unideps_var MATCHES "^(CMAKE_|UNIDEPS_|ANDROID_|_)" OR NOT _unideps_var MATCHES "^[A-Za-z0-9_]+$")
+            continue()
+        endif()
+        set(_unideps_val "${${_unideps_var}}")
+        if(_unideps_val STREQUAL "" OR _unideps_val MATCHES "[;\n]")
+            continue()
+        endif()
+        get_property(_unideps_type CACHE "${_unideps_var}" PROPERTY TYPE)
+        if(_unideps_type STREQUAL "BOOL" OR _unideps_type STREQUAL "STRING"
+           OR _unideps_val MATCHES "^([Oo][Nn]|[Oo][Ff][Ff]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[01])$")
+            list(APPEND _unideps_option_defs "${_unideps_var}=${_unideps_val}")
+        endif()
+    endforeach()
+endmacro()
+
 # Inside a package that is being built by unideps itself (UNIDEPS_ACTIVE is exported to
 # every CMake process unideps starts) running `unideps` again would wait forever for the
-# build lock. The outer run already built the dependencies of the package's own
-# unideps.toml and generated a targets file for them: UNIDEPS_NESTED_TARGETS.
+# build lock. The outer run builds the dependencies of the package's own unideps.toml
+# beforehand, in two steps:
+#  1. a probe configure (UNIDEPS_NESTED_PROBE=<file>): the options the package has
+#     declared up to this point are written to <file> and the configure stops here. They
+#     decide which of the manifest's dependencies are enabled (`enabled_if`);
+#  2. the real configure (UNIDEPS_NESTED_TARGETS=<file>): the generated targets file of
+#     the built dependencies is included.
 macro(_unideps_setup_nested)
-    if(UNIDEPS_NESTED_TARGETS AND EXISTS "${UNIDEPS_NESTED_TARGETS}")
+    if(UNIDEPS_NESTED_PROBE)
+        _unideps_collect_options()
+        list(JOIN _unideps_option_defs "\n" _unideps_probe_content)
+        file(WRITE "${UNIDEPS_NESTED_PROBE}" "${_unideps_probe_content}\n")
+        message(FATAL_ERROR "UniDeps: options written to ${UNIDEPS_NESTED_PROBE}; this configure run only "
+                            "probes them and is expected to stop here")
+    elseif(UNIDEPS_NESTED_TARGETS AND EXISTS "${UNIDEPS_NESTED_TARGETS}")
         message(STATUS "UniDeps: building inside another unideps run, using ${UNIDEPS_NESTED_TARGETS}")
         include("${UNIDEPS_NESTED_TARGETS}")
     else()
@@ -188,23 +221,9 @@ macro(_unideps_setup_build)
         endif()
     endforeach()
 
-    # Options for `enabled_if`: cache BOOL/STRING entries (option(), -D...) and
-    # normal variables holding a boolean constant. Paths and internal entries are skipped
-    # to keep the command line short.
-    get_cmake_property(_unideps_all_vars VARIABLES)
-    foreach(_unideps_var IN LISTS _unideps_all_vars)
-        if(_unideps_var MATCHES "^(CMAKE_|UNIDEPS_|ANDROID_|_)" OR NOT _unideps_var MATCHES "^[A-Za-z0-9_]+$")
-            continue()
-        endif()
-        set(_unideps_val "${${_unideps_var}}")
-        if(_unideps_val STREQUAL "" OR _unideps_val MATCHES "[;\n]")
-            continue()
-        endif()
-        get_property(_unideps_type CACHE "${_unideps_var}" PROPERTY TYPE)
-        if(_unideps_type STREQUAL "BOOL" OR _unideps_type STREQUAL "STRING"
-           OR _unideps_val MATCHES "^([Oo][Nn]|[Oo][Ff][Ff]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|[01])$")
-            list(APPEND _unideps_cmd "--cmake-args=-D${_unideps_var}=${_unideps_val}")
-        endif()
+    _unideps_collect_options()
+    foreach(_unideps_def IN LISTS _unideps_option_defs)
+        list(APPEND _unideps_cmd "--cmake-args=-D${_unideps_def}")
     endforeach()
 
     execute_process(
