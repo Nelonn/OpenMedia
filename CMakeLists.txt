@@ -4,8 +4,8 @@ project(OpenMedia VERSION 0.1.0 LANGUAGES C CXX)
 include(Options.cmake)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
-include(aui.boot.cmake)
+include(cmake/unideps.cmake)
+unideps_setup()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,8 +57,11 @@ target_sources(OpenMedia PRIVATE
         src/util/cpp.hpp
         src/util/demuxer_base.hpp
         src/util/dynamic_loader.hpp
+        src/util/id3_genres.hpp
+        src/util/id3_parser.hpp
         src/util/io_util.cpp
         src/util/io_util.hpp
+        src/util/vorbis_comment.hpp
         src/audio/pcm.cpp
         src/bitstream_filter.hpp
         src/bmff_demuxer.cpp
@@ -146,13 +149,8 @@ elseif (OPENMEDIA_SYSTEM_PROCESSOR MATCHES "(^arm|armv7)")
 endif ()
 
 if (OPENMEDIA_VULKAN_VIDEO)
-    if (AUI_BOOT)
-        auib_import(VulkanHeaders https://github.com/KhronosGroup/Vulkan-Headers
-                VERSION f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8)
-    elseif (NOT TARGET Vulkan::Headers)
-        add_subdirectory(third_party/external/Vulkan-Headers)
-    endif ()
-    target_link_libraries(OpenMedia PRIVATE Vulkan::Headers)
+    #target_link_libraries(OpenMedia PRIVATE Vulkan::Headers)
+    target_link_libraries(OpenMedia PRIVATE VulkanHeaders::VulkanHeaders)
     target_sources(OpenMedia PRIVATE include/openmedia/hw_vulkan.h)
     target_sources(OpenMedia PRIVATE src/hw_vulkan.cpp)
     target_sources(OpenMedia PRIVATE src/hw_vulkan_priv.hpp)
@@ -168,14 +166,7 @@ if (OPENMEDIA_NVIDIA)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_NVIDIA)
 endif ()
 
-if (OPENMEDIA_PNG OR OPENMEDIA_MATROSKA)
-    if (AUI_BOOT)
-        auib_import(ZLIB https://github.com/Nelonn/zlib-ng
-                VERSION 788c485d828c017b884946470bff1cc4373cc056)
-    elseif (NOT TARGET ZLIB::ZLIB)
-        add_subdirectory(third_party/external/zlib-ng)
-    endif ()
-endif ()
+
 
 if (WIN32)
     target_sources(OpenMedia PRIVATE src/audio/wmf_audio.cpp)
@@ -250,8 +241,14 @@ if (OPENMEDIA_VAAPI)
     target_sources(OpenMedia PRIVATE src/hw_vaapi.cpp)
     target_sources(OpenMedia PRIVATE src/hw_vaapi_priv.hpp)
     target_sources(OpenMedia PRIVATE src/video/vaapi_loader.cpp src/video/vaapi_loader.hpp)
-    target_sources(OpenMedia PRIVATE src/video/vaapi.cpp)
-    target_include_directories(OpenMedia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h265bitstream)
+    target_sources(OpenMedia PRIVATE
+            src/video/vaapi.cpp
+            src/video/vaapi_codecs.hpp
+            src/video/vaapi_common.hpp
+            src/video/vaapi_decoder.cpp
+            src/video/vaapi_encoder.cpp
+            src/video/h264_dpb.hpp
+            src/video/vp9_quant.hpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VAAPI)
 endif ()
 
@@ -281,132 +278,55 @@ if (ANDROID)
 endif ()
 
 if (OPENMEDIA_MATROSKA)
-    if (AUI_BOOT)
-        auib_import(webm https://github.com/Nelonn/libwebm
-                VERSION 97c21a1c8ff698b417c6eadb378527ae45ca4a3c)
-    elseif (NOT TARGET webm::webm)
-        add_subdirectory(third_party/external/libwebm)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE webm::webm)
     target_sources(OpenMedia PRIVATE src/matroska.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_MATROSKA)
 endif ()
 
 if (OPENMEDIA_FDK_AAC)
-    auib_import(fdk-aac https://github.com/mstorsjo/fdk-aac
-            VERSION 7c83d08002332b2730c845eec3497e6bf585dd28)
     target_link_libraries(OpenMedia PRIVATE FDK-AAC::fdk-aac)
     target_sources(OpenMedia PRIVATE src/audio/fdk_aac.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_FDK_AAC)
 endif ()
 
 if (OPENMEDIA_ALAC AND NOT APPLE)
-    if (AUI_BOOT)
-        auib_import(alac https://github.com/Nelonn/alac
-                VERSION 2068fcd85ab974488d0752fd8da40baf3535e093)
-    elseif (NOT TARGET alac::alac)
-        add_subdirectory(third_party/external/alac)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE alac::alac)
     target_sources(OpenMedia PRIVATE src/audio/alac.cpp)
 endif ()
 
 if (OPENMEDIA_OGG)
-    if (AUI_BOOT)
-        auib_import(Ogg https://github.com/xiph/ogg VERSION v1.3.6)
-    elseif (NOT TARGET Ogg::ogg)
-        add_subdirectory(third_party/external/ogg)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE Ogg::ogg)
     target_sources(OpenMedia PRIVATE src/audio/ogg.cpp)
 endif ()
 
 if (OPENMEDIA_EXR)
-    if (AUI_BOOT)
-        auib_import(OpenEXR https://github.com/AcademySoftwareFoundation/openexr
-                VERSION v3.4.4)
-    elseif (NOT TARGET OpenEXR::OpenEXR)
-        add_subdirectory(third_party/external/Imath)
-        set(OPENEXR_FORCE_INTERNAL_IMATH ON)
-        add_subdirectory(third_party/external/openexr)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE OpenEXR::OpenEXR)
 endif ()
 
 if (OPENMEDIA_FLAC)
-    if (AUI_BOOT)
-        auib_import(FLAC https://github.com/Nelonn/flac
-                VERSION 9b5fa29ba7532581e4b77a7ff00b59089d82ff91
-                CMAKE_ARGS -DBUILD_CXXLIBS=OFF -DBUILD_PROGRAMS=OFF -DBUILD_TESTING=OFF -DBUILD_DOCS=OFF -DINSTALL_MANPAGES=OFF)
-    elseif (NOT TARGET FLAC::FLAC)
-        set(BUILD_CXXLIBS OFF)
-        set(BUILD_PROGRAMS OFF)
-        set(BUILD_EXAMPLES OFF)
-        set(BUILD_TESTING OFF)
-        set(BUILD_DOCS OFF)
-        set(INSTALL_MANPAGES OFF)
-        set(INSTALL_PKGCONFIG_MODULES OFF)
-        set(INSTALL_CMAKE_CONFIG_MODULE OFF)
-        add_subdirectory(third_party/external/flac)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE FLAC::FLAC)
     target_sources(OpenMedia PRIVATE src/audio/flac_codec.cpp)
     target_sources(OpenMedia PRIVATE src/audio/flac_format.cpp)
 endif ()
 
 if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")) # TODO: fix opus
-    if (AUI_BOOT)
-        auib_import(Opus https://github.com/aui-framework/opus
-                VERSION 9f719ec0eec5bbe3b8b9a86145e71bac6f45457c)
-    elseif (NOT TARGET Opus::opus)
-        add_subdirectory(third_party/external/opus)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE Opus::opus)
     target_sources(OpenMedia PRIVATE src/audio/opus.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPUS)
 endif ()
 
 if (OPENMEDIA_VORBIS)
-    if (AUI_BOOT)
-        auib_import(Vorbis https://github.com/Nelonn/vorbis
-                VERSION 4ab2df62b9a755210a2ff561cbc143b72bcee3ec)
-    elseif (NOT TARGET Vorbis::vorbis)
-        add_subdirectory(third_party/external/vorbis)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE Vorbis::vorbis Vorbis::vorbisenc Vorbis::vorbisfile)
     target_sources(OpenMedia PRIVATE src/audio/vorbis.cpp)
 endif ()
 
 if (OPENMEDIA_WEBP)
-    if (AUI_BOOT)
-        set(WEBP_COMPONENTS_TO_DISABLE ANIM_UTILS CWEBP DWEBP GIF2WEBP IMG2WEBP VWEBP WEBPINFO LIBWEBPMUX WEBPMUX EXTRAS)
-        foreach(_component ${WEBP_COMPONENTS_TO_DISABLE})
-            list(APPEND WEBP_CMAKE_ARGS "-DWEBP_BUILD_${_component}=OFF")
-        endforeach()
-        auib_import(WebP https://github.com/webmproject/libwebp VERSION v1.6.0 CMAKE_ARGS ${WEBP_CMAKE_ARGS})
-        target_link_libraries(OpenMedia PRIVATE WebP::webpdemux WebP::webpdecoder)
-    elseif (NOT TARGET WebP::webp)
-        set(WEBP_BUILD_ANIM_UTILS OFF)
-        set(WEBP_BUILD_CWEBP OFF)
-        set(WEBP_BUILD_DWEBP OFF)
-        set(WEBP_BUILD_GIF2WEBP OFF)
-        set(WEBP_BUILD_IMG2WEBP OFF)
-        set(WEBP_BUILD_VWEBP OFF)
-        set(WEBP_BUILD_WEBPINFO OFF)
-        set(WEBP_BUILD_WEBPMUX OFF)
-        set(WEBP_BUILD_EXTRAS OFF)
-        add_subdirectory(third_party/external/libwebp)
-        target_link_libraries(OpenMedia PRIVATE webpdemux webpdecoder)
-    endif ()
+    target_link_libraries(OpenMedia PRIVATE WebP::webpdemux WebP::webpdecoder)
     target_sources(OpenMedia PRIVATE src/image/webp_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/webp_decoder.cpp)
 endif ()
 
 if (OPENMEDIA_JPEG)
-    auib_import(libjpeg-turbo
-            https://github.com/libjpeg-turbo/libjpeg-turbo
-            VERSION 3.2.0
-            CMAKE_ARGS -DCMAKE_INSTALL_DEFAULT_LIBDIR=lib -DWITH_TOOLS=OFF)
     target_link_libraries(OpenMedia PRIVATE libjpeg-turbo::jpeg-static)
     target_sources(OpenMedia PRIVATE src/image/jpeg_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/jpeg_decoder.cpp)
@@ -430,36 +350,18 @@ if (OPENMEDIA_HDR)
 endif ()
 
 if (OPENMEDIA_GIF)
-    if (AUI_BOOT)
-        auib_import(giflib https://github.com/Nelonn/giflib
-                VERSION 47133bd4234655ce377ee6a41500adc9bbf28f99)
-    elseif (NOT TARGET giflib::giflib)
-        add_subdirectory(third_party/external/giflib)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE giflib::giflib)
     target_sources(OpenMedia PRIVATE src/image/gif_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/gif_decoder.cpp)
 endif ()
 
 if (OPENMEDIA_PNG)
-    if (AUI_BOOT)
-        auib_import(PNG https://github.com/Nelonn/libpng
-                VERSION dd47360484d97fd1e4925eddc8102f084f5c2ce9)
-    elseif (NOT TARGET PNG::png)
-        add_subdirectory(third_party/external/libpng)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE PNG::png)
     target_sources(OpenMedia PRIVATE src/image/png_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/png_decoder.cpp)
 endif ()
 
 if (OPENMEDIA_TGA)
-    if (AUI_BOOT)
-        auib_import(tga https://github.com/Nelonn/tga
-                VERSION 8e547e4f942c2167e292aca76591bda11b76b84f)
-    elseif (NOT TARGET tga::tga)
-        add_subdirectory(third_party/external/tga)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE tga::tga)
     target_sources(OpenMedia PRIVATE src/image/tga_demuxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/tga_decoder.cpp)
@@ -479,33 +381,12 @@ if (OPENMEDIA_MP3 AND APPLE)
 endif ()
 
 if (OPENMEDIA_DAV1D)
-    if (AUI_BOOT)
-        auib_import(dav1d https://github.com/Nelonn/dav1d
-                VERSION 2ec676cc7e9f4c25d1831ca5fb6fb5455b3d055c)
-    elseif (NOT TARGET dav1d::dav1d)
-        add_subdirectory(third_party/external/dav1d)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE dav1d::dav1d)
     target_sources(OpenMedia PRIVATE src/video/dav1d.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_DAV1D)
 endif ()
 
-#if (OPENMEDIA_AVIF)
-#    if (AUI_BOOT)
-#        auib_import(libavif https://github.com/aomediacodec/libavif
-#                VERSION 253f0d0f04e771dd94b37682a211b10a9cfe702e
-#                CMAKE_ARGS -DAVIF_LIBYUV=LOCAL -DAVIF_CODEC_DAV1D_ENABLED=ON)
-#    endif ()
-#    target_link_libraries(OpenMedia PRIVATE avif)
-#endif ()
-
 if (OPENMEDIA_VPX)
-    if (AUI_BOOT)
-        auib_import(vpx https://github.com/Nelonn/libvpx-cmake
-                VERSION 2216dd6647a283b794543a8257009c1ba712ef65)
-    elseif (NOT TARGET vpx::vpx)
-        add_subdirectory(third_party/external/vpx)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE vpx::vpx)
     target_sources(OpenMedia PRIVATE src/video/vpx.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VPX)
@@ -532,43 +413,18 @@ if (OPENMEDIA_VVDEC)
 endif ()
 
 if (OPENMEDIA_XEVD)
-    if (AUI_BOOT)
-        auib_import(xevd https://github.com/Nelonn/xevd
-                VERSION d3ef577f51e489260a94bc0abd330674d62f7885
-                CMAKE_ARGS -DXEVD_INSTALL=ON)
-    elseif (NOT TARGET XEVD::xevd)
-        add_subdirectory(third_party/external/xevd)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE XEVD::xevd)
     target_sources(OpenMedia PRIVATE src/video/xevd.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVD)
 endif ()
 
 if (OPENMEDIA_XEVE)
-    if (AUI_BOOT)
-        auib_import(xeve https://github.com/Nelonn/xeve
-                VERSION 865dce7ea5104ab2770980713d74e7cc96bc98a8
-                CMAKE_ARGS -DXEVD_INSTALL=ON)
-    elseif (NOT TARGET XEVE::xeve)
-        add_subdirectory(third_party/external/xeve)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE XEVE::xeve)
     target_sources(OpenMedia PRIVATE src/video/xeve.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_XEVE)
 endif ()
 
 if (OPENMEDIA_TIFF OR OPENMEDIA_DNG)
-    if (AUI_BOOT)
-        auib_import(TIFF https://github.com/libsdl-org/libtiff
-                VERSION f324415f50cb5c90f7712e9dfe69831f5d2ea88d
-                CMAKE_ARGS -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF -Dtiff-install=ON)
-    elseif (NOT TARGET TIFF::tiff)
-        set(tiff-tools OFF)
-        set(tiff-tests OFF)
-        set(tiff-contrib OFF)
-        set(tiff-docs OFF)
-        add_subdirectory(third_party/external/libtiff)
-    endif ()
     target_link_libraries(OpenMedia PRIVATE TIFF::tiff)
     if (OPENMEDIA_TIFF)
         target_sources(OpenMedia PRIVATE src/image/tiff_demuxer.cpp)
@@ -603,11 +459,5 @@ if (OPENMEDIA_INSTALL)
 endif ()
 
 if (OPENMEDIA_EXAMPLES)
-    if (AUI_BOOT)
-        auib_import(SDL3 https://github.com/libsdl-org/SDL
-                VERSION c20a058ff431d046c5806bd22aba0835b25d9904)
-    elseif (NOT TARGET SDL3::SDL3)
-        add_subdirectory(third_party/external/SDL)
-    endif ()
     add_subdirectory(example)
 endif ()

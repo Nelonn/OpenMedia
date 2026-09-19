@@ -1,0 +1,162 @@
+[package]
+name = "OpenMedia"
+version = "0.1.0"
+
+[dependencies.vulkanheaders]
+git = "https://github.com/KhronosGroup/Vulkan-Headers"
+commit = "f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8"
+strategy = "cmake-install"
+import_name = "VulkanHeaders"
+enabled_if = "OPENMEDIA_VULKAN_VIDEO"
+header_only = true
+
+[dependencies.zlib]
+git = "https://github.com/Nelonn/zlib-ng"
+commit = "788c485d828c017b884946470bff1cc4373cc056"
+strategy = "cmake-install"
+import_name = "ZLIB"
+enabled_if = "OPENMEDIA_PNG || OPENMEDIA_MATROSKA"
+
+[dependencies.webm]
+git = "https://github.com/Nelonn/libwebm"
+commit = "97c21a1c8ff698b417c6eadb378527ae45ca4a3c"
+strategy = "cmake-install"
+enabled_if = "OPENMEDIA_MATROSKA"
+
+[dependencies.fdk-aac]
+git = "https://github.com/mstorsjo/fdk-aac"
+commit = "7c83d08002332b2730c845eec3497e6bf585dd28"
+strategy = "cmake-install"
+import_name = "FDK-AAC"
+enabled_if = "OPENMEDIA_FDK_AAC"
+
+[dependencies.alac]
+git = "https://github.com/Nelonn/alac"
+commit = "2068fcd85ab974488d0752fd8da40baf3535e093"
+strategy = "cmake-install"
+platforms = ["!macos", "!ios"]
+enabled_if = "OPENMEDIA_ALAC"
+
+[dependencies.ogg]
+git = "https://github.com/xiph/ogg"
+tag = "v1.3.6"
+strategy = "cmake-install"
+import_name = "Ogg"
+enabled_if = "OPENMEDIA_OGG"
+
+[dependencies.openexr]
+git = "https://github.com/AcademySoftwareFoundation/openexr"
+tag = "v3.4.4"
+strategy = "cmake-install"
+import_name = "OpenEXR"
+enabled_if = "OPENMEDIA_EXR"
+
+[dependencies.flac]
+git = "https://github.com/Nelonn/flac"
+commit = "9b5fa29ba7532581e4b77a7ff00b59089d82ff91"
+strategy = "cmake-install"
+import_name = "FLAC"
+cmake_options = { BUILD_CXXLIBS = "OFF", BUILD_PROGRAMS = "OFF", BUILD_TESTING = "OFF", BUILD_DOCS = "OFF", INSTALL_MANPAGES = "OFF" }
+enabled_if = "OPENMEDIA_FLAC"
+dependencies = ["ogg"]
+
+[dependencies.opus]
+git = "https://github.com/aui-framework/opus"
+commit = "9f719ec0eec5bbe3b8b9a86145e71bac6f45457c"
+strategy = "cmake-install"
+import_name = "Opus"
+enabled_if = "OPENMEDIA_OPUS"
+
+[dependencies.vorbis]
+git = "https://github.com/Nelonn/vorbis"
+commit = "4ab2df62b9a755210a2ff561cbc143b72bcee3ec"
+strategy = "cmake-install"
+import_name = "Vorbis"
+enabled_if = "OPENMEDIA_VORBIS"
+dependencies = ["ogg"]
+
+[dependencies.webp]
+git = "https://github.com/webmproject/libwebp"
+tag = "v1.6.0"
+strategy = "cmake-install"
+import_name = "WebP"
+cmake_options = { WEBP_BUILD_ANIM_UTILS = "OFF", WEBP_BUILD_CWEBP = "OFF", WEBP_BUILD_DWEBP = "OFF", WEBP_BUILD_GIF2WEBP = "OFF", WEBP_BUILD_IMG2WEBP = "OFF", WEBP_BUILD_VWEBP = "OFF", WEBP_BUILD_WEBPINFO = "OFF", WEBP_BUILD_WEBPMUX = "OFF", WEBP_BUILD_EXTRAS = "OFF" }
+enabled_if = "OPENMEDIA_WEBP"
+
+[dependencies.libjpeg-turbo]
+git = "https://github.com/libjpeg-turbo/libjpeg-turbo"
+tag = "3.2.0"
+strategy = "cmake-install"
+cmake_options = { CMAKE_INSTALL_DEFAULT_LIBDIR = "lib", WITH_TOOLS = "OFF" }
+enabled_if = "OPENMEDIA_JPEG"
+
+[dependencies.giflib]
+git = "https://github.com/Nelonn/giflib"
+commit = "47133bd4234655ce377ee6a41500adc9bbf28f99"
+strategy = "cmake-install"
+enabled_if = "OPENMEDIA_GIF"
+
+[dependencies.png]
+git = "https://github.com/Nelonn/libpng"
+commit = "dd47360484d97fd1e4925eddc8102f084f5c2ce9"
+strategy = "cmake-install"
+import_name = "PNG"
+enabled_if = "OPENMEDIA_PNG"
+dependencies = ["zlib"]
+
+[dependencies.tga]
+git = "https://github.com/Nelonn/tga"
+commit = "8e547e4f942c2167e292aca76591bda11b76b84f"
+strategy = "cmake-install"
+enabled_if = "OPENMEDIA_TGA"
+
+[dependencies.dav1d]
+git = "https://github.com/Nelonn/dav1d"
+commit = "2ec676cc7e9f4c25d1831ca5fb6fb5455b3d055c"
+strategy = "cmake-install"
+enabled_if = "OPENMEDIA_DAV1D"
+
+[dependencies.vpx]
+git = "https://github.com/Nelonn/libvpx-cmake"
+commit = "2216dd6647a283b794543a8257009c1ba712ef65"
+strategy = "cmake-install"
+enabled_if = "OPENMEDIA_VPX"
+
+[dependencies.xevd]
+git = "https://github.com/Nelonn/xevd"
+commit = "d3ef577f51e489260a94bc0abd330674d62f7885"
+strategy = "cmake-install"
+import_name = "XEVD"
+cmake_options = { XEVD_INSTALL = "ON" }
+enabled_if = "OPENMEDIA_XEVD"
+
+[dependencies.xeve]
+git = "https://github.com/Nelonn/xeve"
+commit = "865dce7ea5104ab2770980713d74e7cc96bc98a8"
+strategy = "cmake-install"
+import_name = "XEVE"
+cmake_options = { XEVD_INSTALL = "ON" }
+enabled_if = "OPENMEDIA_XEVE"
+
+[dependencies.tiff]
+git = "https://github.com/libsdl-org/libtiff"
+commit = "f324415f50cb5c90f7712e9dfe69831f5d2ea88d"
+strategy = "cmake-install"
+import_name = "TIFF"
+cmake_options = { tiff-tools = "OFF", tiff-tests = "OFF", tiff-contrib = "OFF", tiff-docs = "OFF", tiff-install = "ON" }
+enabled_if = "OPENMEDIA_TIFF || OPENMEDIA_DNG"
+
+[dependencies.sdl3]
+git = "https://github.com/libsdl-org/SDL"
+commit = "c20a058ff431d046c5806bd22aba0835b25d9904"
+strategy = "cmake-install"
+import_name = "SDL3"
+enabled_if = "OPENMEDIA_EXAMPLES"
+
+[dependencies.libyuv]
+git = "https://chromium.googlesource.com/libyuv/libyuv"
+commit = "2dd4257364d39c38d79465c4ddc4b93137fe729b"
+strategy = "cmake-install"
+auto_import = true
+libraries = "lib/yuv"
+enabled_if = "OPENMEDIA_EXAMPLES"
