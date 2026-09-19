@@ -1,9 +1,12 @@
 #include "avcodec.hpp"
+#include <algorithm>
 #include <cstring>
+#include <string_view>
 #include <memory>
 #include <openmedia/codec_api.hpp>
 #include <openmedia/codec_registry.hpp>
 #include <vector>
+#include <format>
 #include <codecs.hpp>
 
 namespace openmedia {
@@ -372,7 +375,7 @@ private:
           size_t plane_samples = static_cast<size_t>(av_frame->nb_samples) * bytes_per_sample;
           for (int i = 0; i < av_frame->ch_layout.nb_channels && i < 8; ++i) {
             if (av_frame->data[i]) {
-              std::memcpy(dst_ptr + i * plane_samples, av_frame->data[i], plane_samples);
+              memcpy(dst_ptr + i * plane_samples, av_frame->data[i], plane_samples);
               samples.planes.setData(i, dst_ptr + i * plane_samples, static_cast<uint32_t>(plane_samples));
             }
           }
@@ -385,7 +388,7 @@ private:
               uint8_t* src = av_frame->data[0] + i * channel_step;
               uint8_t* dst = dst_ptr + i * frame_samples;
               for (int s = 0; s < av_frame->nb_samples; ++s) {
-                std::memcpy(dst + s * channel_step, src + s * av_frame->ch_layout.nb_channels * channel_step, channel_step);
+                memcpy(dst + s * channel_step, src + s * av_frame->ch_layout.nb_channels * channel_step, channel_step);
               }
               samples.planes.setData(i, dst, static_cast<uint32_t>(frame_samples));
             }
@@ -616,7 +619,7 @@ public:
 
       Packet pkt;
       pkt.allocate(static_cast<size_t>(packet_->size));
-      std::memcpy(pkt.bytes.data(), packet_->data, packet_->size);
+      memcpy(pkt.bytes.data(), packet_->data, packet_->size);
       pkt.pts = packet_->pts;
       pkt.dts = packet_->dts;
       pkt.duration = packet_->duration;
@@ -672,10 +675,36 @@ private:
   bool initialized_ = false;
 };
 
+// Minimal bump allocator for strings. Blocks are never moved or freed until
+// destruction, so returned string_views stay valid forever.
+class StringArena {
+public:
+  auto concat(std::string_view a, std::string_view b = {}) -> std::string_view {
+    const size_t size = a.size() + b.size();
+    if (size > left_) {
+      const size_t block_size = std::max(size, BLOCK_SIZE);
+      blocks_.push_back(std::make_unique_for_overwrite<char[]>(block_size));
+      cur_ = blocks_.back().get();
+      left_ = block_size;
+    }
+    char* out = cur_;
+    memcpy(out, a.data(), a.size());
+    memcpy(out + a.size(), b.data(), b.size());
+    cur_ += size;
+    left_ -= size;
+    return {out, size};
+  }
+
+private:
+  static constexpr size_t BLOCK_SIZE = 4096;
+  std::vector<std::unique_ptr<char[]>> blocks_;
+  char* cur_ = nullptr;
+  size_t left_ = 0;
+};
+
 struct DynamicFFmpegDescriptors {
   std::vector<std::unique_ptr<CodecDescriptor>> descriptors;
-  std::vector<std::string> names;
-  std::vector<std::string> long_names;
+  StringArena strings;
 };
 
 static DynamicFFmpegDescriptors FFMPEG_DESCRIPTORS;
@@ -704,16 +733,9 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
     
     if (desc->type == OM_MEDIA_NONE) continue;
 
-    std::string name = "ffmpeg_";
-    name += codec->name;
-    FFMPEG_DESCRIPTORS.names.push_back(std::move(name));
-    desc->name = FFMPEG_DESCRIPTORS.names.back();
-
+    desc->name = FFMPEG_DESCRIPTORS.strings.concat("ffmpeg_", codec->name);
     if (codec->long_name) {
-      std::string long_name = codec->long_name;
-      long_name += " (FFmpeg)";
-      FFMPEG_DESCRIPTORS.long_names.push_back(std::move(long_name));
-      desc->long_name = FFMPEG_DESCRIPTORS.long_names.back();
+      desc->long_name = FFMPEG_DESCRIPTORS.strings.concat(codec->long_name, " (FFmpeg)");
     }
 
     desc->vendor = "FFmpeg";
