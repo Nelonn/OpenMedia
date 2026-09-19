@@ -227,14 +227,18 @@ static auto eac3DependentChannels(uint32_t chan_loc) -> uint32_t {
   return extra;
 }
 
+static auto dtsProfile(uint32_t fmt) -> std::optional<OMProfile> {
+  switch (fmt) {
+    case ATOM('d', 't', 's', 'c'): return OM_PROFILE_DTS;
+    case ATOM('d', 't', 's', 'h'): return OM_PROFILE_DTS_HD_HRA;
+    case ATOM('d', 't', 's', 'l'): return OM_PROFILE_DTS_HD_MA;
+    case ATOM('d', 't', 's', 'e'): return OM_PROFILE_DTS_EXPRESS;
+    default: return std::nullopt;
+  }
+}
+
 static auto isDtsVariant(uint32_t fmt) -> bool {
-  static constexpr uint32_t TABLE[] = {
-      ATOM('d', 't', 's', 'c'), // core
-      ATOM('d', 't', 's', 'e'), // LBR extension only
-      ATOM('d', 't', 's', 'h'), // core + extension (HD)
-      ATOM('d', 't', 's', 'l'), // lossless extension only
-  };
-  return containsAtom(TABLE, fmt);
+  return dtsProfile(fmt).has_value();
 }
 
 // --- Descriptive metadata (iTunes-style `ilst`, and QuickTime `udta`) -------
@@ -2394,8 +2398,9 @@ private:
       // so the track is identified but not further described here.
       return audio(OM_CODEC_AC4, SampleEntryKind::OtherAudio, true);
     }
-    if (isDtsVariant(fmt)) {
-      return audio(OM_CODEC_DTS, SampleEntryKind::OtherAudio, true);
+    if (const auto profile = dtsProfile(fmt)) {
+      st.format.profile = *profile;
+      return audio(OM_CODEC_DCA, SampleEntryKind::OtherAudio, true);
     }
     if (isPcmVariant(fmt)) return parsePcmSampleEntry(fmt, entry_pos, entry_end, st);
 

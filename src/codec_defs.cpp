@@ -41,7 +41,7 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_ALAC: return {"ALAC", "Apple Lossless Audio Codec", OM_MEDIA_AUDIO};
     case OM_CODEC_APE: return {"APE", "Monkey's Audio", OM_MEDIA_AUDIO};
     case OM_CODEC_WMA: return {"WMA", "Windows Media Audio", OM_MEDIA_AUDIO};
-    case OM_CODEC_DTS: return {"DTS", "DTS Coherent Acoustics", OM_MEDIA_AUDIO};
+    case OM_CODEC_DCA: return {"DCA", "DTS Coherent Acoustics", OM_MEDIA_AUDIO};
     case OM_CODEC_AC3: return {"AC-3", "Dolby Digital", OM_MEDIA_AUDIO};
     case OM_CODEC_EAC3:
       return {"E-AC-3", "Dolby Digital Plus", OM_MEDIA_AUDIO};
@@ -162,6 +162,18 @@ auto profileToString(OMCodecId codec, OMProfile profile) -> std::string_view {
         case OM_PROFILE_AAC_USAC: return "xHE-AAC (USAC)";
         case OM_PROFILE_MPEG2_AAC_LOW: return "MPEG-2 LC";
         case OM_PROFILE_MPEG2_AAC_HE: return "MPEG-2 HE-AAC";
+        default: break;
+      }
+      break;
+
+    case OM_CODEC_DTS:
+      switch (profile) {
+        case OM_PROFILE_DTS: return "DTS";
+        case OM_PROFILE_DTS_ES: return "DTS-ES";
+        case OM_PROFILE_DTS_96_24: return "DTS 96/24";
+        case OM_PROFILE_DTS_HD_HRA: return "DTS-HD HRA";
+        case OM_PROFILE_DTS_HD_MA: return "DTS-HD MA";
+        case OM_PROFILE_DTS_EXPRESS: return "DTS Express";
         default: break;
       }
       break;
