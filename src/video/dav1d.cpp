@@ -62,50 +62,143 @@ class Dav1dDecoder final : public Decoder {
     return 0;
   }
 
+  // The layout and depth dav1d decoded to, as a pixel format. Past eight bits every sample takes two
+  // bytes, the significant bits at the bottom.
+  static auto toPixelFormat(Dav1dPixelLayout layout, int bpc) -> OMPixelFormat {
+    const bool deep = bpc > 8;
+    switch (layout) {
+      case DAV1D_PIXEL_LAYOUT_I400: return deep ? OM_FORMAT_GRAY16 : OM_FORMAT_GRAY8;
+      case DAV1D_PIXEL_LAYOUT_I420:
+        return !deep ? OM_FORMAT_YUV420P : bpc <= 10 ? OM_FORMAT_YUV420P10 : OM_FORMAT_YUV420P12;
+      case DAV1D_PIXEL_LAYOUT_I422:
+        return !deep ? OM_FORMAT_YUV422P : bpc <= 10 ? OM_FORMAT_YUV422P10 : OM_FORMAT_YUV422P12;
+      case DAV1D_PIXEL_LAYOUT_I444:
+        return !deep ? OM_FORMAT_YUV444P : bpc <= 10 ? OM_FORMAT_YUV444P10 : OM_FORMAT_YUV444P12;
+    }
+    return OM_FORMAT_UNKNOWN;
+  }
+
+  static auto toColorSpace(Dav1dMatrixCoefficients matrix) -> OMColorSpace {
+    switch (matrix) {
+      case DAV1D_MC_BT709: return OM_COLOR_SPACE_BT709;
+      case DAV1D_MC_FCC: return OM_COLOR_SPACE_FCC;
+      case DAV1D_MC_BT470BG:
+      case DAV1D_MC_BT601: return OM_COLOR_SPACE_BT601;
+      case DAV1D_MC_SMPTE240: return OM_COLOR_SPACE_SMPTE240M;
+      case DAV1D_MC_SMPTE_YCGCO: return OM_COLOR_SPACE_YCGCO;
+      case DAV1D_MC_BT2020_NCL: return OM_COLOR_SPACE_BT2020;
+      case DAV1D_MC_BT2020_CL: return OM_COLOR_SPACE_BT2020_CL;
+      case DAV1D_MC_CHROMAT_NCL: return OM_COLOR_SPACE_CHROMA_DERIVED_NCL;
+      case DAV1D_MC_CHROMAT_CL: return OM_COLOR_SPACE_CHROMA_DERIVED_CL;
+      case DAV1D_MC_ICTCP: return OM_COLOR_SPACE_ICTCP;
+      case DAV1D_MC_IDENTITY: return OM_COLOR_SPACE_RGB;
+      default: break;
+    }
+    return OM_COLOR_SPACE_UNKNOWN;
+  }
+
+  static auto toTransfer(Dav1dTransferCharacteristics transfer) -> OMTransferCharacteristic {
+    switch (transfer) {
+      case DAV1D_TRC_BT709: return OM_TRANSFER_BT709;
+      case DAV1D_TRC_BT470M: return OM_TRANSFER_GAMMA22;
+      case DAV1D_TRC_BT470BG: return OM_TRANSFER_GAMMA28;
+      case DAV1D_TRC_BT601: return OM_TRANSFER_BT601;
+      case DAV1D_TRC_SMPTE240: return OM_TRANSFER_SMPTE240M;
+      case DAV1D_TRC_LINEAR: return OM_TRANSFER_LINEAR;
+      case DAV1D_TRC_LOG100: return OM_TRANSFER_LOG;
+      case DAV1D_TRC_LOG100_SQRT10: return OM_TRANSFER_LOG_SQRT;
+      case DAV1D_TRC_IEC61966: return OM_TRANSFER_IEC61966_2_4;
+      case DAV1D_TRC_BT1361: return OM_TRANSFER_BT1361_ECG;
+      case DAV1D_TRC_SRGB: return OM_TRANSFER_SRGB;
+      case DAV1D_TRC_BT2020_10BIT: return OM_TRANSFER_BT2020_10;
+      case DAV1D_TRC_BT2020_12BIT: return OM_TRANSFER_BT2020_12;
+      case DAV1D_TRC_SMPTE2084: return OM_TRANSFER_SMPTE2084;
+      case DAV1D_TRC_SMPTE428: return OM_TRANSFER_SMPTE428;
+      case DAV1D_TRC_HLG: return OM_TRANSFER_ARIB_STD_B67;
+      default: break;
+    }
+    return OM_TRANSFER_UNKNOWN;
+  }
+
+  // AV1 numbers its primaries the way H.273 does, and so does OMColorPrimaries.
+  static auto toPrimaries(Dav1dColorPrimaries primaries) -> OMColorPrimaries {
+    switch (primaries) {
+      case DAV1D_COLOR_PRI_BT709:
+      case DAV1D_COLOR_PRI_BT470M:
+      case DAV1D_COLOR_PRI_BT470BG:
+      case DAV1D_COLOR_PRI_BT601:
+      case DAV1D_COLOR_PRI_SMPTE240:
+      case DAV1D_COLOR_PRI_FILM:
+      case DAV1D_COLOR_PRI_BT2020:
+      case DAV1D_COLOR_PRI_XYZ:
+      case DAV1D_COLOR_PRI_SMPTE431:
+      case DAV1D_COLOR_PRI_SMPTE432:
+      case DAV1D_COLOR_PRI_EBU3213: return static_cast<OMColorPrimaries>(primaries);
+      default: break;
+    }
+    return OM_PRIMARIES_UNKNOWN;
+  }
+
+  // What the stream says of its colour: the sequence header's description, and the HDR metadata
+  // that came with this picture. AV1 writes the mastering display in fixed point -- chromaticities
+  // in 0.16, luminance in 24.8 and 18.14 -- and OpenMedia in SMPTE ST 2086's units.
+  static void describeColor(const Dav1dPicture& pic, Picture& out) {
+    if (const Dav1dSequenceHeader* seq = pic.seq_hdr) {
+      out.color_space = toColorSpace(seq->mtrx);
+      out.transfer_char = toTransfer(seq->trc);
+      out.color_primaries = toPrimaries(seq->pri);
+      out.color_range = seq->color_range ? OM_COLOR_RANGE_JPEG : OM_COLOR_RANGE_MPEG;
+    }
+    if (const Dav1dMasteringDisplay* md = pic.mastering_display) {
+      for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 2; ++j) {
+          out.mastering_display.display_primaries[i][j] = static_cast<uint16_t>(md->primaries[i][j] * 50000ull / 65536);
+        }
+      }
+      out.mastering_display.white_point[0] = static_cast<uint16_t>(md->white_point[0] * 50000ull / 65536);
+      out.mastering_display.white_point[1] = static_cast<uint16_t>(md->white_point[1] * 50000ull / 65536);
+      out.mastering_display.max_display_mastering_luminance = static_cast<uint32_t>(md->max_luminance * 10000ull / 256);
+      out.mastering_display.min_display_mastering_luminance = static_cast<uint32_t>(md->min_luminance * 10000ull / 16384);
+      out.mastering_display.has_value = true;
+    }
+    if (const Dav1dContentLightLevel* cll = pic.content_light) {
+      out.content_light_level.max_content_light_level = cll->max_content_light_level;
+      out.content_light_level.max_pic_average_light_level = cll->max_frame_average_light_level;
+      out.content_light_level.has_value = true;
+    }
+  }
+
   static auto appendPicture(Dav1dPicture& pic, std::vector<Frame>& frames) -> OMError {
     std::unique_ptr<Dav1dPicture, decltype(&dav1d_picture_unref)> guard(&pic, &dav1d_picture_unref);
 
-    OMPixelFormat pixel_format;
-
-    switch (pic.p.layout) {
-      case DAV1D_PIXEL_LAYOUT_I400:
-        pixel_format = (pic.p.bpc > 8) ? OM_FORMAT_GRAY16 : OM_FORMAT_GRAY8;
-        break;
-      case DAV1D_PIXEL_LAYOUT_I420:
-        pixel_format = OM_FORMAT_YUV420P;
-        break;
-      case DAV1D_PIXEL_LAYOUT_I422:
-        pixel_format = OM_FORMAT_YUV422P;
-        break;
-      case DAV1D_PIXEL_LAYOUT_I444:
-        pixel_format = OM_FORMAT_YUV444P;
-        break;
-      default:
-        pixel_format = OM_FORMAT_UNKNOWN;
-        break;
-    }
-
+    const OMPixelFormat pixel_format = toPixelFormat(pic.p.layout, pic.p.bpc);
     if (pixel_format == OM_FORMAT_UNKNOWN) {
       return OM_CODEC_DECODE_FAILED;
     }
 
     Picture out_pic(pixel_format, pic.p.w, pic.p.h);
+    describeColor(pic, out_pic);
 
-    copyPlane(out_pic.planes.data[0], static_cast<const uint8_t*>(pic.data[0]),
-              pic.p.w, pic.p.h, pic.stride[0]);
+    // Rows are copied by what they hold in bytes -- two a sample past eight bits -- from dav1d's
+    // stride into the picture's own. Chroma planes round up: an odd width or height still has a
+    // chroma sample for its last column or row.
+    const uint32_t bytes_per_sample = pic.p.bpc > 8 ? 2 : 1;
+    const uint32_t luma_w = static_cast<uint32_t>(pic.p.w);
+    const uint32_t luma_h = static_cast<uint32_t>(pic.p.h);
+    copyPlane(out_pic.planes.data[0], out_pic.planes.linesize[0], static_cast<const uint8_t*>(pic.data[0]),
+              pic.stride[0], luma_w * bytes_per_sample, luma_h);
 
     if (pic.p.layout != DAV1D_PIXEL_LAYOUT_I400) {
-      int chroma_w = (pic.p.layout == DAV1D_PIXEL_LAYOUT_I420 || pic.p.layout == DAV1D_PIXEL_LAYOUT_I422)
-                         ? pic.p.w / 2
-                         : pic.p.w;
-      int chroma_h = (pic.p.layout == DAV1D_PIXEL_LAYOUT_I420)
-                         ? pic.p.h / 2
-                         : pic.p.h;
+      const bool half_width = pic.p.layout == DAV1D_PIXEL_LAYOUT_I420 || pic.p.layout == DAV1D_PIXEL_LAYOUT_I422;
+      const bool half_height = pic.p.layout == DAV1D_PIXEL_LAYOUT_I420;
+      const uint32_t chroma_w = half_width ? (luma_w + 1) / 2 : luma_w;
+      const uint32_t chroma_h = half_height ? (luma_h + 1) / 2 : luma_h;
 
-      copyPlane(out_pic.planes.data[1], static_cast<const uint8_t*>(pic.data[1]),
-                chroma_w, chroma_h, pic.stride[1]);
-      copyPlane(out_pic.planes.data[2], static_cast<const uint8_t*>(pic.data[2]),
-                chroma_w, chroma_h, pic.stride[1]);
+      // dav1d gives both chroma planes one stride.
+      copyPlane(out_pic.planes.data[1], out_pic.planes.linesize[1], static_cast<const uint8_t*>(pic.data[1]),
+                pic.stride[1], chroma_w * bytes_per_sample, chroma_h);
+      copyPlane(out_pic.planes.data[2], out_pic.planes.linesize[2], static_cast<const uint8_t*>(pic.data[2]),
+                pic.stride[1], chroma_w * bytes_per_sample, chroma_h);
     }
 
     Frame frame = {};
