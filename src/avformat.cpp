@@ -214,6 +214,8 @@ public:
       return Err(OM_COMMON_NOT_INITIALIZED);
     }
 
+    std::lock_guard<std::mutex> lock(seek_mutex_);
+
     auto& format_loader = LibAVFormat::getInstance();
     auto& codec_loader = LibAVCodec::getInstance();
 
@@ -230,8 +232,9 @@ public:
     Packet om_packet;
     om_packet.allocate(static_cast<size_t>(packet_->size));
     std::memcpy(om_packet.bytes.data(), packet_->data, packet_->size);
-    om_packet.pts = packet_->pts;
-    om_packet.dts = packet_->dts;
+    // Our "no timestamp" sentinel is -1, FFmpeg's is AV_NOPTS_VALUE (INT64_MIN)
+    om_packet.pts = packet_->pts == AV_NOPTS_VALUE ? -1 : packet_->pts;
+    om_packet.dts = packet_->dts == AV_NOPTS_VALUE ? -1 : packet_->dts;
     om_packet.stream_index = packet_->stream_index;
     om_packet.flags = packet_->flags;
     om_packet.duration = packet_->duration;
@@ -250,7 +253,30 @@ public:
 
     auto& format_loader = LibAVFormat::getInstance();
 
-    int ret = format_loader.av_seek_frame(fmt_ctx_.get(), stream_idx, timestamp, mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY : AVSEEK_FLAG_BACKWARD);
+    if (stream_idx >= static_cast<int32_t>(fmt_ctx_->nb_streams)) {
+      return OM_FORMAT_STREAM_NOT_FOUND;
+    }
+    // stream_idx < 0: timestamp is in microseconds == AV_TIME_BASE units
+    if (stream_idx < 0) stream_idx = -1;
+
+    int ret;
+    if (format_loader.avformat_seek_file) {
+      int64_t min_ts = INT64_MIN;
+      int64_t max_ts = INT64_MAX;
+      int flags = 0;
+      switch (mode) {
+        case SeekMode::PREVIOUS_SYNC: max_ts = timestamp; break;
+        case SeekMode::NEXT_SYNC: min_ts = timestamp; break;
+        case SeekMode::CLOSEST_SYNC: break;
+        case SeekMode::DONT_SYNC: flags = AVSEEK_FLAG_ANY; break;
+      }
+      ret = format_loader.avformat_seek_file(fmt_ctx_.get(), stream_idx, min_ts, timestamp, max_ts, flags);
+    } else {
+      int flags = mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY
+                  : mode == SeekMode::PREVIOUS_SYNC ? AVSEEK_FLAG_BACKWARD
+                  : 0;
+      ret = format_loader.av_seek_frame(fmt_ctx_.get(), stream_idx, timestamp, flags);
+    }
     if (ret < 0) {
       return avErrorToOmError(ret);
     }
@@ -294,7 +320,8 @@ private:
         track.format.level = stream->codecpar->level;
       }
       track.time_base = {stream->time_base.num, stream->time_base.den};
-      track.duration = stream->duration;
+      track.duration = streamDuration(stream);
+      track.start_time = stream->start_time == AV_NOPTS_VALUE ? -1 : stream->start_time;
       track.bitrate = static_cast<uint32_t>(stream->codecpar->bit_rate);
 
       if (track.format.type == OM_MEDIA_VIDEO || track.format.type == OM_MEDIA_IMAGE) {
@@ -314,6 +341,21 @@ private:
 
       tracks_.push_back(std::move(track));
     }
+  }
+
+  // Many containers (Matroska, WebM, raw streams) only know the total duration
+  // in AV_TIME_BASE, leaving AVStream::duration as AV_NOPTS_VALUE.
+  auto streamDuration(const AVStream* stream) const -> int64_t {
+    if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
+      return stream->duration;
+    }
+    const int64_t total = fmt_ctx_->duration;
+    if (total == AV_NOPTS_VALUE || total <= 0 || stream->time_base.num <= 0) {
+      return -1;
+    }
+    const long double scaled = static_cast<long double>(total) * stream->time_base.den /
+                               (static_cast<long double>(stream->time_base.num) * AV_TIME_BASE);
+    return static_cast<int64_t>(scaled + 0.5L);
   }
 
   void close() override {
@@ -584,8 +626,8 @@ public:
     }
 
     std::memcpy(packet_->data, packet.bytes.data(), packet.bytes.size());
-    packet_->pts = packet.pts;
-    packet_->dts = packet.dts;
+    packet_->pts = packet.pts == -1 ? AV_NOPTS_VALUE : packet.pts;
+    packet_->dts = packet.dts == -1 ? AV_NOPTS_VALUE : packet.dts;
     packet_->stream_index = packet.stream_index;
     packet_->duration = packet.duration;
     packet_->pos = packet.pos;
