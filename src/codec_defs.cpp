@@ -41,7 +41,7 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_ALAC: return {"ALAC", "Apple Lossless Audio Codec", OM_MEDIA_AUDIO};
     case OM_CODEC_APE: return {"APE", "Monkey's Audio", OM_MEDIA_AUDIO};
     case OM_CODEC_WMA: return {"WMA", "Windows Media Audio", OM_MEDIA_AUDIO};
-    case OM_CODEC_DCA: return {"DCA", "DTS Coherent Acoustics", OM_MEDIA_AUDIO};
+    case OM_CODEC_DTS: return {"DCA", "DTS Coherent Acoustics", OM_MEDIA_AUDIO};
     case OM_CODEC_AC3: return {"AC-3", "Dolby Digital", OM_MEDIA_AUDIO};
     case OM_CODEC_EAC3:
       return {"E-AC-3", "Dolby Digital Plus", OM_MEDIA_AUDIO};
