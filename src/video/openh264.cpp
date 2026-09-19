@@ -106,6 +106,17 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
 
+    // OpenH264 decodes 8-bit 4:2:0 only
+    switch (options.format.profile) {
+      case OM_PROFILE_H264_HIGH_10:
+      case OM_PROFILE_H264_HIGH_422:
+      case OM_PROFILE_H264_HIGH_444:
+      case OM_PROFILE_H264_HIGH_444_PREDICTIVE:
+        return OM_CODEC_NOT_SUPPORTED;
+      default:
+        break;
+    }
+
     auto& loader = OpenH264Loader::getInstance();
     if (!loader.load()) {
       return OM_CODEC_OPEN_FAILED;
