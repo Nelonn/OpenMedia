@@ -3,309 +3,135 @@
 #include <SDL3/SDL.h>
 
 #include "media_player.hpp"
-#include <algorithm>
-#include <cstdio>
-#include <string>
 
-// ---------------------------------------------------------------------------
-// PlayerUI
-//
-// Owns all on-screen drawing logic.  main.cpp calls:
-//   ui.handleEvent(event)   – input routing
-//   ui.render(renderer)     – draw everything
-//
-// Deliberately keeps no media state; it only calls into MediaPlayer.
-// ---------------------------------------------------------------------------
+#include <algorithm>
+
+// mpv-style overlay: the picture letterboxed to the window, and a seek bar
+// that fades out when the mouse goes idle. Holds no media state of its own.
 class PlayerUI {
 public:
-  // Geometry constants
-  static constexpr float kBarH = 8.0f;
-  static constexpr float kBarMarginX = 20.0f;
-  static constexpr float kBarBottom = 20.0f;
-  static constexpr float kBarHeight = 60.0f;  // mpv-style bottom bar height
-  static constexpr float kHitExpand = 14.0f;
-  static constexpr float kVolumeStep = 0.05f;
-  static constexpr Uint32 kFadeDelayMs = 1000;  // 1 second idle timeout
+  explicit PlayerUI(MediaPlayer& player) : player_(player) {}
 
-  explicit PlayerUI(MediaPlayer& player)
-      : player_(player) {
-    last_mouse_time_ = SDL_GetTicks();
-  }
-
-  // -----------------------------------------------------------------------
-  // Input
   // Returns false when the application should quit.
-  // -----------------------------------------------------------------------
   auto handleEvent(const SDL_Event& e) -> bool {
     switch (e.type) {
       case SDL_EVENT_QUIT:
         return false;
 
       case SDL_EVENT_DROP_FILE:
-        if (!player_.play(e.drop.data)) {
-          SDL_ShowSimpleMessageBox(
-              SDL_MESSAGEBOX_ERROR,
-              "OpenMedia Player",
-              player_.getLastError().c_str(),
-              nullptr);
-        }
+        if (!player_.play(e.drop.data))
+          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "OpenMedia Player", player_.lastError().c_str(), nullptr);
         break;
 
-      case SDL_EVENT_MOUSE_WHEEL: {
-        const float delta = (e.wheel.y > 0 ? kVolumeStep : -kVolumeStep);
-        player_.setVolume(player_.getVolume() + delta);
+      case SDL_EVENT_MOUSE_WHEEL:
+        player_.setVolume(player_.volume() + (e.wheel.y > 0 ? kVolumeStep : -kVolumeStep));
         break;
-      }
 
       case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        if (e.button.button == SDL_BUTTON_LEFT) {
-          if (isNearBar(e.button.x, e.button.y)) {
-            dragging_ = true;
-            player_.seek(progressFromX(e.button.x));
-          }
+        if (e.button.button == SDL_BUTTON_LEFT && overBar(e.button.x, e.button.y)) {
+          dragging_ = true;
+          player_.seek(progressAt(e.button.x));
         }
         break;
 
       case SDL_EVENT_MOUSE_BUTTON_UP:
         if (e.button.button == SDL_BUTTON_LEFT && dragging_) {
           dragging_ = false;
-          player_.seek(progressFromX(e.button.x));
+          player_.seek(progressAt(e.button.x));
         }
         break;
 
       case SDL_EVENT_MOUSE_MOTION:
-        mouse_x_ = e.motion.x;
-        mouse_y_ = e.motion.y;
-        last_mouse_time_ = SDL_GetTicks();
-        mouse_in_window_ = true;
-        if (dragging_)
-          player_.seek(progressFromX(e.motion.x));
+        mouse_ = {e.motion.x, e.motion.y};
+        last_motion_ = SDL_GetTicks();
+        if (dragging_) player_.seek(progressAt(e.motion.x));
         break;
 
-      case SDL_EVENT_WINDOW_MOUSE_ENTER:
-        mouse_in_window_ = true;
-        last_mouse_time_ = SDL_GetTicks();
+      default:
         break;
-
-      case SDL_EVENT_WINDOW_MOUSE_LEAVE:
-        mouse_in_window_ = false;
-        break;
-
-      default: break;
     }
     return true;
   }
 
-  // -----------------------------------------------------------------------
-  // Render – call after SDL_RenderClear, before SDL_RenderPresent.
-  // -----------------------------------------------------------------------
   void render(SDL_Renderer* r, SDL_Window* window) {
-    int win_w = 800, win_h = 600;
-    SDL_GetRenderOutputSize(r, &win_w, &win_h);
-    updateBarCache(win_w, win_h);
-    updateFadeState();
-    updateWindowAspectRatio(window, win_w, win_h);
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(r, &w, &h);
+    bar_ = {kBarMarginX, h - kBarBottom - kBarH, w - kBarMarginX * 2, kBarH};
 
-    drawMedia(r, win_w, win_h);
-    if (player_.isActive()) {
-      drawBottomBar(r, win_w, win_h);
-    }
+    fitWindowAspect(window);
+    drawPicture(r, w, h);
+    if (player_.isPlaying()) drawBar(r, w, h);
   }
 
 private:
-  // -----------------------------------------------------------------------
-  // Media drawing
-  // -----------------------------------------------------------------------
+  static constexpr float kBarH = 8.0f;
+  static constexpr float kBarMarginX = 20.0f;
+  static constexpr float kBarBottom = 20.0f;
+  static constexpr float kPanelH = 60.0f;
+  static constexpr float kHitSlop = 14.0f;
+  static constexpr float kVolumeStep = 0.05f;
+  static constexpr Uint64 kFadeMs = 1000;
 
-  void drawMedia(SDL_Renderer* r, int win_w, int win_h) const {
-    if (player_.hasVideo()) {
-      SDL_Texture* tex = player_.getVideoTexture();
-      if (!tex) return;
-      auto [vw, vh] = player_.getVideoSize();
-      if (vw == 0 || vh == 0) return;
-
-      // Fill entire window, bar will overlay
-      const float scale = std::min(
-          float(win_w) / float(vw),
-          float(win_h) / float(vh));
-
-      const SDL_FRect dst {
-          float((win_w - int(vw * scale)) / 2),
-          float((win_h - int(vh * scale)) / 2),
-          vw * scale, vh * scale};
-      SDL_RenderTexture(r, tex, nullptr, &dst);
-
-    } else if (player_.hasImage()) {
-      SDL_Texture* tex = player_.getImageTexture();
-      if (!tex) return;
-      auto [iw, ih] = player_.getImageSize();
-      if (iw == 0 || ih == 0) return;
-
-      // Fill entire window, bar will overlay
-      const float scale = std::min(
-          float(win_w) / float(iw),
-          float(win_h) / float(ih));
-
-      const SDL_FRect dst {
-          float((win_w - int(iw * scale)) / 2),
-          float((win_h - int(ih * scale)) / 2),
-          iw * scale, ih * scale};
-      SDL_RenderTexture(r, tex, nullptr, &dst);
-    }
+  void drawPicture(SDL_Renderer* r, int w, int h) const {
+    SDL_Texture* tex = player_.texture();
+    const auto [tw, th] = player_.textureSize();
+    if (!tex || tw == 0 || th == 0) return;
+    const float scale = std::min(float(w) / tw, float(h) / th);
+    const SDL_FRect dst {(w - tw * scale) / 2, (h - th * scale) / 2, tw * scale, th * scale};
+    SDL_RenderTexture(r, tex, nullptr, &dst);
   }
 
-  // -----------------------------------------------------------------------
-  // Bottom bar (mpv-style)
-  // -----------------------------------------------------------------------
-
-  void drawBottomBar(SDL_Renderer* r, int win_w, int win_h) const {
-    // Calculate alpha based on fade state
-    Uint8 alpha = shouldShowBar() ? 255 : static_cast<Uint8>(255 * fade_alpha_);
+  void drawBar(SDL_Renderer* r, int w, int h) const {
+    const auto alpha = Uint8(255 * barOpacity(h));
     if (alpha == 0) return;
-
-    // Enable alpha blending for transparent background
-    SDL_BlendMode prev_blend;
-    SDL_GetRenderDrawBlendMode(r, &prev_blend);
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 
-    // Draw background rectangle with fixed 50% transparency
-    const SDL_FRect bg_rect {
-        0.0f,
-        float(win_h) - kBarHeight,
-        float(win_w),
-        kBarHeight};
-    SDL_SetRenderDrawColor(r, 0, 0, 0, 128);  // 50% transparent black
-    SDL_RenderFillRect(r, &bg_rect);
+    const SDL_FRect panel {0, h - kPanelH, float(w), kPanelH};
+    SDL_SetRenderDrawColor(r, 0, 0, 0, alpha / 2);
+    SDL_RenderFillRect(r, &panel);
 
-    // Draw progress bar
-    drawProgressBar(r, win_w, win_h, alpha);
-
-    // Restore previous blend mode
-    SDL_SetRenderDrawBlendMode(r, prev_blend);
-  }
-
-  void drawProgressBar(SDL_Renderer* r, int win_w, int /*win_h*/, Uint8 alpha) const {
-    const SDL_FRect& bar = bar_cache_;
-    const float progress = player_.getProgress();
-
-    // Track background
     SDL_SetRenderDrawColor(r, 80, 80, 80, alpha);
-    SDL_RenderFillRect(r, &bar);
+    SDL_RenderFillRect(r, &bar_);
 
-    // Filled portion
-    if (progress > 0.0f) {
-      SDL_FRect fill {bar.x, bar.y, bar.w * progress, bar.h};
-      SDL_SetRenderDrawColor(r, 255, 255, 255, alpha);
-      SDL_RenderFillRect(r, &fill);
-    }
+    const float progress = player_.duration() > 0 ? float(player_.position() / player_.duration()) : 0.0f;
+    const SDL_FRect filled {bar_.x, bar_.y, bar_.w * progress, bar_.h};
+    SDL_SetRenderDrawColor(r, 255, 255, 255, alpha);
+    SDL_RenderFillRect(r, &filled);
 
-    // Playhead dot when hovered or dragging
-    const bool hovered = dragging_ || isNearBar(mouse_x_, mouse_y_);
-    if (hovered && progress > 0.0f && progress < 1.0f) {
-      const float cx = bar.x + bar.w * progress;
-      const float cy = bar.y + bar.h * 0.5f;
-      const float r2 = 6.0f;
-      SDL_FRect dot {cx - r2, cy - r2, r2 * 2, r2 * 2};
-      SDL_SetRenderDrawColor(r, 255, 255, 255, alpha);
-      SDL_RenderFillRect(r, &dot);
+    if (dragging_ || overBar(mouse_.x, mouse_.y)) {
+      constexpr float kKnob = 6.0f;
+      const SDL_FRect knob {bar_.x + bar_.w * progress - kKnob, bar_.y + bar_.h / 2 - kKnob, kKnob * 2, kKnob * 2};
+      SDL_RenderFillRect(r, &knob);
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Fade logic
-  // -----------------------------------------------------------------------
-
-  void updateFadeState() {
-    Uint32 now = SDL_GetTicks();
-
-    // If mouse is outside window, start fading immediately
-    if (!mouse_in_window_) {
-      Uint32 elapsed = now - last_mouse_time_;
-      if (elapsed >= kFadeDelayMs) {
-        fade_alpha_ = 0.0f;
-      } else {
-        fade_alpha_ = 1.0f - (static_cast<float>(elapsed) / static_cast<float>(kFadeDelayMs));
-      }
-      return;
-    }
-
-    // Mouse is inside window - fade based on idle time
-    Uint32 elapsed = now - last_mouse_time_;
-    if (elapsed >= kFadeDelayMs) {
-      fade_alpha_ = 0.0f;
-    } else {
-      fade_alpha_ = 1.0f - (static_cast<float>(elapsed) / static_cast<float>(kFadeDelayMs));
-    }
+  // Fully visible while the mouse is over the lower half, else fades after idling.
+  auto barOpacity(int h) const -> float {
+    if (dragging_ || mouse_.y > h / 2.0f) return 1.0f;
+    const Uint64 idle = SDL_GetTicks() - last_motion_;
+    return idle >= kFadeMs ? 0.0f : 1.0f - float(idle) / kFadeMs;
   }
 
-  auto shouldShowBar() const -> bool {
-    if (!player_.isActive()) return false;
-    // Show bar if mouse is in bottom half
-    return mouse_in_bottom_half_;
+  void fitWindowAspect(SDL_Window* window) {
+    const auto [tw, th] = player_.textureSize();
+    if (!player_.isPlaying() && !tw) return;
+    const float aspect = tw && th ? float(tw) / th : 1.0f;
+    if (aspect == aspect_) return;
+    aspect_ = aspect;
+    SDL_SetWindowAspectRatio(window, aspect, aspect);
   }
 
-  auto isNearBar(float x, float y) const -> bool {
-    if (!player_.isActive()) return false;
-    return x >= bar_cache_.x &&
-           x <= bar_cache_.x + bar_cache_.w &&
-           y >= bar_cache_.y - kHitExpand &&
-           y <= bar_cache_.y + bar_cache_.h + kHitExpand;
+  auto overBar(float x, float y) const -> bool {
+    return player_.isPlaying() && x >= bar_.x && x <= bar_.x + bar_.w &&
+           y >= bar_.y - kHitSlop && y <= bar_.y + bar_.h + kHitSlop;
   }
 
-  auto progressFromX(float x) const -> float {
-    return std::clamp((x - bar_cache_.x) / bar_cache_.w, 0.0f, 1.0f);
-  }
+  auto progressAt(float x) const -> float { return std::clamp((x - bar_.x) / bar_.w, 0.0f, 1.0f); }
 
-  // -----------------------------------------------------------------------
-  // Bar geometry helpers
-  // -----------------------------------------------------------------------
-
-  void updateBarCache(int win_w, int win_h) {
-    bar_cache_ = {
-        kBarMarginX,
-        float(win_h) - kBarBottom - kBarH,
-        float(win_w) - kBarMarginX * 2.f,
-        kBarH};
-
-    // Check if mouse is in bottom half
-    mouse_in_bottom_half_ = (mouse_y_ > win_h / 2.0f);
-  }
-
-  void updateWindowAspectRatio(SDL_Window* window, int /*win_w*/, int /*win_h*/) const {
-    if (!player_.isActive()) return;
-
-    float aspect = 1.0f;  // Default 1:1 for audio-only
-
-    if (player_.hasVideo()) {
-      auto [vw, vh] = player_.getVideoSize();
-      if (vw > 0 && vh > 0) {
-        aspect = static_cast<float>(vw) / static_cast<float>(vh);
-      }
-    } else if (player_.hasImage()) {
-      auto [iw, ih] = player_.getImageSize();
-      if (iw > 0 && ih > 0) {
-        aspect = static_cast<float>(iw) / static_cast<float>(ih);
-      }
-    }
-
-    // Only update if aspect ratio changed
-    if (aspect != last_aspect_) {
-      SDL_SetWindowAspectRatio(window, aspect, aspect);
-      last_aspect_ = aspect;
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // State
-  // -----------------------------------------------------------------------
   MediaPlayer& player_;
-  SDL_FRect bar_cache_ {};
-  float mouse_x_ = 0;
-  float mouse_y_ = 0;
+  SDL_FRect bar_ {};
+  SDL_FPoint mouse_ {};
+  Uint64 last_motion_ = SDL_GetTicks();
   bool dragging_ = false;
-  Uint32 last_mouse_time_ = 0;
-  float fade_alpha_ = 1.0f;
-  bool mouse_in_bottom_half_ = false;
-  bool mouse_in_window_ = true;
-  mutable float last_aspect_ = -1.0f;
+  float aspect_ = 0.0f;
 };

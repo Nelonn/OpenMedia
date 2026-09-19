@@ -1,61 +1,55 @@
 #pragma once
 
-// lock-based, single-producer / single-consumer safe.
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <mutex>
+#include <span>
+#include <vector>
+
+// Byte FIFO of fixed capacity, safe for one producer and one consumer.
 class RingBuffer {
 public:
-  explicit RingBuffer(size_t capacity)
-      : buf_(capacity), capacity_(capacity) {}
+  explicit RingBuffer(size_t capacity) : buf_(capacity) {}
 
-  // Returns bytes actually written (may be less than len if nearly full).
-  auto write(const uint8_t* data, size_t len) -> size_t {
+  // Returns how many bytes fit; the rest is left to the caller.
+  auto write(std::span<const uint8_t> src) -> size_t {
     std::lock_guard lock(mutex_);
-    const size_t n = std::min(len, availableWriteUnsafe());
-    for (size_t i = 0; i < n; ++i)
-      buf_[(write_pos_ + i) % capacity_] = data[i];
-    write_pos_ += n;
+    const size_t n = std::min(src.size(), buf_.size() - size_);
+    const size_t at = (head_ + size_) % buf_.size();
+    const size_t first = std::min(n, buf_.size() - at);
+    std::memcpy(buf_.data() + at, src.data(), first);
+    std::memcpy(buf_.data(), src.data() + first, n - first);
+    size_ += n;
     return n;
   }
 
-  auto read(uint8_t* dst, size_t len) -> size_t {
+  auto read(std::span<uint8_t> dst) -> size_t {
     std::lock_guard lock(mutex_);
-    const size_t n = std::min(len, sizeUnsafe());
-    for (size_t i = 0; i < n; ++i)
-      dst[i] = buf_[(read_pos_ + i) % capacity_];
-    read_pos_ += n;
+    const size_t n = std::min(dst.size(), size_);
+    const size_t first = std::min(n, buf_.size() - head_);
+    std::memcpy(dst.data(), buf_.data() + head_, first);
+    std::memcpy(dst.data() + first, buf_.data(), n - first);
+    head_ = (head_ + n) % buf_.size();
+    size_ -= n;
     return n;
   }
 
   void clear() {
     std::lock_guard lock(mutex_);
-    read_pos_ = write_pos_;
+    head_ = size_ = 0;
   }
 
-  auto currentSize() const -> size_t {
+  auto size() const -> size_t {
     std::lock_guard lock(mutex_);
-    return sizeUnsafe();
+    return size_;
   }
 
-  auto capacity() const -> size_t { return capacity_; }
-
-  auto availableWrite() const -> size_t {
-    std::lock_guard lock(mutex_);
-    return availableWriteUnsafe();
-  }
-
-  auto fillRatio() const -> double {
-    std::lock_guard lock(mutex_);
-    return capacity_ > 0
-               ? static_cast<double>(sizeUnsafe()) / static_cast<double>(capacity_)
-               : 0.0;
-  }
+  auto fillRatio() const -> double { return static_cast<double>(size()) / static_cast<double>(buf_.size()); }
 
 private:
-  auto sizeUnsafe() const -> size_t { return write_pos_ - read_pos_; }
-  auto availableWriteUnsafe() const -> size_t { return capacity_ - sizeUnsafe(); }
-
   std::vector<uint8_t> buf_;
-  size_t capacity_;
   mutable std::mutex mutex_;
-  size_t read_pos_ = 0;
-  size_t write_pos_ = 0;
+  size_t head_ = 0;
+  size_t size_ = 0;
 };

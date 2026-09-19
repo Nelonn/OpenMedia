@@ -2,7 +2,9 @@
 add_executable(OpenMediaExample WIN32
         audio_sink.hpp
         av_clock.hpp
-        frame_queue.hpp
+        blocking_queue.hpp
+        diagnostics.hpp
+        hw_device.hpp
         main.cpp
         media_player.hpp
         ring_buffer.hpp
