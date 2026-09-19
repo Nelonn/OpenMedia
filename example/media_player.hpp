@@ -36,6 +36,7 @@
 #include <openmedia/log.hpp>
 #include <openmedia/io.hpp>
 #include <openmedia/video.hpp>
+#include <openmedia/metadata_keys.hpp>
 #include <queue>
 #include <string>
 #include <thread>

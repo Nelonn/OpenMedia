@@ -1,8 +1,8 @@
-#include "media_player.hpp"
-#include "ui.hpp"
-
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+
+#include "media_player.hpp"
+#include "ui.hpp"
 
 #include <string>
 #include <string_view>

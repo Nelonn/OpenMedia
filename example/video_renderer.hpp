@@ -1,9 +1,9 @@
 #pragma once
 
+#include <SDL3/SDL.h>
+
 #include "av_clock.hpp"
 #include "frame_queue.hpp"
-
-#include <SDL3/SDL.h>
 #include <algorithm>
 #include <mutex>
 #include <vector>
@@ -441,7 +441,7 @@ private:
     const int shift = static_cast<int>(vf.bits_per_component) - 10;
     if (shift < 0) return false;
 
-    const auto chroma = getPlaneDimensions(format, 1, vf.width, vf.height);
+    const auto chroma = openmedia::getPlaneDimensions(format, 1, vf.width, vf.height);
     const int cw = static_cast<int>(chroma.first);
     const int ch = static_cast<int>(chroma.second);
     if (cw <= 0 || ch <= 0) return false;

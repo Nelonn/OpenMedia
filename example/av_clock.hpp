@@ -3,9 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <openmedia/format_api.hpp> // Rational
+#include <openmedia/format_api.hpp>
 
-using namespace openmedia;
 using SteadyClock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<SteadyClock>;
 

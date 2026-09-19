@@ -1,9 +1,9 @@
 #pragma once
 
+#include <SDL3/SDL.h>
+
 #include "av_clock.hpp"
 #include "ring_buffer.hpp"
-
-#include <SDL3/SDL.h>
 #include <algorithm>
 #include <atomic>
 #include <cstring>

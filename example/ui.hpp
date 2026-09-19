@@ -1,7 +1,8 @@
 #pragma once
-#include "media_player.hpp"
 
 #include <SDL3/SDL.h>
+
+#include "media_player.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <string>
