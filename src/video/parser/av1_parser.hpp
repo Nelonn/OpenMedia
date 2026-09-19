@@ -388,6 +388,9 @@ public:
   auto parse(std::span<const uint8_t> packet) -> std::vector<AV1ParsedFrame>;
 
   void reset();
+  // For a seek: drops the reference state but keeps the sequence header, which
+  // a container is not obliged to repeat at every random access point.
+  void restart();
 
   auto sequenceHeader() const -> const AV1SequenceHeader& { return seq_; }
   auto hdrMetadata() const -> const AV1HdrMetadata& { return hdr_; }

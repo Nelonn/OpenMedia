@@ -186,6 +186,19 @@ struct RefPicMarking {
 
 inline constexpr int MAX_REF_PIC_MARKINGS = 32;
 
+// 7.3.3.1: one entry of ref_pic_list_modification(). DXVA builds the reference
+// lists inside the driver, but VA-API takes them ready-made per slice, so the
+// modifications have to survive parsing rather than just be skipped over.
+struct RefPicListModification {
+  int modification_of_pic_nums_idc = 3; // 3 terminates the list
+  int abs_diff_pic_num_minus1 = 0;
+  int long_term_pic_num = 0;
+};
+
+// A list holds at most 32 entries (field decoding), and every entry can be
+// moved at most once before the list is full, so this bounds a sane stream.
+inline constexpr int MAX_REF_PIC_LIST_MODIFICATIONS = 32;
+
 struct SliceHeader {
   struct PredWeightTable {
     int luma_log2_weight_denom = 0;
@@ -220,6 +233,12 @@ struct SliceHeader {
   int num_ref_idx_active_override_flag = 0;
   int num_ref_idx_l0_active_minus1 = 0;
   int num_ref_idx_l1_active_minus1 = 0;
+
+  // ref_pic_list_modification(), indexed by list.
+  int ref_pic_list_modification_flag[2] = {};
+  int num_ref_pic_list_modifications[2] = {};
+  RefPicListModification ref_pic_list_modifications[2][MAX_REF_PIC_LIST_MODIFICATIONS] = {};
+
   PredWeightTable pwt = {};
   int cabac_init_idc = 0;
   int slice_qp_delta = 0;

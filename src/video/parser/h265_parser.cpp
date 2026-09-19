@@ -100,6 +100,20 @@ void H265AccessUnitParser::reset() {
   nal_prefix_size_ = 3;
 }
 
+void H265AccessUnitParser::restart() {
+  scanner_.reset();
+  current_ = {};
+  current_has_vcl_ = false;
+  current_parameter_sets_changed_ = false;
+  have_previous_slice_ = false;
+  first_slice_segment_in_pic_flag_ = false;
+  ref_pic_order_cnt_msb_ = 0;
+  ref_pic_order_cnt_lsb_ = 0;
+  first_picture_ = true;
+  pending_.clear();
+  work_.clear();
+}
+
 void H265AccessUnitParser::parseExtradata(std::span<const uint8_t> extradata) {
   if (extradata.empty()) return;
   if (extradata.size() >= 23 && extradata[0] == 1) {
@@ -168,6 +182,10 @@ auto H265AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
 
     if (nal_type == NAL_VPS || nal_type == NAL_SPS || nal_type == NAL_PPS) {
       current_parameter_sets_changed_ = true;
+    } else if (nal_type == NAL_EOS) {
+      // 8.1.3: the picture after an end of sequence starts the stream over, the
+      // same as the very first one does.
+      first_picture_ = true;
     } else if (is_vcl && has_slice) {
       current_.slice_offsets.push_back(output_offset);
       current_.slice_headers.push_back(slice);
@@ -178,6 +196,8 @@ auto H265AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
         // POC is a per-picture value and computePoc advances the prevTid0Pic
         // state, so derive it once, from the first slice of the picture.
         const auto& pps = pps_[slice.pps_id];
+        current_.no_rasl_output_flag =
+            current_.is_irap && ((nal_type >= NAL_BLA_W_LP && nal_type <= NAL_IDR_N_LP) || first_picture_);
         current_.poc = computePoc(sps_[pps.sps_id], slice, nal_type);
       }
       current_has_vcl_ = true;
@@ -235,6 +255,54 @@ auto H265AccessUnitParser::findNalUnits(std::span<const uint8_t> packet) -> std:
   return nals;
 }
 
+namespace {
+
+// Table 7-6 in raster order; the lists themselves are kept in coded order, so
+// defaultList8x8() reorders these through the diagonal scan.
+constexpr uint8_t kDefaultScalingListIntraRaster[64] = {
+    16, 16, 16, 16, 17, 18, 21, 24,
+    16, 16, 16, 16, 17, 19, 22, 25,
+    16, 16, 17, 18, 20, 22, 25, 29,
+    16, 16, 18, 21, 24, 27, 31, 36,
+    17, 17, 20, 24, 30, 35, 41, 47,
+    18, 19, 22, 27, 35, 44, 54, 65,
+    21, 22, 25, 31, 41, 54, 70, 88,
+    24, 25, 29, 36, 47, 65, 88, 115,
+};
+
+constexpr uint8_t kDefaultScalingListInterRaster[64] = {
+    16, 16, 16, 16, 17, 18, 20, 24,
+    16, 16, 16, 17, 18, 20, 24, 25,
+    16, 16, 17, 18, 20, 24, 25, 28,
+    16, 17, 18, 20, 24, 25, 28, 33,
+    17, 18, 20, 24, 25, 28, 33, 41,
+    18, 20, 24, 25, 28, 33, 41, 54,
+    20, 24, 25, 28, 33, 41, 54, 71,
+    24, 25, 28, 33, 41, 54, 71, 91,
+};
+
+// matrixId 0..2 are the intra lists, 3..5 the inter ones; for sizeId 3 the two
+// stored lists are matrixId 0 and 3.
+void defaultList8x8(uint8_t* list, bool intra) {
+  const uint8_t* raster = intra ? kDefaultScalingListIntraRaster : kDefaultScalingListInterRaster;
+  for (int i = 0; i < 64; ++i) list[i] = raster[kH265DiagonalScan8x8.raster[i]];
+}
+
+} // namespace
+
+void h265DefaultScalingListData(H265ScalingListData& sl) {
+  for (int matrix_id = 0; matrix_id < 6; ++matrix_id) {
+    std::memset(sl.scaling_list_4x4[matrix_id], 16, 16);
+    defaultList8x8(sl.scaling_list_8x8[matrix_id], matrix_id < 3);
+    defaultList8x8(sl.scaling_list_16x16[matrix_id], matrix_id < 3);
+    sl.scaling_list_dc_coef_16x16[matrix_id] = 16;
+  }
+  for (int matrix_id = 0; matrix_id < 2; ++matrix_id) {
+    defaultList8x8(sl.scaling_list_32x32[matrix_id], matrix_id == 0);
+    sl.scaling_list_dc_coef_32x32[matrix_id] = 16;
+  }
+}
+
 auto H265AccessUnitParser::parseScalingListData(openmedia::BitReader& br, H265ScalingListData& sl) -> bool {
   for (int size_id = 0; size_id < 4; ++size_id) {
     for (int matrix_id = 0; matrix_id < (size_id == 3 ? 2 : 6); ++matrix_id) {
@@ -242,14 +310,13 @@ auto H265AccessUnitParser::parseScalingListData(openmedia::BitReader& br, H265Sc
         const int pred_matrix_id_delta = static_cast<int>(br.readUE());
         if (pred_matrix_id_delta < 0 || pred_matrix_id_delta > matrix_id) return false;
         const int pred_matrix_id = matrix_id - pred_matrix_id_delta;
-        const int coef_count = std::min(64, 1 << (4 + (size_id << 1)));
         if (pred_matrix_id_delta == 0) {
-          for (int i = 0; i < coef_count; ++i) {
-            if (size_id == 0) sl.scaling_list_4x4[matrix_id][i] = 16;
-            else if (size_id == 1) sl.scaling_list_8x8[matrix_id][i] = 16;
-            else if (size_id == 2) sl.scaling_list_16x16[matrix_id][i] = 16;
-            else sl.scaling_list_32x32[matrix_id][i] = 16;
-          }
+          // Table 7-5/7-6: the 4x4 default is flat, the larger ones are not.
+          const bool intra = size_id == 3 ? matrix_id == 0 : matrix_id < 3;
+          if (size_id == 0) std::memset(sl.scaling_list_4x4[matrix_id], 16, 16);
+          else if (size_id == 1) defaultList8x8(sl.scaling_list_8x8[matrix_id], intra);
+          else if (size_id == 2) defaultList8x8(sl.scaling_list_16x16[matrix_id], intra);
+          else defaultList8x8(sl.scaling_list_32x32[matrix_id], intra);
           if (size_id == 2) sl.scaling_list_dc_coef_16x16[matrix_id] = 16;
           else if (size_id == 3) sl.scaling_list_dc_coef_32x32[matrix_id] = 16;
         } else {
@@ -663,6 +730,9 @@ auto H265AccessUnitParser::parseSps(openmedia::BitReader& br) -> bool {
   }
   sps.scaling_list_enabled_flag = br.readBit() != 0;
   if (sps.scaling_list_enabled_flag) {
+    // 7.4.3.2.1: enabled but not sent means the Table 7-5/7-6 defaults, which a
+    // decoder handed an all-zero list would dequantise every block with.
+    h265DefaultScalingListData(sps.scaling_list_data);
     sps.sps_scaling_list_data_present_flag = br.readBit() != 0;
     if (sps.sps_scaling_list_data_present_flag && !parseScalingListData(br, sps.scaling_list_data)) return false;
   }
@@ -827,7 +897,7 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
     for (int i = 0; i < pps.num_extra_slice_header_bits; ++i) br.readBit();
     sh.slice_type = static_cast<int>(br.readUE());
     if (sh.slice_type < 0 || sh.slice_type > 2) return fail();
-    if (pps.output_flag_present_flag) br.readBit();
+    if (pps.output_flag_present_flag) sh.pic_output_flag = br.readBit() != 0;
     if (sps.separate_colour_plane_flag) sh.colour_plane_id = static_cast<int>(br.readBits(2));
     if (!isIdrNal(nal_unit_type_)) {
       sh.slice_pic_order_cnt_lsb = static_cast<int>(br.readBits(static_cast<uint32_t>(sps.log2_max_pic_order_cnt_lsb_minus4 + 4)));
@@ -905,11 +975,18 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
 
       if (pps.lists_modification_present_flag && sh.num_pic_total_curr > 1) {
         const auto entry_bits = static_cast<uint32_t>(ceilLog2(static_cast<uint32_t>(sh.num_pic_total_curr)));
-        if (br.readBit()) { // ref_pic_list_modification_flag_l0
-          for (int i = 0; i <= sh.num_ref_idx_l0_active_minus1; ++i) br.readBits(entry_bits);
-        }
-        if (sh.slice_type == 0 /* B */ && br.readBit()) { // ref_pic_list_modification_flag_l1
-          for (int i = 0; i <= sh.num_ref_idx_l1_active_minus1; ++i) br.readBits(entry_bits);
+        const int list_count = sh.slice_type == 0 /* B */ ? 2 : 1;
+        for (int list = 0; list < list_count; ++list) {
+          sh.ref_pic_list_modification_flag[list] = br.readBit() != 0;
+          if (!sh.ref_pic_list_modification_flag[list]) continue;
+          const int active = list == 0 ? sh.num_ref_idx_l0_active_minus1 : sh.num_ref_idx_l1_active_minus1;
+          for (int i = 0; i <= active; ++i) {
+            const uint32_t entry = br.readBits(entry_bits);
+            // 7.4.7.2: list_entry_lX indexes RefPicListTempX, which has
+            // NumPicTotalCurr distinct pictures in it.
+            if (entry >= static_cast<uint32_t>(sh.num_pic_total_curr)) return fail();
+            sh.list_entry[list][i] = static_cast<uint8_t>(entry);
+          }
         }
       }
       if (sh.slice_type == 0 /* B */) sh.mvd_l1_zero_flag = br.readBit() != 0;
@@ -955,6 +1032,10 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
         sh.slice_tc_offset_div2 = pps.pps_tc_offset_div2;
       }
     }
+    sh.slice_deblocking_filter_disabled_flag = slice_deblocking_filter_disabled_flag;
+    // 7.4.7.1: inferred equal to pps_loop_filter_across_slices_enabled_flag when
+    // not present, which is not the same as 0 for a PPS that enables it.
+    sh.slice_loop_filter_across_slices_enabled_flag = pps.pps_loop_filter_across_slices_enabled_flag;
     if (pps.pps_loop_filter_across_slices_enabled_flag &&
         (sh.slice_sao_luma_flag || sh.slice_sao_chroma_flag || !slice_deblocking_filter_disabled_flag)) {
       sh.slice_loop_filter_across_slices_enabled_flag = br.readBit() != 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <util/dynamic_loader.hpp>
 #include <va/va.h>
@@ -44,7 +45,9 @@ public:
   PFN<VAStatus(VADisplay, VASurfaceID, VAImage*)> vaDeriveImage = nullptr;
   PFN<VAStatus(VADisplay, VASurfaceID, int, int, unsigned int, unsigned int, VAImageID)> vaGetImage = nullptr;
   PFN<VAStatus(VADisplay, VASurfaceID, VAImageID, int, int, unsigned int, unsigned int, int, int, unsigned int, unsigned int)> vaPutImage = nullptr;
-  PFN<VAStatus(VADisplay, VABufferID, void**)> vaMapBufferCoded = nullptr;
+  PFN<int(VADisplay)> vaMaxNumImageFormats = nullptr;
+  PFN<const char*(VADisplay)> vaQueryVendorString = nullptr;
+  PFN<VAStatus(VADisplay, VAConfigID, VASurfaceAttrib*, unsigned int*)> vaQuerySurfaceAttributes = nullptr;
 
 private:
   LibVA() = default;
@@ -53,7 +56,7 @@ private:
 
   DynamicLoader libva_;
   DynamicLoader libva_drm_;
-  bool loaded_ = false;
+  std::atomic<bool> loaded_ = false;
   std::mutex load_mutex_;
 };
 

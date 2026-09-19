@@ -58,9 +58,17 @@ auto LibVA::load() -> bool {
   vaDeriveImage = libva_.getProcAddress<PFN<VAStatus(VADisplay, VASurfaceID, VAImage*)>>("vaDeriveImage");
   vaGetImage = libva_.getProcAddress<PFN<VAStatus(VADisplay, VASurfaceID, int, int, unsigned int, unsigned int, VAImageID)>>("vaGetImage");
   vaPutImage = libva_.getProcAddress<PFN<VAStatus(VADisplay, VASurfaceID, VAImageID, int, int, unsigned int, unsigned int, int, int, unsigned int, unsigned int)>>("vaPutImage");
-  vaMapBufferCoded = libva_.getProcAddress<PFN<VAStatus(VADisplay, VABufferID, void**)>>("vaMapBufferCoded"); 
+  vaMaxNumImageFormats = libva_.getProcAddress<PFN<int(VADisplay)>>("vaMaxNumImageFormats");
+  vaQueryVendorString = libva_.getProcAddress<PFN<const char*(VADisplay)>>("vaQueryVendorString");
+  vaQuerySurfaceAttributes = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAConfigID, VASurfaceAttrib*, unsigned int*)>>("vaQuerySurfaceAttributes");
 
-  if (!vaInitialize || !vaTerminate || !vaCreateConfig || !vaCreateSurfaces || !vaCreateContext || !vaCreateBuffer || !vaRenderPicture || !vaSyncSurface || !vaMaxNumConfigProfiles) {
+  // Everything the codecs call unconditionally. The coded buffer of an encoder
+  // is read through vaMapBuffer as well; libva has no separate entry point.
+  if (!vaInitialize || !vaTerminate || !vaErrorStr || !vaCreateConfig || !vaDestroyConfig || !vaCreateSurfaces ||
+      !vaDestroySurfaces || !vaCreateContext || !vaDestroyContext || !vaCreateBuffer || !vaDestroyBuffer ||
+      !vaMapBuffer || !vaUnmapBuffer || !vaBeginPicture || !vaRenderPicture || !vaEndPicture || !vaSyncSurface ||
+      !vaQueryConfigProfiles || !vaQueryConfigEntrypoints || !vaGetConfigAttributes || !vaMaxNumConfigProfiles ||
+      !vaMaxNumConfigEntrypoints || !vaCreateImage || !vaDestroyImage || !vaDeriveImage || !vaGetImage) {
     return false;
   }
 

@@ -248,7 +248,8 @@ if (OPENMEDIA_VAAPI)
             src/video/vaapi_decoder.cpp
             src/video/vaapi_encoder.cpp
             src/video/h264_dpb.hpp
-            src/video/vp9_quant.hpp)
+            src/video/vp9_quant.hpp
+            src/video/av1_quant.hpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_VAAPI)
 endif ()
 

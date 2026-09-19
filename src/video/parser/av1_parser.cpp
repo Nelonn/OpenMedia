@@ -1,6 +1,7 @@
 #include "av1_parser.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <util/bit_reader.hpp>
 
@@ -51,6 +52,58 @@ auto inverseRecenter(int32_t r, int32_t v) -> int32_t {
   if (v > 2 * r) return v;
   if (v & 1) return r - ((v + 1) >> 1);
   return r + (v >> 1);
+}
+
+// Div_Lut (spec 7.11.3.7): round(2^22 / (256 + i)). Written out as the formula
+// because every entry of the spec's table is exactly that value.
+struct DivLut {
+  uint16_t values[257] = {};
+  constexpr DivLut() {
+    for (uint32_t i = 0; i <= 256; ++i)
+      values[i] = static_cast<uint16_t>(((1u << 22) + (256u + i) / 2u) / (256u + i));
+  }
+};
+constexpr DivLut kDivLut;
+static_assert(kDivLut.values[0] == 16384 && kDivLut.values[1] == 16320 && kDivLut.values[256] == 8192);
+
+auto round2Signed(int64_t x, uint32_t n) -> int64_t {
+  if (n == 0) return x;
+  const int64_t half = int64_t {1} << (n - 1);
+  return x >= 0 ? (x + half) >> n : -((-x + half) >> n);
+}
+
+// resolve_divisor (spec 7.11.3.7).
+auto resolveDivisor(int32_t d, uint32_t& shift) -> int32_t {
+  const uint32_t magnitude = static_cast<uint32_t>(d < 0 ? -static_cast<int64_t>(d) : d);
+  const uint32_t n = floorLog2(magnitude);
+  const int64_t e = static_cast<int64_t>(magnitude) - (int64_t {1} << n);
+  const int64_t f = n > 8 ? round2Signed(e, n - 8) : e << (8 - n);
+  shift = n + 14;
+  const int32_t factor = kDivLut.values[std::clamp<int64_t>(f, 0, 256)];
+  return d < 0 ? -factor : factor;
+}
+
+// setup_shear (spec 7.11.3.6): whether a global motion model describes a warp
+// the predictor can actually carry out. Hardware decoders are told, rather than
+// left to work it out, and fall back to translation for an invalid one.
+auto shearParamsValid(const int32_t (&mat)[6]) -> bool {
+  if (mat[2] <= 0) return false;
+  constexpr int32_t kOne = 1 << kWarpedModelPrecBits;
+  const auto clip16 = [](int64_t v) { return static_cast<int32_t>(std::clamp<int64_t>(v, -32768, 32767)); };
+  const auto reduce = [](int32_t v) { return static_cast<int32_t>(round2Signed(v, 6) * 64); };
+
+  uint32_t shift = 0;
+  const int32_t divisor = resolveDivisor(mat[2], shift);
+  const int64_t v = static_cast<int64_t>(mat[4]) * kOne;
+  const int64_t w = static_cast<int64_t>(mat[3]) * mat[4];
+  const int32_t alpha = reduce(clip16(static_cast<int64_t>(mat[2]) - kOne));
+  const int32_t beta = reduce(clip16(mat[3]));
+  const int32_t gamma = reduce(clip16(round2Signed(v * divisor, shift)));
+  const int32_t delta = reduce(clip16(static_cast<int64_t>(mat[5]) - round2Signed(w * divisor, shift) - kOne));
+
+  if (4 * std::abs(alpha) + 7 * std::abs(beta) >= kOne) return false;
+  if (4 * std::abs(gamma) + 4 * std::abs(delta) >= kOne) return false;
+  return true;
 }
 
 } // namespace
@@ -438,6 +491,12 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
       h.show_frame = true;
       if (seq_.film_grain_params_present)
         h.film_grain = ref_film_grain_[h.frame_to_show_map_idx];
+      // Showing a key frame runs the reference frame loading process (7.21)
+      // and then refreshes every slot with it, so the state saved alongside
+      // the frame has to come along or the slots end up with defaults.
+      h.loop_filter = ref_loop_filter_[h.frame_to_show_map_idx];
+      h.segmentation = ref_segmentation_[h.frame_to_show_map_idx];
+      h.global_motion = ref_global_motion_[h.frame_to_show_map_idx];
       r.byteAlign();
       bits_consumed = r.bitPosition();
       h.valid = r.ok();
@@ -1076,6 +1135,8 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
         }
       }
     }
+    for (uint32_t ref = AV1_LAST_FRAME; ref <= AV1_ALTREF_FRAME; ++ref)
+      gm.invalid[ref] = !shearParamsValid(gm.params[ref]);
   }
 
   // ---- film_grain_params() ----------------------------------------------
@@ -1233,6 +1294,14 @@ void AV1ObuParser::updateRefSlots(const AV1FrameHeader& h) {
     ref_segmentation_[i] = h.segmentation;
     ref_global_motion_[i] = h.global_motion;
   }
+}
+
+void AV1ObuParser::restart() {
+  const AV1SequenceHeader seq = seq_;
+  const AV1HdrMetadata hdr = hdr_;
+  reset();
+  seq_ = seq;
+  hdr_ = hdr;
 }
 
 void AV1ObuParser::reset() {

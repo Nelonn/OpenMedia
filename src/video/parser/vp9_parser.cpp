@@ -1,6 +1,7 @@
 #include "vp9_parser.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <util/bit_reader.hpp>
 
 namespace openmedia::video_parser {
@@ -207,6 +208,8 @@ void readTileInfo(BitReader& reader, VP9FrameHeader& h) {
 void VP9FrameParser::reset() {
   for (auto& slot : ref_slots_) slot = {};
   color_config_ = {};
+  loop_filter_state_ = {};
+  segmentation_state_ = {};
 }
 
 auto VP9FrameParser::parseUncompressedHeader(std::span<const uint8_t> frame) -> VP9FrameHeader {
@@ -324,6 +327,25 @@ auto VP9FrameParser::parseUncompressedHeader(std::span<const uint8_t> frame) -> 
 
   h.frame_context_idx = static_cast<uint8_t>(reader.readBits(2));
 
+  // setup_past_independence(): intra and error resilient frames start from the
+  // defaults, everything else from what the previous frame left behind.
+  VP9LoopFilterParams loop_filter = loop_filter_state_;
+  VP9SegmentationParams segmentation = segmentation_state_;
+  if (h.frame_is_intra || h.error_resilient_mode) {
+    loop_filter = {};
+    segmentation = {};
+  }
+  h.loop_filter = {};
+  std::copy(std::begin(loop_filter.ref_deltas), std::end(loop_filter.ref_deltas), h.loop_filter.ref_deltas);
+  std::copy(std::begin(loop_filter.mode_deltas), std::end(loop_filter.mode_deltas), h.loop_filter.mode_deltas);
+  // Only the per-frame switches start from scratch; the tables they gate carry
+  // over when the frame does not re-send them.
+  h.segmentation = segmentation;
+  h.segmentation.enabled = false;
+  h.segmentation.update_map = false;
+  h.segmentation.temporal_update = false;
+  h.segmentation.update_data = false;
+
   readLoopFilterParams(reader, h);
   readQuantizationParams(reader, h);
   readSegmentationParams(reader, h);
@@ -336,6 +358,10 @@ auto VP9FrameParser::parseUncompressedHeader(std::span<const uint8_t> frame) -> 
   h.uncompressed_header_size = static_cast<uint32_t>(reader.bytePosition());
 
   h.valid = reader.ok() && h.frame_width > 0 && h.frame_height > 0;
+  if (h.valid) {
+    loop_filter_state_ = h.loop_filter;
+    segmentation_state_ = h.segmentation;
+  }
   return h;
 }
 

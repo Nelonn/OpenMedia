@@ -6,8 +6,7 @@ namespace h264 {
 
 // 7.4.5: memory_management_control_operation and the ref pic list modification
 // lists are self-terminating, so they need an explicit cap to stay finite on a
-// corrupt stream.
-static constexpr int MAX_REF_PIC_LIST_MODIFICATIONS = 32;
+// corrupt stream; MAX_REF_PIC_LIST_MODIFICATIONS in h264_types.hpp is that cap.
 
 enum class SliceParse {
   ok,
@@ -26,20 +25,34 @@ static auto isIntraSlice(int slice_type) -> bool {
   return normalized == 2 || normalized == 4;
 }
 
-static auto read_ref_pic_list_modification(BitReader& br, int slice_type) -> bool {
-  const int normalized = slice_type % 5;
+static auto read_ref_pic_list_modification(BitReader& br, SliceHeader& sh) -> bool {
+  const int normalized = sh.slice_type % 5;
   for (int list = 0; list < 2; ++list) {
+    sh.ref_pic_list_modification_flag[list] = 0;
+    sh.num_ref_pic_list_modifications[list] = 0;
     if (list == 0 && (normalized == 2 || normalized == 4)) continue;
     if (list == 1 && normalized != 1) continue;
     if (!br.readBit()) continue;
+    sh.ref_pic_list_modification_flag[list] = 1;
     int count = 0;
     for (;;) {
       const uint32_t idc = br.readUE();
       if (idc == 3) break;
       if (idc > 3) return false;
-      br.readUE(); // abs_diff_pic_num_minus1 / long_term_pic_num
-      if (++count > MAX_REF_PIC_LIST_MODIFICATIONS) return false;
+      if (count >= MAX_REF_PIC_LIST_MODIFICATIONS) return false;
+      auto& modification = sh.ref_pic_list_modifications[list][count];
+      modification = {};
+      modification.modification_of_pic_nums_idc = static_cast<int>(idc);
+      const uint32_t value = br.readUE();
+      if (idc == 2) {
+        modification.long_term_pic_num = static_cast<int>(value);
+      } else {
+        // abs_diff_pic_num_minus1 is at most MaxPicNum - 1, which is below 2^17.
+        if (value > (1u << 17)) return false;
+        modification.abs_diff_pic_num_minus1 = static_cast<int>(value);
+      }
       if (!br.ok()) return false;
+      sh.num_ref_pic_list_modifications[list] = ++count;
     }
   }
   return true;
@@ -204,7 +217,7 @@ static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, con
   if (slice.num_ref_idx_l0_active_minus1 < 0 || slice.num_ref_idx_l0_active_minus1 > max_ref_idx) return fail();
   if (slice.num_ref_idx_l1_active_minus1 < 0 || slice.num_ref_idx_l1_active_minus1 > max_ref_idx) return fail();
 
-  if (!read_ref_pic_list_modification(br, slice.slice_type)) return fail();
+  if (!read_ref_pic_list_modification(br, slice)) return fail();
   if ((pps.weighted_pred_flag && (normalized == 0 || normalized == 3)) || (pps.weighted_bipred_idc == 1 && normalized == 1)) {
     if (!read_pred_weight_table(br, sps, slice)) return fail();
   }

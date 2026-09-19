@@ -177,6 +177,12 @@ private:
 
   RefSlot ref_slots_[VP9_NUM_REF_FRAMES] = {};
 
+  // The loop filter deltas and the segmentation features are only coded when
+  // they change; every other frame inherits them from the one before, until
+  // setup_past_independence() (spec 8.4.1) puts them back to their defaults.
+  VP9LoopFilterParams loop_filter_state_;
+  VP9SegmentationParams segmentation_state_;
+
   // color_config() only appears on key and intra-only frames; inter frames
   // carry the configuration established by the last one that did.
   struct ColorConfig {

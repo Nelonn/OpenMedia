@@ -44,71 +44,73 @@ int HWVAAPIContext_copyToHost(OMVAAPIContext* context,
 
   auto& libva = openmedia::LibVA::getInstance();
   if (!libva.isLoaded() && !libva.load()) return 0;
-  if (!libva.vaDeriveImage || !libva.vaMapBuffer || !libva.vaUnmapBuffer || !libva.vaDestroyImage || !libva.vaGetImage || !libva.vaSyncSurface) return 0;
+  VADisplay display = context->display;
 
-  // Ensure surface is ready
-  libva.vaSyncSurface(context->display, surface);
+  if (libva.vaSyncSurface(display, surface) != VA_STATUS_SUCCESS) return 0;
 
-  VAImage image = {};
-  bool derived = false;
-  
-  // Try zero-copy derivation first
-  VAStatus status = libva.vaDeriveImage(context->display, surface, &image);
-  if (status == VA_STATUS_SUCCESS) {
-    if (image.format.fourcc == VA_FOURCC_NV12 || image.format.fourcc == VA_FOURCC_P010) {
-      derived = true;
-    } else {
-      libva.vaDestroyImage(context->display, image.image_id);
-    }
+  // Deriving tells what the surface holds (NV12 or P010) without copying.
+  // Reading through the derived mapping is slow on Intel, where it goes
+  // through write-combined, tiled memory, so it is only the fallback; a
+  // linear image filled by vaGetImage is what gets read.
+  VAImage derived = {};
+  derived.image_id = VA_INVALID_ID;
+  uint32_t fourcc = VA_FOURCC_NV12;
+  if (libva.vaDeriveImage(display, surface, &derived) == VA_STATUS_SUCCESS) {
+    fourcc = derived.format.fourcc;
   }
-
-  // Fallback to copy via GetImage if derivation failed or wrong format
-  if (!derived) {
-    VAImageFormat format = {VA_FOURCC_NV12, VA_LSB_FIRST, 12};
-    status = libva.vaCreateImage(context->display, &format, width, height, &image);
-    if (status != VA_STATUS_SUCCESS) return 0;
-
-    status = libva.vaGetImage(context->display, surface, 0, 0, width, height, image.image_id);
-    if (status != VA_STATUS_SUCCESS) {
-      libva.vaDestroyImage(context->display, image.image_id);
-      return 0;
-    }
-  }
-
-  void* mapped = nullptr;
-  status = libva.vaMapBuffer(context->display, image.buf, &mapped);
-  if (status != VA_STATUS_SUCCESS || !mapped) {
-    libva.vaDestroyImage(context->display, image.image_id);
+  if (fourcc != VA_FOURCC_NV12 && fourcc != VA_FOURCC_P010 && fourcc != VA_FOURCC_P016 && fourcc != VA_FOURCC_P012) {
+    if (derived.image_id != VA_INVALID_ID) libva.vaDestroyImage(display, derived.image_id);
     return 0;
   }
 
-  // Detect bytes per pixel from the returned image format
-  uint32_t bpp = 1;
-  if (image.format.fourcc == VA_FOURCC_P010 || image.format.fourcc == VA_FOURCC_P012 || image.format.fourcc == VA_FOURCC_P016) {
-    bpp = 2;
-  } else if (image.format.bits_per_pixel > 12 && image.num_planes < 3) {
-    bpp = 2;
-  }
-
-  const uint32_t y_copy = std::min(width * bpp, y_stride);
-  const uint32_t uv_copy = std::min(width * bpp, uv_stride);
-  const uint32_t uv_height = (height + 1) / 2;
-
-  const uint8_t* src = static_cast<const uint8_t*>(mapped);
-  const uint8_t* src_y = src + image.offsets[0];
-  const uint8_t* src_uv = (image.num_planes > 1 || image.offsets[1] > 0) ? src + image.offsets[1] : nullptr;
-
-  for (uint32_t row = 0; row < height; ++row) {
-    std::memcpy(y_plane + row * y_stride, src_y + row * image.pitches[0], y_copy);
-  }
-  
-  if (src_uv) {
-    for (uint32_t row = 0; row < uv_height; ++row) {
-      std::memcpy(uv_plane + row * uv_stride, src_uv + row * image.pitches[1], uv_copy);
+  VAImage image = {};
+  image.image_id = VA_INVALID_ID;
+  bool use_derived = true;
+  {
+    VAImageFormat format = {};
+    format.fourcc = fourcc;
+    format.byte_order = VA_LSB_FIRST;
+    format.bits_per_pixel = fourcc == VA_FOURCC_NV12 ? 12 : 24;
+    if (libva.vaCreateImage(display, &format, static_cast<int>(width), static_cast<int>(height), &image) == VA_STATUS_SUCCESS) {
+      if (libva.vaGetImage(display, surface, 0, 0, width, height, image.image_id) == VA_STATUS_SUCCESS) {
+        use_derived = false;
+      } else {
+        libva.vaDestroyImage(display, image.image_id);
+        image.image_id = VA_INVALID_ID;
+      }
     }
   }
+  if (use_derived) {
+    if (derived.image_id == VA_INVALID_ID) return 0;
+    image = derived;
+    derived.image_id = VA_INVALID_ID;
+  } else if (derived.image_id != VA_INVALID_ID) {
+    libva.vaDestroyImage(display, derived.image_id);
+  }
 
-  libva.vaUnmapBuffer(context->display, image.buf);
-  libva.vaDestroyImage(context->display, image.image_id);
+  void* mapped = nullptr;
+  if (libva.vaMapBuffer(display, image.buf, &mapped) != VA_STATUS_SUCCESS || !mapped) {
+    libva.vaDestroyImage(display, image.image_id);
+    return 0;
+  }
+
+  const uint32_t bpp = fourcc == VA_FOURCC_NV12 ? 1 : 2;
+  // Chroma rows interleave Cb and Cr, so an odd width still ends on a pair.
+  const uint32_t y_copy = std::min(width * bpp, y_stride);
+  const uint32_t uv_copy = std::min(((width + 1) & ~1u) * bpp, uv_stride);
+  const uint32_t uv_height = (height + 1) / 2;
+
+  const auto* src = static_cast<const uint8_t*>(mapped);
+  const uint8_t* src_y = src + image.offsets[0];
+  const uint8_t* src_uv = src + image.offsets[1];
+  for (uint32_t row = 0; row < height; ++row) {
+    std::memcpy(y_plane + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * image.pitches[0], y_copy);
+  }
+  for (uint32_t row = 0; row < uv_height; ++row) {
+    std::memcpy(uv_plane + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * image.pitches[1], uv_copy);
+  }
+
+  libva.vaUnmapBuffer(display, image.buf);
+  libva.vaDestroyImage(display, image.image_id);
   return 1;
 }

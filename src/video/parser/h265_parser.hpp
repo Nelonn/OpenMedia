@@ -86,6 +86,35 @@ struct H265LongTermRef {
   int delta_poc_msb_cycle_lt = 0;
 };
 
+// 6.5.3 up-right diagonal scan: raster position (y * size + x) of the i-th
+// coefficient of a (1 << kLog2Size) square block. Scaling lists are coded in
+// this order, and H265ScalingListData keeps them that way.
+template<int kLog2Size>
+struct H265DiagonalScan {
+  static constexpr int kSize = 1 << kLog2Size;
+  uint8_t raster[kSize * kSize] = {};
+
+  constexpr H265DiagonalScan() {
+    int i = 0;
+    int x = 0;
+    int y = 0;
+    while (i < kSize * kSize) {
+      while (y >= 0) {
+        if (x < kSize && y < kSize) raster[i++] = static_cast<uint8_t>(y * kSize + x);
+        --y;
+        ++x;
+      }
+      y = x;
+      x = 0;
+    }
+  }
+};
+
+inline constexpr H265DiagonalScan<2> kH265DiagonalScan4x4;
+inline constexpr H265DiagonalScan<3> kH265DiagonalScan8x8;
+
+// Scaling lists in coded (up-right diagonal) order, as scaling_list_data()
+// carries them. Every sizeId above 0 is an 8x8 list upsampled by the decoder.
 struct H265ScalingListData {
   uint8_t scaling_list_4x4[6][16];
   uint8_t scaling_list_8x8[6][64];
@@ -94,6 +123,11 @@ struct H265ScalingListData {
   uint8_t scaling_list_dc_coef_16x16[6];
   uint8_t scaling_list_dc_coef_32x32[2];
 };
+
+// Table 7-5 / 7-6: what a list takes when scaling_list_pred_matrix_id_delta
+// is 0, and what every list is when the SPS enables scaling lists without
+// sending any.
+void h265DefaultScalingListData(H265ScalingListData& sl);
 
 struct H265PredWeightTable {
   int luma_log2_weight_denom = 0;
@@ -113,6 +147,8 @@ struct H265SliceHeader {
   int slice_segment_address = 0;
   bool dependent_slice_segment_flag = false;
   int slice_type = 0;
+  // 0 means the picture is decoded (others may predict from it) but never shown.
+  bool pic_output_flag = true;
   int colour_plane_id = 0;
   int slice_pic_order_cnt_lsb = 0;
   bool short_term_ref_pic_set_sps_flag = false;
@@ -130,6 +166,10 @@ struct H265SliceHeader {
   int collocated_ref_idx = 0;
   int num_ref_idx_l0_active_minus1 = 0;
   int num_ref_idx_l1_active_minus1 = 0;
+  // ref_pic_lists_modification(), indexed by list. DXVA builds the lists in the
+  // driver, VA-API wants them built (8.3.4), which needs list_entry_lX.
+  bool ref_pic_list_modification_flag[2] = {};
+  uint8_t list_entry[2][H265_MAX_REF_IDX_ACTIVE + 1] = {};
   H265PredWeightTable pred_weight_table = {};
   int num_pic_total_curr = 0;
   int slice_qp_delta = 0;
@@ -137,6 +177,8 @@ struct H265SliceHeader {
   int slice_cr_qp_offset = 0;
   int slice_beta_offset_div2 = 0;
   int slice_tc_offset_div2 = 0;
+  // Inherits pps_deblocking_filter_disabled_flag unless the slice overrides it.
+  bool slice_deblocking_filter_disabled_flag = false;
   bool slice_loop_filter_across_slices_enabled_flag = false;
   int five_minus_max_num_merge_cand = 0;
   // Bit position of the end of the slice header within the RBSP.
@@ -155,6 +197,10 @@ struct H265ParsedFrame {
   int nal_unit_type = 0;
   int poc = 0;
   bool is_irap = false;
+  // NoRaslOutputFlag of an IRAP picture (8.1.3): the stream starts over here,
+  // and the RASL pictures that follow it predict from pictures that were never
+  // decoded, so a decoder has to drop them.
+  bool no_rasl_output_flag = false;
   bool is_reference = false;
   bool parameter_sets_changed = false;
 };
@@ -162,6 +208,10 @@ struct H265ParsedFrame {
 class H265AccessUnitParser {
 public:
   void reset();
+  // For a seek: forgets the picture order count history and anything buffered
+  // from the old position, but keeps the parameter sets, which an MP4 or MKV
+  // stream only sends once, out of band.
+  void restart();
   void parseExtradata(std::span<const uint8_t> extradata);
   auto parse(std::span<const uint8_t> packet, bool end_of_packet = true) -> std::vector<H265ParsedFrame>;
 

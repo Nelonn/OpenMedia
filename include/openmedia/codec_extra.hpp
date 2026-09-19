@@ -52,6 +52,12 @@ constexpr Key OPUS_ENC_LOOKAHEAD = "opus.lookahead";
 // int32 - Mapping family (0, 1, or 255)
 constexpr Key OPUS_ENC_MAPPING_FAMILY = "opus.mapping_family";
 
+// VA-API
+// int32 - Encoder speed/quality trade-off: 1 is the best quality, larger values
+// are faster, up to what the driver reports (VAConfigAttribEncQualityRange).
+// Absent or 0 = driver default
+constexpr Key VAAPI_ENC_QUALITY_LEVEL = "vaapi.quality_level";
+
 // OpenH264
 // int32 - Usage type (0: camera, 1: screen)
 constexpr Key OPENH264_ENC_USAGE_TYPE = "openh264.usage_type";
