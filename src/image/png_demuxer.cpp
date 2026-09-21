@@ -1,4 +1,5 @@
 #include <cstring>
+#include <image/png_common.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 #include <openmedia/format_api.hpp>
@@ -126,7 +127,7 @@ const FormatDescriptor FORMAT_PNG = {
     .name = "png",
     .long_name = "PNG (Portable Network Graphics)",
     .demuxer_factory = [] { return std::make_unique<PNGDemuxer>(); },
-    .muxer_factory = {},
+    .muxer_factory = [] { return createPNGMuxer(); },
 };
 
 } // namespace openmedia

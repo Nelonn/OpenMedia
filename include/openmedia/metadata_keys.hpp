@@ -88,6 +88,18 @@ constexpr Key DOLBY_VISION_BL_PRESENT = "dolby_vision.bl_present";
 // int32 - Base-layer signal compatibility id, when present in dvcC/dvvC
 constexpr Key DOLBY_VISION_BL_SIGNAL_COMPATIBILITY_ID = "dolby_vision.bl_signal_compatibility_id";
 
+// Images and animations
+// binary - Embedded ICC colour profile
+constexpr Key ICC_PROFILE = "icc_profile";
+// binary - Raw EXIF block, without any container-specific framing
+constexpr Key EXIF = "exif";
+// binary - XMP packet, as UTF-8 XML
+constexpr Key XMP = "xmp";
+// int32 - How many times an animation repeats; 0 means forever
+constexpr Key ANIMATION_LOOP_COUNT = "animation.loop_count";
+// int32 - Canvas colour behind an animation, as 0xAARRGGBB
+constexpr Key ANIMATION_BACKGROUND_COLOR = "animation.background_color";
+
 // bool - Track samples are encrypted and need a decryption layer before decode
 constexpr Key ENCRYPTED = "encryption.encrypted";
 // string - Four-character protection scheme, e.g. "cenc", "cbcs"

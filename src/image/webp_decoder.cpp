@@ -1,6 +1,8 @@
 #include <webp/decode.h>
 #include <cstring>
 #include <codecs.hpp>
+#include <image/webp_common.hpp>
+#include <openmedia/codec_extra.hpp>
 #include <openmedia/video.hpp>
 #include <vector>
 #include <util/io_util.hpp>
@@ -76,10 +78,48 @@ const CodecDescriptor CODEC_WEBP = {
   .codec_id = OM_CODEC_WEBP,
   .type = OM_MEDIA_IMAGE,
   .name = "webp",
-  .long_name = "WebP image decoder",
+  .long_name = "WebP image codec",
   .vendor = "Google",
   .flags = NONE,
+  .caps = CodecCaps {
+    .threading = true,
+    .video = VideoCodecCaps {
+      .pix_fmts = {OM_FORMAT_R8G8B8A8, OM_FORMAT_B8G8R8A8, OM_FORMAT_YUV420P},
+    },
+  },
+  .options = {
+    WEBP_ENC_LOSSLESS,
+    WEBP_ENC_QUALITY,
+    WEBP_ENC_LOSSLESS_PRESET,
+    WEBP_ENC_PRESET,
+    WEBP_ENC_METHOD,
+    WEBP_ENC_IMAGE_HINT,
+    WEBP_ENC_NEAR_LOSSLESS,
+    WEBP_ENC_EXACT,
+    WEBP_ENC_TARGET_SIZE,
+    WEBP_ENC_TARGET_PSNR,
+    WEBP_ENC_ALPHA_COMPRESSION,
+    WEBP_ENC_ALPHA_FILTERING,
+    WEBP_ENC_ALPHA_QUALITY,
+    WEBP_ENC_SEGMENTS,
+    WEBP_ENC_SNS_STRENGTH,
+    WEBP_ENC_FILTER_STRENGTH,
+    WEBP_ENC_FILTER_SHARPNESS,
+    WEBP_ENC_FILTER_TYPE,
+    WEBP_ENC_AUTOFILTER,
+    WEBP_ENC_PASS,
+    WEBP_ENC_PREPROCESSING,
+    WEBP_ENC_PARTITIONS,
+    WEBP_ENC_PARTITION_LIMIT,
+    WEBP_ENC_EMULATE_JPEG_SIZE,
+    WEBP_ENC_LOW_MEMORY,
+    WEBP_ENC_SHARP_YUV,
+    WEBP_ENC_QMIN,
+    WEBP_ENC_QMAX,
+    CODEC_THREADS,
+  },
   .decoder_factory = [] { return std::make_unique<WEBPDecoder>(); },
+  .encoder_factory = [] { return createWEBPEncoder(); },
 };
 
 } // namespace openmedia

@@ -107,6 +107,22 @@ inline void store_u16_le(uint8_t* p, uint16_t v) noexcept { detail::store(p, v, 
 inline void store_u32_le(uint8_t* p, uint32_t v) noexcept { detail::store(p, v, std::endian::little); }
 inline void store_u64_le(uint8_t* p, uint64_t v) noexcept { detail::store(p, v, std::endian::little); }
 
+template<std::unsigned_integral T>
+inline void append(std::vector<uint8_t>& out, T v, std::endian order) {
+  // insert() from a pointer pair grows the vector once and copies; resize()
+  // would first zero the bytes this is about to overwrite.
+  if (order != std::endian::native) v = byteswap(v);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&v);
+  out.insert(out.end(), bytes, bytes + sizeof(T));
+}
+
+inline void append_u16_be(std::vector<uint8_t>& out, uint16_t v) { append(out, v, std::endian::big); }
+inline void append_u32_be(std::vector<uint8_t>& out, uint32_t v) { append(out, v, std::endian::big); }
+inline void append_u64_be(std::vector<uint8_t>& out, uint64_t v) { append(out, v, std::endian::big); }
+inline void append_u16_le(std::vector<uint8_t>& out, uint16_t v) { append(out, v, std::endian::little); }
+inline void append_u32_le(std::vector<uint8_t>& out, uint32_t v) { append(out, v, std::endian::little); }
+inline void append_u64_le(std::vector<uint8_t>& out, uint64_t v) { append(out, v, std::endian::little); }
+
 inline void store_u24_be(uint8_t* p, uint32_t v) noexcept {
   assert(v <= 0xFFFFFF);
   p[0] = static_cast<uint8_t>(v >> 16);

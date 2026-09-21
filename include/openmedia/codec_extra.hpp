@@ -160,4 +160,86 @@ constexpr Key OPENH264_ENC_ASPECT_RATIO_EXT_WIDTH = "openh264.aspect_ratio_ext_w
 // int32 - Extended SAR height (used when aspect_ratio is 255)
 constexpr Key OPENH264_ENC_ASPECT_RATIO_EXT_HEIGHT = "openh264.aspect_ratio_ext_height";
 
+// WebP
+// bool - Lossless compression (default false)
+constexpr Key WEBP_ENC_LOSSLESS = "webp.lossless";
+// float - Quality factor 0-100. Lossy: 0 is the smallest file, 100 the best
+// picture. Lossless: the effort spent compressing, 0 fastest to 100 smallest.
+// Overrides the rate control quality when present
+constexpr Key WEBP_ENC_QUALITY = "webp.quality";
+// int32 - Lossless preset level (0 fastest .. 9 smallest). Implies lossless and
+// overrides quality and method
+constexpr Key WEBP_ENC_LOSSLESS_PRESET = "webp.lossless_preset";
+// int32 - Source-type preset (0=default, 1=picture, 2=photo, 3=drawing, 4=icon, 5=text)
+constexpr Key WEBP_ENC_PRESET = "webp.preset";
+// int32 - Compression method, speed/size trade-off (0 fast .. 6 slower-better)
+constexpr Key WEBP_ENC_METHOD = "webp.method";
+// int32 - Image hint, lossless only (0=default, 1=picture, 2=photo, 3=graph)
+constexpr Key WEBP_ENC_IMAGE_HINT = "webp.image_hint";
+// int32 - Near-lossless quality (0 = max loss, 100 = off). Lossless only
+constexpr Key WEBP_ENC_NEAR_LOSSLESS = "webp.near_lossless";
+// bool - Preserve the exact RGB values of fully transparent pixels
+constexpr Key WEBP_ENC_EXACT = "webp.exact";
+// int32 - Desired output size in bytes (0 = off). Takes precedence over quality
+constexpr Key WEBP_ENC_TARGET_SIZE = "webp.target_size";
+// float - Minimal distortion to try to achieve in dB (0 = off). Takes
+// precedence over target_size
+constexpr Key WEBP_ENC_TARGET_PSNR = "webp.target_psnr";
+// int32 - Alpha plane compression (0 = none, 1 = WebP lossless)
+constexpr Key WEBP_ENC_ALPHA_COMPRESSION = "webp.alpha_compression";
+// int32 - Alpha predictive filtering (0 = none, 1 = fast, 2 = best)
+constexpr Key WEBP_ENC_ALPHA_FILTERING = "webp.alpha_filtering";
+// int32 - Alpha quality (0 smallest .. 100 lossless)
+constexpr Key WEBP_ENC_ALPHA_QUALITY = "webp.alpha_quality";
+// int32 - Number of segments to use (1-4)
+constexpr Key WEBP_ENC_SEGMENTS = "webp.segments";
+// int32 - Spatial noise shaping strength (0 = off .. 100 = maximum)
+constexpr Key WEBP_ENC_SNS_STRENGTH = "webp.sns_strength";
+// int32 - Deblocking filter strength (0 = off .. 100 = strongest)
+constexpr Key WEBP_ENC_FILTER_STRENGTH = "webp.filter_strength";
+// int32 - Filter sharpness (0 = off .. 7 = least sharp)
+constexpr Key WEBP_ENC_FILTER_SHARPNESS = "webp.filter_sharpness";
+// int32 - Filter type (0 = simple, 1 = strong)
+constexpr Key WEBP_ENC_FILTER_TYPE = "webp.filter_type";
+// bool - Auto-adjust the filter strength
+constexpr Key WEBP_ENC_AUTOFILTER = "webp.autofilter";
+// int32 - Number of entropy-analysis passes (1-10)
+constexpr Key WEBP_ENC_PASS = "webp.pass";
+// int32 - Preprocessing filter (0 = none, 1 = segment-smooth, 2 = pseudo-random dithering)
+constexpr Key WEBP_ENC_PREPROCESSING = "webp.preprocessing";
+// int32 - log2 of the token partition count (0-3)
+constexpr Key WEBP_ENC_PARTITIONS = "webp.partitions";
+// int32 - Quality degradation allowed to fit the 512k partition-0 limit (0-100)
+constexpr Key WEBP_ENC_PARTITION_LIMIT = "webp.partition_limit";
+// bool - Remap the parameters to match the size JPEG would have produced
+constexpr Key WEBP_ENC_EMULATE_JPEG_SIZE = "webp.emulate_jpeg_size";
+// bool - Reduce memory usage at the cost of CPU time
+constexpr Key WEBP_ENC_LOW_MEMORY = "webp.low_memory";
+// bool - Use the sharp (and slow) RGB->YUV conversion
+constexpr Key WEBP_ENC_SHARP_YUV = "webp.sharp_yuv";
+// int32 - Minimum permissible quality factor (0-100)
+constexpr Key WEBP_ENC_QMIN = "webp.qmin";
+// int32 - Maximum permissible quality factor (0-100)
+constexpr Key WEBP_ENC_QMAX = "webp.qmax";
+
+// PNG
+// int32 - zlib compression level (0 = stored, 1 fastest .. 9 smallest)
+constexpr Key PNG_ENC_COMPRESSION_LEVEL = "png.compression_level";
+// int32 - zlib strategy (0 = default, 1 = filtered, 2 = Huffman only, 3 = RLE, 4 = fixed)
+constexpr Key PNG_ENC_COMPRESSION_STRATEGY = "png.compression_strategy";
+// int32 - zlib memory level (1-9)
+constexpr Key PNG_ENC_COMPRESSION_MEM_LEVEL = "png.compression_mem_level";
+// int32 - zlib window size in bits (8-15)
+constexpr Key PNG_ENC_COMPRESSION_WINDOW_BITS = "png.compression_window_bits";
+// int32 - Row filters libpng may choose between, as ORed PNG_FILTER_* bits:
+// 0x00 none, 0x08 None, 0x10 Sub, 0x20 Up, 0x40 Avg, 0x80 Paeth, 0xF8 all
+constexpr Key PNG_ENC_FILTERS = "png.filters";
+// bool - Write the image interlaced (Adam7)
+constexpr Key PNG_ENC_INTERLACE = "png.interlace";
+// bool - Discard the alpha channel and write RGB instead of RGBA
+constexpr Key PNG_ENC_STRIP_ALPHA = "png.strip_alpha";
+// bool - Describe colour with cICP/mDCV/cLLI when the picture carries something
+// sRGB cannot express, such as PQ, HLG, BT.2020 or DCI-P3 (default true)
+constexpr Key PNG_ENC_COLOR_CHUNKS = "png.color_chunks";
+
 } // namespace openmedia

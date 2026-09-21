@@ -1,5 +1,6 @@
 #include <webp/demux.h>
 #include <cstring>
+#include <image/webp_common.hpp>
 #include <openmedia/format_api.hpp>
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
@@ -183,7 +184,7 @@ const FormatDescriptor FORMAT_WEBP = {
     .name = "webp",
     .long_name = "WebP",
     .demuxer_factory = [] { return std::make_unique<WEBPDemuxer>(); },
-    .muxer_factory = {},
+    .muxer_factory = [] { return createWEBPMuxer(); },
 };
 
 } // namespace openmedia

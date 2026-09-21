@@ -61,6 +61,7 @@ target_sources(OpenMedia PRIVATE
         src/util/id3_parser.hpp
         src/util/io_util.cpp
         src/util/io_util.hpp
+        src/util/still_image_muxer.hpp
         src/util/vorbis_comment.hpp
         src/audio/pcm.cpp
         src/bitstream_filter.hpp
@@ -322,9 +323,14 @@ if (OPENMEDIA_VORBIS)
 endif ()
 
 if (OPENMEDIA_WEBP)
-    target_link_libraries(OpenMedia PRIVATE WebP::webpdemux WebP::webpdecoder)
+    # WebP::webp is the full library (encode + decode); linking the decode-only
+    # WebP::webpdecoder alongside it would define the same symbols twice.
+    target_link_libraries(OpenMedia PRIVATE WebP::webpdemux WebP::libwebpmux WebP::webp)
+    target_sources(OpenMedia PRIVATE src/image/webp_common.hpp)
     target_sources(OpenMedia PRIVATE src/image/webp_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/image/webp_muxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/webp_decoder.cpp)
+    target_sources(OpenMedia PRIVATE src/image/webp_encoder.cpp)
 endif ()
 
 if (OPENMEDIA_JPEG)
@@ -358,8 +364,11 @@ endif ()
 
 if (OPENMEDIA_PNG)
     target_link_libraries(OpenMedia PRIVATE PNG::png)
+    target_sources(OpenMedia PRIVATE src/image/png_common.hpp)
     target_sources(OpenMedia PRIVATE src/image/png_demuxer.cpp)
+    target_sources(OpenMedia PRIVATE src/image/png_muxer.cpp)
     target_sources(OpenMedia PRIVATE src/image/png_decoder.cpp)
+    target_sources(OpenMedia PRIVATE src/image/png_encoder.cpp)
 endif ()
 
 if (OPENMEDIA_TGA)

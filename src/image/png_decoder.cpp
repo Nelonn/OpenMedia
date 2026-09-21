@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstring>
 #include <codecs.hpp>
+#include <image/png_common.hpp>
+#include <openmedia/codec_extra.hpp>
 #include <openmedia/video.hpp>
 #include <vector>
 #include <util/io_util.hpp>
@@ -141,6 +143,12 @@ public:
       png_set_expand(png_ptr_);
     }
 
+    // png_read_image walks the Adam7 passes itself, but only once the
+    // transform is registered; without this it warns and falls back.
+    if (png_get_interlace_type(png_ptr_, info_ptr_) != PNG_INTERLACE_NONE) {
+      png_set_interlace_handling(png_ptr_);
+    }
+
     png_read_update_info(png_ptr_, info_ptr_);
 
     OMPixelFormat format = get_pixel_format(bit_depth_, color_type_);
@@ -186,7 +194,24 @@ const CodecDescriptor CODEC_PNG = {
   .long_name = "PNG",
   .vendor = "libpng",
   .flags = NONE,
+  .caps = CodecCaps {
+    .video = VideoCodecCaps {
+      .pix_fmts = {OM_FORMAT_R8G8B8A8, OM_FORMAT_B8G8R8A8, OM_FORMAT_RGBA64,
+                   OM_FORMAT_GRAY8, OM_FORMAT_GRAY16},
+    },
+  },
+  .options = {
+    PNG_ENC_COMPRESSION_LEVEL,
+    PNG_ENC_COMPRESSION_STRATEGY,
+    PNG_ENC_COMPRESSION_MEM_LEVEL,
+    PNG_ENC_COMPRESSION_WINDOW_BITS,
+    PNG_ENC_FILTERS,
+    PNG_ENC_INTERLACE,
+    PNG_ENC_STRIP_ALPHA,
+    PNG_ENC_COLOR_CHUNKS,
+  },
   .decoder_factory = []{ return std::make_unique<PNGDecoder>(); },
+  .encoder_factory = []{ return createPNGEncoder(); },
 };
 
 } // namespace openmedia
