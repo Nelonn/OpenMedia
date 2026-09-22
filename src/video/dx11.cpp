@@ -884,17 +884,24 @@ public:
   auto operator=(const DX11PicturePool&) -> DX11PicturePool& = delete;
 
   auto acquire() -> ComPtr<ID3D11Texture2D> {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!free_.empty()) {
-        auto texture = std::move(free_.back());
-        free_.pop_back();
-        return texture;
-      }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!free_.empty()) {
+      auto texture = std::move(free_.back());
+      free_.pop_back();
+      return texture;
     }
+    if (!device_) return {};
+
     ComPtr<ID3D11Texture2D> texture;
-    if (!device_ || FAILED(device_->CreateTexture2D(&desc_, nullptr, &texture))) return {};
-    return texture;
+    if (SUCCEEDED(device_->CreateTexture2D(&desc_, nullptr, &texture))) return texture;
+
+    // The extra binding is what lets a caller feed the picture to a video processor without
+    // copying it again; a driver that will not make such a surface still gets the picture.
+    if ((desc_.BindFlags & D3D11_BIND_DECODER) != 0) {
+      desc_.BindFlags &= ~static_cast<UINT>(D3D11_BIND_DECODER);
+      if (SUCCEEDED(device_->CreateTexture2D(&desc_, nullptr, &texture))) return texture;
+    }
+    return {};
   }
 
   void recycle(ComPtr<ID3D11Texture2D> texture) {
@@ -2276,7 +2283,12 @@ private:
       slots_[slot].texture->GetDesc(&desc);
       desc.ArraySize = 1;
       desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      // Bound as a decoder surface as well as a shader resource: that is the one shape a video
+      // processor will read, and a caller that converts the picture -- which a player showing it
+      // on a graphics device does -- would otherwise have to copy the whole frame into a surface
+      // of its own first, a second full pass over every picture. DX11PicturePool drops the flag
+      // again where the driver refuses it.
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
       desc.CPUAccessFlags = 0;
       desc.MiscFlags = 0;
       picture_pool_ = std::make_shared<DX11PicturePool>(device_, desc);
