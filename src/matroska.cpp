@@ -2,6 +2,7 @@
 #include <mkvmuxer/mkvwriter.h>
 #include <mkvparser/mkvparser.h>
 #include <mkvparser/mkvreader.h>
+#include <algorithm>
 #include <annexb.hpp>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include <util/date_time.hpp>
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
+#include <vector>
 
 namespace openmedia {
 
@@ -40,6 +42,8 @@ static constexpr uint64_t MKV_TAG_TRACK_UID = 0x63C5;
 static constexpr uint64_t MKV_SIMPLE_TAG = 0x67C8;
 static constexpr uint64_t MKV_TAG_NAME = 0x45A3;
 static constexpr uint64_t MKV_TAG_STRING = 0x4487;
+
+static constexpr uint64_t MKV_CUES = 0x1C53BB6B;
 
 static constexpr uint64_t MKV_ATTACHMENTS = 0x1941A469;
 static constexpr uint64_t MKV_ATTACHED_FILE = 0x61A7;
@@ -248,6 +252,20 @@ class MatroskaDemuxer final : public BaseDemuxer {
   bool current_is_keyframe_ = false;
   int64_t current_timestamp_tc_ = 0;
 
+  // The track a seek is still waiting on a keyframe for, or -1. A seek lands on
+  // a cluster, not on a frame, and the cluster it lands in can begin part way
+  // through a group of pictures: the cue points at a keyframe inside it rather
+  // than at its first block, and without cues a cluster boundary is only a
+  // keyframe by convention. Those leading blocks reference pictures the decoder
+  // was never given and come out broken, so they are dropped here instead.
+  int32_t skip_to_keyframe_track_ = -1;
+  int skipped_blocks_ = 0;
+
+  // What the skipping above gives up after. A track whose keyframes are not
+  // marked at all would otherwise lose every block to the end of the file;
+  // showing a broken second is better than showing nothing.
+  static constexpr int MAX_SKIPPED_BLOCKS = 512;
+
 public:
   MatroskaDemuxer() = default;
   ~MatroskaDemuxer() override { close(); }
@@ -296,6 +314,8 @@ public:
       }
     }
 
+    loadCues();
+
     long long load_pos = 0;
     long load_size = 0;
     if (segment_->LoadCluster(load_pos, load_size) < 0)
@@ -312,6 +332,8 @@ public:
     current_block_entry_ = nullptr;
     resume_at_entry_ = false;
     current_cluster_ = nullptr;
+    skip_to_keyframe_track_ = -1;
+    skipped_blocks_ = 0;
     timecode_scale_ = 1'000'000LL;
     segment_.reset();
     mkv_reader_.reset();
@@ -357,6 +379,12 @@ public:
       const long long track_num = block->GetTrackNumber();
       auto it = track_map_.find(static_cast<int32_t>(track_num));
       if (it == track_map_.end()) continue;
+
+      // What a seek landed in the middle of; see skip_to_keyframe_track_.
+      if (it->second == skip_to_keyframe_track_) {
+        if (!block->IsKey() && ++skipped_blocks_ < MAX_SKIPPED_BLOCKS) continue;
+        skip_to_keyframe_track_ = -1;
+      }
 
       current_block_ = block;
       current_frame_index_ = 0;
@@ -412,23 +440,62 @@ public:
     current_block_entry_ = nullptr;
     resume_at_entry_ = false;
     current_cluster_ = nullptr;
+    skip_to_keyframe_track_ = -1;
+    skipped_blocks_ = 0;
 
     const mkvparser::Track* track = tracks->GetTrackByNumber(target_track_num);
     const mkvparser::Cues* cues = segment_->GetCues();
 
-    const bool positioned = cues && track && seekWithCues(*cues, *track, target_ns, mode);
+    const bool positioned = cues && track && canReachClusterByPosition() &&
+                            seekWithCues(*cues, *track, target_ns, mode);
     if (!positioned) {
       if (const OMError err = seekByClusterScan(target_ns, mode); err != OM_SUCCESS)
         return err;
     }
 
     // Matroska indexes clusters; only DONT_SYNC asks for finer than that.
-    if (mode == SeekMode::DONT_SYNC) skipToNearestBlock(target_ns, target_track_num);
+    if (mode == SeekMode::DONT_SYNC) {
+      skipToNearestBlock(target_ns, target_track_num);
+    } else if (const auto it = track_map_.find(static_cast<int32_t>(target_track_num)); it != track_map_.end()) {
+      skip_to_keyframe_track_ = it->second;
+    }
 
     return OM_SUCCESS;
   }
 
 private:
+  // Whether a cluster may be reached by its position rather than by reading up
+  // to it. The parser cannot carry on past a cluster it was handed the position
+  // of unless it knows where the segment ends -- it says so itself, in the one
+  // place it would have to work out how far it may read. A segment of unknown
+  // size is one being written as it is read, and for those the clusters have to
+  // be walked in order, whatever it costs.
+  auto canReachClusterByPosition() const -> bool { return segment_->m_size >= 0; }
+
+  // The parser only picks the cues up by itself when they sit before the first
+  // cluster, which in a file muxed for playback they never do: they are written
+  // after the media and the seek head at the front points back at them. Left
+  // unread, seeking has no index at all and falls back to walking the clusters
+  // from the start of the file -- tens of seconds on a long film, and further
+  // into it the longer it takes.
+  void loadCues() {
+    if (segment_->GetCues() != nullptr) return;
+
+    const mkvparser::SeekHead* seek_head = segment_->GetSeekHead();
+    if (seek_head == nullptr) return;
+
+    for (int i = 0; i < seek_head->GetCount(); ++i) {
+      const mkvparser::SeekHead::Entry* entry = seek_head->GetEntry(i);
+      if (entry == nullptr || static_cast<uint64_t>(entry->id) != MKV_CUES) continue;
+
+      // Both the seek head's positions and ParseCues() count from the start of
+      // the segment payload, so the offset goes across as it was read.
+      long long pos = 0;
+      long len = 0;
+      if (segment_->ParseCues(entry->pos, pos, len) == 0) return;
+    }
+  }
+
   // A seek preloads its cluster by position, which leaves it outside the
   // sequential parse LoadCluster() continues (its position is an out-parameter,
   // not a request), so only GetNext() knows what follows. Null means exhausted.
@@ -516,9 +583,125 @@ private:
     return current_cluster_ != nullptr;
   }
 
-  // Without cues the only index is the cluster timecode, which in practice
-  // lands on a keyframe just as the cues would have.
+  // A cluster found by looking for one, and what its timecode turned out to be.
+  struct ClusterProbe {
+    const mkvparser::Cluster* cluster = nullptr;
+    long long position = -1; // relative to the start of the segment payload
+    long long time_ns = -1;
+  };
+
+  // The first cluster whose header lies in [from, end), both relative to the
+  // start of the segment payload. A cluster id is four ordinary bytes and turns
+  // up inside frame data as well, so a candidate only counts once the parser
+  // has read the header and a block entry out of it.
+  auto probeCluster(long long from, long long end) -> ClusterProbe {
+    static constexpr uint8_t CLUSTER_ID[4] = {0x1F, 0x43, 0xB6, 0x75};
+    static constexpr size_t WINDOW = 256 * 1024;
+
+    long long total = 0;
+    long long avail = 0;
+    if (from < 0 || mkv_reader_->Length(&total, &avail) < 0 || total < 0) return {};
+
+    const long long segment_start = segment_->m_start;
+    const long long stop = std::min(segment_start + end, total);
+
+    std::vector<uint8_t> window(WINDOW + sizeof(CLUSTER_ID) - 1);
+
+    for (long long at = segment_start + from; at + static_cast<long long>(sizeof(CLUSTER_ID)) <= stop;) {
+      const auto size = static_cast<size_t>(std::min<long long>(static_cast<long long>(window.size()), stop - at));
+      if (mkv_reader_->Read(at, static_cast<long>(size), window.data()) < 0) break;
+
+      for (size_t i = 0; i + sizeof(CLUSTER_ID) <= size; ++i) {
+        if (memcmp(window.data() + i, CLUSTER_ID, sizeof(CLUSTER_ID)) != 0) continue;
+
+        const long long position = at + static_cast<long long>(i) - segment_start;
+        long long parsed_pos = 0;
+        long parsed_len = 0;
+        if (mkvparser::Cluster::HasBlockEntries(segment_.get(), position, parsed_pos, parsed_len) <= 0) continue;
+
+        const mkvparser::Cluster* cluster = segment_->FindOrPreloadCluster(position);
+        if (cluster == nullptr || cluster->EOS()) continue;
+        const long long time_ns = cluster->GetTime();
+        if (time_ns < 0) continue;
+
+        return {cluster, position, time_ns};
+      }
+
+      // Each window overlaps the next by the length of the id, so one lying
+      // across the boundary is still found.
+      at += static_cast<long long>(size) - (sizeof(CLUSTER_ID) - 1);
+    }
+
+    return {};
+  }
+
+  // Without cues the clusters are the only index there is, and walking them
+  // from the front costs the whole file -- half a minute into a long film, and
+  // worse the further in the target lies. Their positions and their timecodes
+  // rise together, though, which is all a binary search needs: each step lands
+  // on a byte offset in the middle of what is left and looks forward from there
+  // for a cluster header to read the time off.
   auto seekByClusterScan(long long target_ns, SeekMode mode) -> OMError {
+    if (!canReachClusterByPosition()) return seekByClusterWalk(target_ns, mode);
+
+    const mkvparser::Cluster* first = segment_->GetFirst();
+    if (first == nullptr || first->EOS()) return OM_FORMAT_PARSE_FAILED;
+
+    long long total = 0;
+    long long avail = 0;
+    if (mkv_reader_->Length(&total, &avail) < 0 || total < 0) return OM_IO_SEEK_FAILED;
+
+    const long long first_ns = first->GetTime();
+    if (first_ns < 0) return OM_FORMAT_PARSE_FAILED;
+
+    const mkvparser::Cluster* prev = nullptr;
+    const mkvparser::Cluster* next = nullptr;
+    long long prev_ns = 0;
+    long long next_ns = 0;
+
+    if (first_ns <= target_ns) {
+      prev = first;
+      prev_ns = first_ns;
+    } else {
+      next = first;
+      next_ns = first_ns;
+    }
+
+    // Everything below `lo` is known to be at or before the target and
+    // everything at or above `hi` after it; the clusters in between are what
+    // each probe halves.
+    long long lo = first->GetPosition() + 1;
+    long long hi = (segment_->m_size >= 0) ? segment_->m_size : total - segment_->m_start;
+
+    while (lo < hi) {
+      const long long mid = lo + (hi - lo) / 2;
+      const ClusterProbe probe = probeCluster(mid, hi);
+      if (probe.cluster == nullptr) {
+        // No header in the upper half: whatever answers the seek is below it.
+        hi = mid;
+        continue;
+      }
+
+      if (probe.time_ns <= target_ns) {
+        prev = probe.cluster;
+        prev_ns = probe.time_ns;
+        lo = probe.position + 1;
+      } else {
+        next = probe.cluster;
+        next_ns = probe.time_ns;
+        hi = probe.position;
+      }
+    }
+
+    chooseCluster(prev, prev_ns, next, next_ns, target_ns, mode);
+    return OM_SUCCESS;
+  }
+
+  // A segment still being written cannot be entered at a position, so its
+  // clusters are read in order until the target is passed. Nothing else can be
+  // done for such a file, and it is the one kind where the cost is bounded in
+  // practice: what has been written so far is all there is.
+  auto seekByClusterWalk(long long target_ns, SeekMode mode) -> OMError {
     const mkvparser::Cluster* prev = nullptr;
     const mkvparser::Cluster* next = nullptr;
     long long prev_ns = 0;
@@ -544,6 +727,15 @@ private:
       cluster = advanced.unwrap();
     }
 
+    chooseCluster(prev, prev_ns, next, next_ns, target_ns, mode);
+    return OM_SUCCESS;
+  }
+
+  // Which of the two clusters either side of the target the mode asks for. A
+  // null answer means the seek ran off the end, which readPacket() reports as
+  // the end of the file.
+  void chooseCluster(const mkvparser::Cluster* prev, long long prev_ns, const mkvparser::Cluster* next,
+                     long long next_ns, long long target_ns, SeekMode mode) {
     switch (mode) {
       case SeekMode::NEXT_SYNC:
         current_cluster_ = (prev && prev_ns == target_ns) ? prev : next;
@@ -561,8 +753,6 @@ private:
         current_cluster_ = prev ? prev : next;
         break;
     }
-
-    return OM_SUCCESS;
   }
 
   // DONT_SYNC wants the nearest block, not the nearest sync point, and only the
