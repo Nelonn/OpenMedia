@@ -217,6 +217,7 @@ public:
     h265_dpb_.reset();
     reorder_.clear();
     h264_.resetPoc();
+    if (h265_) h265_->restart();
   }
 
 private:

@@ -1185,6 +1185,7 @@ public:
     staging_write_ = 0;
     reorder_.clear();
     h264_.resetPoc();
+    if (h265_) h265_->restart();
     if (av1_) av1_->reset();
     for (auto& r : av1_ref_slot_) r = -1;
     if (vp9_) vp9_->reset();
