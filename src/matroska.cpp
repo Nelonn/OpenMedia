@@ -310,7 +310,9 @@ public:
       const long long timecode_scale = info->GetTimeCodeScale();
       int64_t duration = static_cast<int64_t>(static_cast<double>(duration_ns) / static_cast<double>(timecode_scale));
       for (Track& t : tracks_) {
-        t.duration = duration;
+        if (t.format.type != OM_MEDIA_ATTACHMENT) {
+          t.duration = duration;
+        }
       }
     }
 
@@ -418,6 +420,16 @@ public:
           tracks_[static_cast<size_t>(idx)].format.type == OM_MEDIA_VIDEO) {
         target_track_num = num;
         break;
+      }
+    }
+    if (track_map_.contains(static_cast<int32_t>(target_track_num)) &&
+        tracks_[static_cast<size_t>(track_map_[static_cast<int32_t>(target_track_num)])].format.type != OM_MEDIA_VIDEO) {
+      for (const auto& [num, idx] : track_map_) {
+        if (idx < static_cast<int32_t>(tracks_.size()) &&
+            tracks_[static_cast<size_t>(idx)].format.type == OM_MEDIA_AUDIO) {
+          target_track_num = num;
+          break;
+        }
       }
     }
     if (stream_idx >= 0) {
@@ -930,6 +942,24 @@ private:
 
         tracks_.push_back(track);
         track_map_[static_cast<int32_t>(t->GetNumber())] = next_index++;
+      } else if (type == mkvparser::Track::kSubtitle) {
+        Track track {};
+        track.index = next_index;
+        track.id = static_cast<int32_t>(t->GetNumber());
+        track.time_base = mkv_time_base;
+        track.format.type = OM_MEDIA_SUBTITLE;
+        track.format.codec_id = mkvCodecIdToOMCodec(t->GetCodecId());
+
+        size_t cp_size = 0;
+        const unsigned char* cp = t->GetCodecPrivate(cp_size);
+        if (cp && cp_size) {
+          track.extradata.assign(cp, cp + cp_size);
+        }
+
+        applyTrackMetadata(t, track);
+
+        tracks_.push_back(track);
+        track_map_[static_cast<int32_t>(t->GetNumber())] = next_index++;
       }
     }
 
@@ -1252,6 +1282,37 @@ private:
     }
   }
 
+  static auto detectFontCodec(std::string_view mime, std::string_view name) -> OMCodecId {
+    std::string lower_mime;
+    lower_mime.reserve(mime.size());
+    for (char c : mime) lower_mime.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
+    std::string lower_name;
+    lower_name.reserve(name.size());
+    for (char c : name) lower_name.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
+
+    if (lower_mime == "font/ttf" || lower_mime == "font/sfnt" ||
+        lower_mime == "application/x-truetype-font" || lower_mime == "application/x-font-ttf") {
+      return OM_CODEC_TTF;
+    }
+    if (lower_mime == "font/otf" || lower_mime == "application/vnd.ms-opentype" ||
+        lower_mime == "application/x-font-otf" || lower_mime == "application/x-font-opentype") {
+      return OM_CODEC_OTF;
+    }
+    if (lower_mime == "font/woff" || lower_mime == "application/font-woff" ||
+        lower_mime == "application/x-font-woff") {
+      return OM_CODEC_WOFF;
+    }
+    if (lower_mime == "font/woff2" || lower_mime == "application/font-woff2") {
+      return OM_CODEC_WOFF2;
+    }
+    if (lower_name.ends_with(".ttf") || lower_name.ends_with(".ttc")) return OM_CODEC_TTF;
+    if (lower_name.ends_with(".otf")) return OM_CODEC_OTF;
+    if (lower_name.ends_with(".woff")) return OM_CODEC_WOFF;
+    if (lower_name.ends_with(".woff2")) return OM_CODEC_WOFF2;
+    if (lower_mime.starts_with("font/") || lower_mime.starts_with("application/x-font")) return OM_CODEC_TTF;
+    return OM_CODEC_BIN_DATA;
+  }
+
   void applyAttachments(const std::vector<uint8_t>& buffer) {
     if (buffer.empty()) return;
 
@@ -1282,15 +1343,21 @@ private:
         }
       }
 
-      // The convention is a file named "cover" with an image type. Anything
-      // else attached to a Matroska file is a font, a script or a chapter
-      // image, none of which is artwork for the whole recording.
-      if (data.empty() || !mime.starts_with("image/")) continue;
-      if (name.size() < 5 || tolowerAscii(name.substr(0, 5)) != "cover") continue;
+      if (data.empty()) continue;
 
-      metadata_.setBinary(COVER_ART, data);
-      metadata_.setString(COVER_ART_MIME, mime);
-      return;
+      if (name.size() >= 5 && tolowerAscii(name.substr(0, 5)) == "cover" && mime.starts_with("image/")) {
+        metadata_.setBinary(COVER_ART, data);
+        metadata_.setString(COVER_ART_MIME, mime);
+      } else {
+        Track att {};
+        att.index = static_cast<int32_t>(tracks_.size());
+        att.format.type = OM_MEDIA_ATTACHMENT;
+        att.format.codec_id = detectFontCodec(mime, name);
+        att.extradata.assign(data.begin(), data.end());
+        att.metadata.setString(FILENAME, name);
+        att.metadata.setString(MIMETYPE, mime);
+        tracks_.push_back(std::move(att));
+      }
     }
   }
 
@@ -1421,6 +1488,13 @@ private:
     if (strcmp(id, "A_DTS/EXPRESS") == 0) return OM_CODEC_DTS;
     if (strcmp(id, "A_DTS/LOSSLESS") == 0) return OM_CODEC_DTS;
     if (strcmp(id, "A_DTS/HD") == 0) return OM_CODEC_DTS;
+
+    if (strcmp(id, "S_TEXT/UTF8") == 0) return OM_CODEC_SUBRIP;
+    if (strcmp(id, "S_TEXT/ASS") == 0) return OM_CODEC_ASS;
+    if (strcmp(id, "S_TEXT/SSA") == 0) return OM_CODEC_SSA;
+    if (strcmp(id, "S_TEXT/WEBVTT") == 0) return OM_CODEC_WEBVTT;
+    if (strcmp(id, "S_HDMV/PGS") == 0) return OM_CODEC_HDMV_PGS;
+    if (strcmp(id, "S_VOBSUB") == 0) return OM_CODEC_VOBSUB;
 
     return OM_CODEC_NONE;
   }

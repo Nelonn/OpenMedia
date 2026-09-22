@@ -105,4 +105,8 @@ constexpr Key ENCRYPTED = "encryption.encrypted";
 // string - Four-character protection scheme, e.g. "cenc", "cbcs"
 constexpr Key ENCRYPTION_SCHEME = "encryption.scheme";
 
+constexpr Key FILENAME = "filename";
+constexpr Key MIMETYPE = "mimetype";
+constexpr Key FONT_NAME = "font_name";
+
 } // namespace openmedia

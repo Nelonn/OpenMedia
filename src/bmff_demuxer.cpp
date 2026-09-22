@@ -72,6 +72,37 @@ static auto isIgnoredBox(uint32_t type) -> bool {
   return containsAtom(TABLE, type);
 }
 
+static auto detectFontCodec(std::string_view mime, std::string_view name) -> OMCodecId {
+  std::string lower_mime;
+  lower_mime.reserve(mime.size());
+  for (char c : mime) lower_mime.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
+  std::string lower_name;
+  lower_name.reserve(name.size());
+  for (char c : name) lower_name.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
+
+  if (lower_mime == "font/ttf" || lower_mime == "font/sfnt" ||
+      lower_mime == "application/x-truetype-font" || lower_mime == "application/x-font-ttf") {
+    return OM_CODEC_TTF;
+  }
+  if (lower_mime == "font/otf" || lower_mime == "application/vnd.ms-opentype" ||
+      lower_mime == "application/x-font-otf" || lower_mime == "application/x-font-opentype") {
+    return OM_CODEC_OTF;
+  }
+  if (lower_mime == "font/woff" || lower_mime == "application/font-woff" ||
+      lower_mime == "application/x-font-woff") {
+    return OM_CODEC_WOFF;
+  }
+  if (lower_mime == "font/woff2" || lower_mime == "application/font-woff2") {
+    return OM_CODEC_WOFF2;
+  }
+  if (lower_name.ends_with(".ttf") || lower_name.ends_with(".ttc")) return OM_CODEC_TTF;
+  if (lower_name.ends_with(".otf")) return OM_CODEC_OTF;
+  if (lower_name.ends_with(".woff")) return OM_CODEC_WOFF;
+  if (lower_name.ends_with(".woff2")) return OM_CODEC_WOFF2;
+  if (lower_mime.starts_with("font/") || lower_mime.starts_with("application/x-font")) return OM_CODEC_TTF;
+  return OM_CODEC_BIN_DATA;
+}
+
 static auto isAvcVariant(uint32_t fmt) -> bool {
   static constexpr uint32_t TABLE[] = {
       ATOM('a', 'v', 'c', '1'),
@@ -633,6 +664,10 @@ inline void parseHdlr(std::span<const uint8_t> body, BMFFTrack& track) {
   switch (h) {
     case ATOM('s', 'o', 'u', 'n'): track.track.format.type = OM_MEDIA_AUDIO; break;
     case ATOM('v', 'i', 'd', 'e'): track.track.format.type = OM_MEDIA_VIDEO; break;
+    case ATOM('s', 'u', 'b', 't'):
+    case ATOM('t', 'e', 'x', 't'):
+    case ATOM('s', 'b', 't', 'l'):
+    case ATOM('c', 'l', 'c', 'p'): track.track.format.type = OM_MEDIA_SUBTITLE; break;
     default: track.track.format.type = OM_MEDIA_NONE; break;
   }
 }
@@ -1455,6 +1490,17 @@ class BMFFDemuxer final : public BaseDemuxer {
   size_t current_track_slot_ = NO_TRACK;
   std::vector<Sample> samples_;
 
+  struct MetaItem {
+    uint32_t id = 0;
+    std::string name;
+    std::string mime;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+  };
+
+  std::vector<MetaItem> meta_items_;
+  std::vector<Track> attachment_tracks_;
+
   // Public track index (the one in `tracks_` and in Sample::stream_index) to
   // its slot in `bmff_tracks_`. The two only coincide while no track is
   // dropped, and timecode or subtitle tracks are dropped all the time.
@@ -1499,6 +1545,8 @@ public:
     public_to_slot_.clear();
     keyframes_.clear();
     samples_.clear();
+    meta_items_.clear();
+    attachment_tracks_.clear();
     current_fragment_.reset();
     current_track_slot_ = NO_TRACK;
     current_entry_kind_ = SampleEntryKind::None;
@@ -1531,6 +1579,7 @@ public:
       }
     }
 
+    extractMetaItemAttachments(stream_size);
     publishTracks();
     // `fatal_` alone is not a verdict: a file truncated after a complete moov
     // still yields every track it described. Only the absence of usable tracks
@@ -1540,7 +1589,7 @@ public:
     }
 
     mergeSamplesByDecodeTime();
-    if (samples_.empty()) return OM_FORMAT_NO_STREAMS;
+    if (samples_.empty() && attachment_tracks_.empty()) return OM_FORMAT_NO_STREAMS;
 
     buildKeyframeIndex();
 
@@ -1797,6 +1846,11 @@ private:
       t.track.duration = (max_pts_end > min_pts) ? (max_pts_end - min_pts) : t.track_duration;
       t.track.nb_frames = static_cast<int64_t>(t.samples.size());
       tracks_.push_back(t.track);
+    }
+
+    for (auto& att : attachment_tracks_) {
+      att.index = static_cast<int32_t>(tracks_.size());
+      tracks_.push_back(att);
     }
   }
 
@@ -2221,6 +2275,16 @@ private:
       return;
     }
 
+    if (type == ATOM('i', 'i', 'n', 'f')) {
+      parseIinf(body);
+      return;
+    }
+
+    if (type == ATOM('i', 'l', 'o', 'c')) {
+      parseIloc(body);
+      return;
+    }
+
     BMFFTrack* current = currentTrack();
     if (!current) return;
     auto& track = *current;
@@ -2374,6 +2438,214 @@ private:
     }
   }
 
+  void parseWvttSampleEntry(size_t entry_pos, size_t entry_end, Track& st) {
+    if (entry_end <= entry_pos + 16) return;
+    size_t pos = entry_pos + 16;
+    while (pos + 8 <= entry_end) {
+      uint8_t hdr[8];
+      if (!random_.read(pos, hdr, 8)) return;
+      const uint32_t box_size = load_u32_be(hdr);
+      const uint32_t box_type = load_u32(hdr + 4);
+      if (box_size < 8 || pos + box_size > entry_end) break;
+      if (box_type == ATOM('v', 't', 't', 'C')) {
+        const size_t payload_size = box_size - 8;
+        if (payload_size > 0) {
+          st.extradata.resize(payload_size);
+          if (random_.read(pos + 8, st.extradata.data(), payload_size)) {
+            return;
+          }
+        }
+      }
+      pos += box_size;
+    }
+  }
+
+  void parseTx3gSampleEntry(size_t entry_pos, size_t entry_end, Track& st) {
+    if (entry_end <= entry_pos + 16) return;
+    const size_t payload_size = entry_end - (entry_pos + 16);
+    st.extradata.resize(payload_size);
+    if (!random_.read(entry_pos + 16, st.extradata.data(), payload_size)) {
+      st.extradata.clear();
+      return;
+    }
+
+    size_t pos = entry_pos + 16;
+    if (pos + 30 <= entry_end) {
+      pos += 30;
+    }
+    while (pos + 8 <= entry_end) {
+      uint8_t hdr[8];
+      if (!random_.read(pos, hdr, 8)) return;
+      const uint32_t box_size = load_u32_be(hdr);
+      const uint32_t box_type = load_u32(hdr + 4);
+      if (box_size < 8 || pos + box_size > entry_end) break;
+      if (box_type == ATOM('f', 't', 'a', 'b')) {
+        const size_t ftab_body_size = box_size - 8;
+        std::vector<uint8_t> ftab_data(ftab_body_size);
+        if (random_.read(pos + 8, ftab_data.data(), ftab_body_size)) {
+          ByteReader r(ftab_data);
+          const uint16_t entry_count = r.u16be();
+          std::string font_names;
+          for (uint16_t i = 0; i < entry_count && r.ok() && r.remaining() >= 3; ++i) {
+            r.skip(2);
+            const uint8_t name_len = r.u8();
+            const auto name_bytes = r.bytes(name_len);
+            if (!name_bytes.empty()) {
+              if (!font_names.empty()) font_names += ", ";
+              font_names.append(reinterpret_cast<const char*>(name_bytes.data()), name_bytes.size());
+            }
+          }
+          if (!font_names.empty()) {
+            st.metadata.setString(FONT_NAME, font_names);
+          }
+        }
+      }
+      pos += box_size;
+    }
+  }
+
+  void parseIinf(std::span<const uint8_t> body) {
+    if (body.size() < 4) return;
+    ByteReader r(body);
+    const uint8_t version = r.u8();
+    r.skip(3);
+    const uint32_t count = (version == 0) ? r.u16be() : r.u32be();
+    for (uint32_t i = 0; i < count && r.ok() && r.remaining() >= 8; ++i) {
+      const uint32_t box_size = r.u32be();
+      const auto type_bytes = r.bytes(4);
+      if (type_bytes.size() < 4) break;
+      const uint32_t box_type = load_u32(type_bytes.data());
+      if (box_size < 8 || box_size - 8 > r.remaining()) break;
+      const auto infe_body = r.bytes(box_size - 8);
+      if (box_type == ATOM('i', 'n', 'f', 'e')) {
+        ByteReader ir(infe_body);
+        const uint8_t infe_ver = ir.u8();
+        ir.skip(3);
+        uint32_t item_id = 0;
+        std::string name;
+        std::string mime;
+        if (infe_ver == 0 || infe_ver == 1) {
+          item_id = ir.u16be();
+          ir.skip(2);
+          while (ir.ok() && ir.remaining() > 0) {
+            uint8_t c = ir.u8();
+            if (c == 0) break;
+            name.push_back(static_cast<char>(c));
+          }
+          while (ir.ok() && ir.remaining() > 0) {
+            uint8_t c = ir.u8();
+            if (c == 0) break;
+            mime.push_back(static_cast<char>(c));
+          }
+        } else if (infe_ver == 2 || infe_ver >= 3) {
+          item_id = (infe_ver == 2) ? ir.u16be() : ir.u32be();
+          ir.skip(2);
+          const auto itype_bytes = ir.bytes(4);
+          const uint32_t item_type = itype_bytes.size() == 4 ? load_u32(itype_bytes.data()) : 0;
+          while (ir.ok() && ir.remaining() > 0) {
+            uint8_t c = ir.u8();
+            if (c == 0) break;
+            name.push_back(static_cast<char>(c));
+          }
+          if (item_type == ATOM('m', 'i', 'm', 'e')) {
+            while (ir.ok() && ir.remaining() > 0) {
+              uint8_t c = ir.u8();
+              if (c == 0) break;
+              mime.push_back(static_cast<char>(c));
+            }
+          }
+        }
+        if (item_id != 0) {
+          auto it = std::find_if(meta_items_.begin(), meta_items_.end(),
+                                [&](const MetaItem& m) { return m.id == item_id; });
+          if (it != meta_items_.end()) {
+            it->name = name;
+            it->mime = mime;
+          } else {
+            meta_items_.push_back({item_id, name, mime, 0, 0});
+          }
+        }
+      }
+    }
+  }
+
+  void parseIloc(std::span<const uint8_t> body) {
+    if (body.size() < 6) return;
+    ByteReader r(body);
+    const uint8_t version = r.u8();
+    r.skip(3);
+    const uint8_t s1 = r.u8();
+    const uint8_t s2 = r.u8();
+    const uint8_t offset_size = (s1 >> 4) & 0x0Fu;
+    const uint8_t length_size = s1 & 0x0Fu;
+    const uint8_t base_offset_size = (s2 >> 4) & 0x0Fu;
+    const uint8_t index_size = (version == 1 || version == 2) ? (s2 & 0x0Fu) : 0;
+
+    const uint32_t item_count = (version < 2) ? r.u16be() : r.u32be();
+
+    auto readVar = [&](uint8_t size) -> uint64_t {
+      if (size == 4) return r.u32be();
+      if (size == 8) return r.u64be();
+      if (size == 2) return r.u16be();
+      if (size == 1) return r.u8();
+      return 0;
+    };
+
+    for (uint32_t i = 0; i < item_count && r.ok(); ++i) {
+      const uint32_t item_id = (version < 2) ? r.u16be() : r.u32be();
+      if (version == 1 || version == 2) {
+        r.skip(2);
+      }
+      r.skip(2);
+      const uint64_t base_offset = readVar(base_offset_size);
+      const uint16_t extent_count = r.u16be();
+      uint64_t first_offset = 0;
+      uint64_t first_len = 0;
+      for (uint16_t e = 0; e < extent_count && r.ok(); ++e) {
+        if ((version == 1 || version == 2) && index_size > 0) {
+          readVar(index_size);
+        }
+        const uint64_t ext_offset = readVar(offset_size);
+        const uint64_t ext_length = readVar(length_size);
+        if (e == 0) {
+          first_offset = base_offset + ext_offset;
+          first_len = ext_length;
+        }
+      }
+      if (item_id != 0 && first_len > 0) {
+        auto it = std::find_if(meta_items_.begin(), meta_items_.end(),
+                              [&](const MetaItem& m) { return m.id == item_id; });
+        if (it != meta_items_.end()) {
+          it->offset = first_offset;
+          it->length = first_len;
+        } else {
+          meta_items_.push_back({item_id, "", "", first_offset, first_len});
+        }
+      }
+    }
+  }
+
+  void extractMetaItemAttachments(size_t stream_size) {
+    for (const auto& item : meta_items_) {
+      if (item.length > 0 && item.offset + item.length <= stream_size) {
+        const OMCodecId codec = detectFontCodec(item.mime, item.name);
+        if (codec != OM_CODEC_BIN_DATA || item.mime.starts_with("font/") ||
+            item.mime.starts_with("application/x-font")) {
+          std::vector<uint8_t> data(static_cast<size_t>(item.length));
+          if (random_.read(item.offset, data.data(), static_cast<size_t>(item.length))) {
+            Track att {};
+            att.format.type = OM_MEDIA_ATTACHMENT;
+            att.format.codec_id = codec;
+            att.extradata = std::move(data);
+            att.metadata.setString(FILENAME, item.name);
+            att.metadata.setString(MIMETYPE, item.mime);
+            attachment_tracks_.push_back(std::move(att));
+          }
+        }
+      }
+    }
+  }
+
   // Decodes one sample entry into `st`. Returns true once a codec was
   // recognised, which ends the search.
   auto parseSampleEntry(uint32_t fmt, size_t entry_pos, size_t entry_end, Track& st) -> bool {
@@ -2476,6 +2748,34 @@ private:
     if (const auto prores = proresProfile(fmt)) {
       st.format.profile = *prores;
       return video(OM_CODEC_PRORES, SampleEntryKind::OtherVideo);
+    }
+
+    if (fmt == ATOM('w', 'v', 't', 't')) {
+      st.format.type = OM_MEDIA_SUBTITLE;
+      st.format.codec_id = OM_CODEC_WEBVTT;
+      parseWvttSampleEntry(entry_pos, entry_end, st);
+      return true;
+    }
+    if (fmt == ATOM('t', 'x', '3', 'g') || fmt == ATOM('t', 'e', 'x', 't')) {
+      st.format.type = OM_MEDIA_SUBTITLE;
+      st.format.codec_id = OM_CODEC_TX3G;
+      parseTx3gSampleEntry(entry_pos, entry_end, st);
+      return true;
+    }
+    if (fmt == ATOM('s', 't', 'p', 'p')) {
+      st.format.type = OM_MEDIA_SUBTITLE;
+      st.format.codec_id = OM_CODEC_TTML;
+      return true;
+    }
+    if (fmt == ATOM('c', '6', '0', '8')) {
+      st.format.type = OM_MEDIA_SUBTITLE;
+      st.format.codec_id = OM_CODEC_CEA608;
+      return true;
+    }
+    if (fmt == ATOM('c', '7', '0', '8')) {
+      st.format.type = OM_MEDIA_SUBTITLE;
+      st.format.codec_id = OM_CODEC_CEA708;
+      return true;
     }
 
     return false; // unrecognised four-CC: try the next entry

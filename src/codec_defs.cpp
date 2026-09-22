@@ -80,6 +80,23 @@ auto getCodecMeta(OMCodecId codec_id) -> CodecMeta {
     case OM_CODEC_EXR: return {"EXR", "OpenEXR", OM_MEDIA_IMAGE};
     case OM_CODEC_DNG: return {"DNG", "Digital Negative", OM_MEDIA_IMAGE};
 
+    case OM_CODEC_SUBRIP: return {"SubRip", "SubRip Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_ASS: return {"ASS", "Advanced SubStation Alpha Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_SSA: return {"SSA", "SubStation Alpha Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_WEBVTT: return {"WebVTT", "Web Video Text Tracks Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_MOV_TEXT: return {"mov_text", "3GPP Timed Text Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_TTML: return {"TTML", "Timed Text Markup Language", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_HDMV_PGS: return {"PGS", "HDMV Presentation Graphic Stream Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_VOBSUB: return {"VobSub", "VobSub Subtitle", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_CEA608: return {"CEA-608", "EIA-608 Closed Captions", OM_MEDIA_SUBTITLE};
+    case OM_CODEC_CEA708: return {"CEA-708", "EIA-708 Closed Captions", OM_MEDIA_SUBTITLE};
+
+    case OM_CODEC_TTF: return {"TTF", "TrueType Font", OM_MEDIA_ATTACHMENT};
+    case OM_CODEC_OTF: return {"OTF", "OpenType Font", OM_MEDIA_ATTACHMENT};
+    case OM_CODEC_WOFF: return {"WOFF", "Web Open Font Format", OM_MEDIA_ATTACHMENT};
+    case OM_CODEC_WOFF2: return {"WOFF2", "Web Open Font Format 2", OM_MEDIA_ATTACHMENT};
+    case OM_CODEC_BIN_DATA: return {"Binary Data", "Binary Data Attachment", OM_MEDIA_ATTACHMENT};
+
     default: return {};
   }
 }

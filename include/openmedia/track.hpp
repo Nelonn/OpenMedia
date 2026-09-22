@@ -95,6 +95,14 @@ struct OPENMEDIA_ABI Track {
   auto isCover() const -> bool {
     return (disposition & OM_DISPOSITION_COVER) != 0;
   }
+
+  auto isSubtitle() const -> bool {
+    return format.type == OM_MEDIA_SUBTITLE;
+  }
+
+  auto isAttachment() const -> bool {
+    return format.type == OM_MEDIA_ATTACHMENT;
+  }
 };
 
 } // namespace openmedia
