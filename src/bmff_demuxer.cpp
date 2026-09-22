@@ -1678,34 +1678,64 @@ private:
     return pickNearest(prev, next, target_ns);
   }
 
+  // Whether a whole-file seek has to land in sync with this track. Every sample
+  // of a sound track is a sync sample, so it can start anywhere and says nothing
+  // about where decoding may begin; the picture is what a seek has to be in step
+  // with. Counting sound in would put a seek on the sample nearest the target
+  // and leave the picture decoding from the middle of a group of pictures --
+  // shown, and broken, until the next keyframe.
+  auto constrainsSeek(size_t track) -> bool {
+    const BMFFTrack* t = trackForPublicIndex(static_cast<int32_t>(track));
+    return t != nullptr && t->track.format.type == OM_MEDIA_VIDEO;
+  }
+
+  auto hasConstrainedTrack() -> bool {
+    for (size_t track = 0; track < keyframes_.size(); ++track) {
+      if (!keyframes_[track].empty() && constrainsSeek(track)) return true;
+    }
+    return false;
+  }
+
   // Synced seek. Keyframes are indexed per track and in ascending order, so the
   // candidates on either side of the target are two binary searches rather than
   // a walk back through every sample of every other track.
   auto findKeyframe(int64_t target_ns, int32_t stream_idx, SeekMode mode) -> size_t {
     const Pivots pivots = pivotsFor(target_ns);
 
-    // The latest keyframe at or before the target, and the earliest at or after
-    // it, across the tracks in scope.
+    // The keyframe at or before the target, and the one at or after it, across
+    // the tracks in scope. Asked for the file as a whole, the answer has to hold
+    // for every track in scope at once: the earliest of the candidates before
+    // the target, and the latest of those after it, so that none of them is
+    // entered part way through. Asked for one track, the nearest on each side of
+    // the target is what that track wants.
     size_t prev = samples_.size();
     size_t next = samples_.size();
 
-    const size_t first_track = stream_idx < 0 ? 0 : static_cast<size_t>(stream_idx);
-    const size_t last_track = stream_idx < 0 ? keyframes_.size() : first_track + 1;
+    const bool whole_file = stream_idx < 0;
+    // With no picture in the file there is nothing to stay in step with, and
+    // every track is its own answer.
+    const bool sync_on_picture = whole_file && hasConstrainedTrack();
+
+    const size_t first_track = whole_file ? 0 : static_cast<size_t>(stream_idx);
+    const size_t last_track = whole_file ? keyframes_.size() : first_track + 1;
 
     for (size_t track = first_track; track < last_track; ++track) {
+      if (sync_on_picture && !constrainsSeek(track)) continue;
       const auto& positions = keyframes_[track];
 
       const auto before = std::lower_bound(positions.begin(), positions.end(), pivots.after);
       if (before != positions.begin()) {
         const size_t candidate = *(before - 1);
-        if (prev == samples_.size() || candidate > prev) prev = candidate;
+        const bool better = whole_file ? candidate < prev : candidate > prev;
+        if (prev == samples_.size() || better) prev = candidate;
       }
 
       const auto at_or_after =
           std::lower_bound(positions.begin(), positions.end(), pivots.at_or_after);
       if (at_or_after != positions.end()) {
         const size_t candidate = *at_or_after;
-        if (candidate < next) next = candidate;
+        const bool better = whole_file ? candidate > next : candidate < next;
+        if (next == samples_.size() || better) next = candidate;
       }
     }
 

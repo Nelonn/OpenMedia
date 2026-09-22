@@ -379,7 +379,19 @@ public:
     const mkvparser::Tracks* tracks = segment_->GetTracks();
     if (!tracks) return OM_FORMAT_PARSE_FAILED;
 
+    // Asked for the file as a whole, the seek follows the picture: its cues are
+    // the ones that point at cluster starts a decoder can be entered at, and a
+    // sound track -- every sample of which is a sync sample -- would answer with
+    // whatever lies nearest the target, leaving the picture to decode from the
+    // middle of a group of pictures.
     long long target_track_num = track_map_.begin()->first;
+    for (const auto& [num, idx] : track_map_) {
+      if (idx < static_cast<int32_t>(tracks_.size()) &&
+          tracks_[static_cast<size_t>(idx)].format.type == OM_MEDIA_VIDEO) {
+        target_track_num = num;
+        break;
+      }
+    }
     if (stream_idx >= 0) {
       bool found = false;
       for (const auto& [num, idx] : track_map_) {
