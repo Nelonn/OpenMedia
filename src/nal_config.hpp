@@ -114,122 +114,66 @@ inline auto parseHevcDecoderConfig(std::span<const uint8_t> body)
 }
 
 // VvcDecoderConfigurationRecord, ISO/IEC 14496-15:2022 §11.2.4.2.
+//
+// Unlike avcC/hvcC the record has no configurationVersion byte: it opens with
+// reserved '11111'b | LengthSizeMinusOne(2) | ptl_present_flag(1). In MP4 the
+// record sits inside a FullBox, so the caller strips version/flags first.
 inline auto parseVvcDecoderConfig(std::span<const uint8_t> body)
     -> std::optional<NalDecoderConfig> {
   if (body.size() < 2) return std::nullopt;
 
   ByteReader r(body);
-
-  // byte 0: configurationVersion (must be 1)
-  const uint8_t config_version = r.u8();
-  if (config_version != 1) {
-    return std::nullopt;
-  }
-
   NalDecoderConfig config;
 
-  // byte 1: lengthSizeMinusOne(2) | ptl_present_flag(1) | reserved(5)
-  const uint8_t flags       = r.u8();
-  config.nal_length_size    = ((flags >> 5) & 0x03u) + 1u;  // bits [6:5]
-  const bool    ptl_present = (flags & 0x10u) != 0;          // bit 4
+  const uint8_t flags = r.u8();
+  config.nal_length_size = ((flags >> 1) & 0x03u) + 1u;
+  const bool ptl_present = (flags & 0x01u) != 0;
 
   if (ptl_present) {
-    // bytes [2..3]:
-    //   ols_idx(9 bits) | num_sublayers(3 bits) | constant_frame_rate(2 bits)
-    //   | chroma_format_idc(2 bits)
-    // byte [4]: bit_depth_minus8(3) | reserved(5)
-    if (r.remaining() < 3) {
-      return std::nullopt;
-    }
-    r.skip(1); // b0 = ols_idx[8:1]
-    const uint8_t b1 = r.u8();
-    // b1[7] = ols_idx[0], b1[6:4] = num_sublayers,
-    // b1[3:2] = constant_frame_rate, b1[1:0] = chroma_format_idc
-    const uint8_t num_sublayers = (b1 >> 4) & 0x07u;
-    r.skip(1);  // bit_depth_minus8(3) | reserved(5)
+    // ols_idx(9) | num_sublayers(3) | constant_frame_rate(2) | chroma_format_idc(2)
+    const uint16_t ols_word = r.u16be();
+    const uint8_t num_sublayers = (ols_word >> 4) & 0x07u;
+    r.skip(1); // bit_depth_minus8(3) | reserved(5)
 
-    // --- VvcPTL() — ISO 14496-15:2022 §11.2.4.3 ---
+    // VvcPTLRecord(num_sublayers), §11.2.4.3
+    const uint8_t num_bytes_constraint_info = r.u8() & 0x3Fu;
+    config.profile_idc = r.u8() >> 1; // general_profile_idc(7) | general_tier_flag(1)
+    r.skip(1); // general_level_idc
+    // ptl_frame_only_constraint_flag, ptl_multilayer_enabled_flag and
+    // general_constraint_info share these bytes.
+    r.skip(num_bytes_constraint_info);
 
-    // byte: general_profile_idc(7) | general_tier_flag(1)
-    if (r.remaining() < 1) {
-      return std::nullopt;
-    }
-    const uint8_t ptl_b0 = r.u8();
-    config.profile_idc   = ptl_b0 >> 1;   // bits [7:1]
-
-    // byte: general_level_idc(8)
-    if (r.remaining() < 1) {
-      return std::nullopt;
-    }
-    r.skip(1);
-
-    // byte: ptl_frame_only_constraint_flag(1) | ptl_multi_layer_enabled_flag(1)
-    //       | gci_present_flag(1) | reserved(5)
-    if (r.remaining() < 1) {
-      return std::nullopt;
-    }
-    const uint8_t constraint_byte = r.u8();
-    const bool    gci_present     = (constraint_byte >> 5) & 0x01u;  // bit 5
-
-    if (gci_present) {
-      // general_constraint_info() is exactly 12 bytes in the stored record
-      // (ISO 14496-15 §11.2 specifies the in-file form is byte-aligned to 12 B)
-      if (r.remaining() < 12) {
-        return std::nullopt;
-      }
-      r.skip(12);
-    }
-
-    // ptl_sublayer_level_present_flag[i] for i in [num_sublayers-2 .. 0]
-    // That is (num_sublayers - 1) flags, packed MSB-first then byte-padded.
     if (num_sublayers > 1) {
-      const uint32_t flag_count = num_sublayers - 1u;
-      const uint32_t flag_bytes = (flag_count + 7u) / 8u;
-      if (r.remaining() < flag_bytes) {
-        return std::nullopt;
+      // ptl_sublayer_level_present_flag[num_sublayers-2..0], zero-padded to a byte
+      const uint8_t present = r.u8();
+      for (uint8_t i = 0; i + 1u < num_sublayers; ++i) {
+        if (present & (0x80u >> i)) r.skip(1); // sublayer_level_idc
       }
-
-      uint8_t present_count = 0;
-      for (uint32_t fb = 0; fb < flag_bytes; ++fb) {
-        const uint8_t fbyte      = r.u8();
-        const uint32_t bits_used = (fb == flag_bytes - 1u)
-            ? flag_count - fb * 8u
-            : 8u;
-        for (uint32_t bit = 0; bit < bits_used; ++bit) {
-          if ((fbyte >> (7u - bit)) & 0x01u) ++present_count;
-        }
-      }
-
-      // Each flagged sublayer has one level_idc byte
-      if (r.remaining() < present_count) {
-        return std::nullopt;
-      }
-      r.skip(present_count);
     }
 
-    // ptl_num_sub_profiles(8) followed by N × 4-byte sub-profile IDCs
-    if (r.remaining() < 1) {
-      return std::nullopt;
-    }
-    const uint8_t num_sub_profiles   = r.u8();
-    const size_t  sub_profile_bytes  = static_cast<size_t>(num_sub_profiles) * 4u;
-    if (r.remaining() < sub_profile_bytes) {
-      return std::nullopt;
-    }
-    r.skip(sub_profile_bytes);
+    const uint8_t num_sub_profiles = r.u8();
+    r.skip(static_cast<size_t>(num_sub_profiles) * 4u); // general_sub_profile_idc
+
+    r.skip(2); // max_picture_width
+    r.skip(2); // max_picture_height
+    r.skip(2); // avg_frame_rate
+    if (!r.ok()) return std::nullopt;
   }
 
-  // num_of_arrays(8)
-  if (r.remaining() < 1) {
-    return std::nullopt;
-  }
+  constexpr uint8_t VVC_OPI_NUT = 12;
+  constexpr uint8_t VVC_DCI_NUT = 13;
+
   const uint8_t num_arrays = r.u8();
-
-  for (uint8_t i = 0; i < num_arrays; ++i) {
-    // array_completeness(1) | reserved(1) | nal_unit_type(6)
-    if (r.remaining() < 3) break;
-    r.skip(1);
-    const uint16_t num_nalus = r.u16be();
+  for (uint8_t i = 0; i < num_arrays && r.ok(); ++i) {
+    // array_completeness(1) | reserved(2) | NAL_unit_type(5)
+    if (r.remaining() < 1) break;
+    const uint8_t nal_unit_type = r.u8() & 0x1Fu;
+    // OPI and DCI arrays omit num_nalus and hold exactly one NAL unit.
+    uint16_t num_nalus = 1;
+    if (nal_unit_type != VVC_OPI_NUT && nal_unit_type != VVC_DCI_NUT) {
+      if (r.remaining() < 2) break;
+      num_nalus = r.u16be();
+    }
 
     for (uint16_t j = 0; j < num_nalus; ++j) {
       if (r.remaining() < 2) break;
