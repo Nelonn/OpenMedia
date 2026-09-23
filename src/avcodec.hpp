@@ -31,6 +31,8 @@ public:
   PFN<AVMediaType(AVCodecID)> avcodec_get_type = nullptr;
   PFN<const char*(AVCodecID)> avcodec_get_name = nullptr;
   PFN<const AVCodec*(void**)> av_codec_iterate = nullptr;
+  PFN<int(const AVCodec*)> av_codec_is_decoder = nullptr;
+  PFN<int(const AVCodec*)> av_codec_is_encoder = nullptr;
   PFN<AVPacket*()> av_packet_alloc = nullptr;
   PFN<void(AVPacket**)> av_packet_free = nullptr;
   PFN<void(AVPacket*)> av_packet_unref = nullptr;

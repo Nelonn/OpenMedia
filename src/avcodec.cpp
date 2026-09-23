@@ -56,6 +56,8 @@ auto LibAVCodec::load() -> bool {
   avcodec_get_type = library_.getProcAddress<PFN<AVMediaType(AVCodecID)>>("avcodec_get_type");
   avcodec_get_name = library_.getProcAddress<PFN<const char*(AVCodecID)>>("avcodec_get_name");
   av_codec_iterate = library_.getProcAddress<PFN<const AVCodec*(void**)>>("av_codec_iterate");
+  av_codec_is_decoder = library_.getProcAddress<PFN<int(const AVCodec*)>>("av_codec_is_decoder");
+  av_codec_is_encoder = library_.getProcAddress<PFN<int(const AVCodec*)>>("av_codec_is_encoder");
   av_packet_alloc = library_.getProcAddress<PFN<AVPacket*()>>("av_packet_alloc");
   av_packet_free = library_.getProcAddress<PFN<void(AVPacket**)>>("av_packet_free");
   av_packet_unref = library_.getProcAddress<PFN<void(AVPacket*)>>("av_packet_unref");
@@ -100,8 +102,8 @@ void AVDeleter<::AVCodecParserContext>::operator()(::AVCodecParserContext* ptr) 
 
 class FFmpegDecoder final : public Decoder {
 public:
-  explicit FFmpegDecoder(AVCodecID codec_id)
-      : av_codec_id_(codec_id) {}
+  explicit FFmpegDecoder(const AVCodec* codec)
+      : av_codec_(codec) {}
 
   ~FFmpegDecoder() override {
     release();
@@ -122,7 +124,7 @@ public:
       }
     }
 
-    const AVCodec* codec = codec_loader.avcodec_find_decoder(av_codec_id_);
+    const AVCodec* codec = av_codec_;
     if (!codec) {
       return OM_CODEC_NOT_SUPPORTED;
     }
@@ -409,7 +411,7 @@ private:
     initialized_ = false;
   }
 
-  AVCodecID av_codec_id_;
+  const AVCodec* av_codec_;
   AVPtr<AVCodecContext> codec_ctx_;
   AVPtr<AVFrame> frame_;
   AVPtr<AVPacket> packet_;
@@ -418,8 +420,8 @@ private:
 
 class FFmpegEncoder final : public Encoder {
 public:
-  explicit FFmpegEncoder(AVCodecID codec_id)
-      : av_codec_id_(codec_id) {}
+  explicit FFmpegEncoder(const AVCodec* codec)
+      : av_codec_(codec) {}
 
   ~FFmpegEncoder() override {
     release();
@@ -440,7 +442,7 @@ public:
       }
     }
 
-    const AVCodec* codec = codec_loader.avcodec_find_encoder(av_codec_id_);
+    const AVCodec* codec = av_codec_;
     if (!codec) {
       return OM_CODEC_NOT_SUPPORTED;
     }
@@ -667,7 +669,7 @@ private:
     initialized_ = false;
   }
 
-  AVCodecID av_codec_id_;
+  const AVCodec* av_codec_;
   AVPtr<AVCodecContext> codec_ctx_;
   AVPtr<AVPacket> packet_;
   VideoFormat configured_video_format_ = {};
@@ -712,6 +714,10 @@ static DynamicFFmpegDescriptors FFMPEG_DESCRIPTORS;
 void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
   auto& loader = LibAVCodec::getInstance();
   if (!loader.load()) return;
+  if (!loader.av_codec_iterate || !loader.av_codec_is_decoder ||
+      !loader.av_codec_is_encoder) {
+    return;
+  }
 
   void* opaque = nullptr;
   while (const AVCodec* codec = loader.av_codec_iterate(&opaque)) {
@@ -740,19 +746,22 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
 
     desc->vendor = "FFmpeg";
     
-    if (loader.avcodec_find_decoder(codec->id)) {
-      AVCodecID av_id = codec->id;
-      desc->decoder_factory = [av_id] {
-        return std::make_unique<FFmpegDecoder>(av_id);
+    // av_codec_iterate yields each implementation separately (e.g. "vvc" and
+    // "libvvenc"), so a descriptor only gets the role its own AVCodec fills and
+    // opens exactly that implementation rather than the default one for the id.
+    if (loader.av_codec_is_decoder(codec)) {
+      desc->decoder_factory = [codec] {
+        return std::make_unique<FFmpegDecoder>(codec);
       };
     }
 
-    if (loader.avcodec_find_encoder(codec->id)) {
-      AVCodecID av_id = codec->id;
-      desc->encoder_factory = [av_id] {
-        return std::make_unique<FFmpegEncoder>(av_id);
+    if (loader.av_codec_is_encoder(codec)) {
+      desc->encoder_factory = [codec] {
+        return std::make_unique<FFmpegEncoder>(codec);
       };
     }
+
+    if (!desc->decoder_factory && !desc->encoder_factory) continue;
     
     registry->registerCodec(desc.get());
     FFMPEG_DESCRIPTORS.descriptors.push_back(std::move(desc));
