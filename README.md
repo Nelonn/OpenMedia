@@ -30,15 +30,16 @@ integration while maintaining a simple, intuitive API.
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Codec   | Decoding | Encoding | Backends                |
-|---------|:--------:|:--------:|-------------------------|
-| AAC     |    ✅     |    ✅     | libfdk-aac, WMF, FFmpeg |
-| ALAC    |    ✅     |    ✅     | libalac, FFmpeg         |
-| FLAC    |    ✅     |    🔧    | libFLAC, FFmpeg         |
-| Opus    |    ✅     |    ✅     | libopus, FFmpeg         |
-| Vorbis  |    ✅     |    ✅     | libvorbis, FFmpeg       |
-| MP3     |    ✅     |    🔧    | minimp3, WMF, FFmpeg    |
-| WAV/PCM |    ✅     |    ✅     | OpenMedia               |
+| Codec    | Decoding | Encoding | Backends                |
+|----------|:--------:|:--------:|-------------------------|
+| AAC      |    ✅    |    ✅    | libfdk-aac, WMF, FFmpeg |
+| ALAC     |    ✅    |    ✅    | libalac, FFmpeg         |
+| FLAC     |    ✅    |    ✅    | libFLAC, FFmpeg         |
+| Opus     |    ✅    |    ✅    | libopus, FFmpeg         |
+| Vorbis   |    ✅    |    ✅    | libvorbis, FFmpeg       |
+| MP3      |    ✅    |    🔧    | minimp3, WMF, FFmpeg    |
+| WAV/PCM  |    ✅    |    ✅    | OpenMedia               |
+| AC3/EAC3 |    ✅    |    -     | OpenMedia, FFmpeg       |
 
 ### Video Codecs
 
