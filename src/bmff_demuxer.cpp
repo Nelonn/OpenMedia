@@ -593,6 +593,8 @@ struct BMFFTrack {
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
   std::vector<uint32_t> sync_samples;
+  // Runs of samples in a 'rap ' / 'sync' sample group: {first (1-based), count}.
+  std::vector<std::pair<uint64_t, uint32_t>> rap_ranges;
   std::vector<STSCEntry> stsc_entries;
   std::vector<STTSEntry> stts_entries;
   std::vector<CTTSEntry> ctts_entries;
@@ -937,7 +939,9 @@ inline auto parseDolbyVisionConfiguration(std::span<const uint8_t> body,
 
 inline auto parseVvcc(std::span<const uint8_t> body,
                       BMFFTrack& track) -> bool {
-  auto config = parseVvcDecoderConfig(body);
+  // VvcConfigurationBox is a FullBox: version(8) | flags(24) precede the record.
+  if (body.size() < 4 || body[0] != 0) return false;
+  auto config = parseVvcDecoderConfig(body.subspan(4));
   if (!config) return false;
 
   if (config->profile_idc) {
@@ -1314,6 +1318,40 @@ inline void parseStss(std::span<const uint8_t> body, BMFFTrack& track) {
   std::sort(track.sync_samples.begin(), track.sync_samples.end());
 }
 
+// SampleToGroupBox, ISO/IEC 14496-12 §8.9.2. Open-GOP streams (HEVC/VVC CRA
+// pictures) often list only the first IDR in stss and mark every other random
+// access point through a 'rap ' or 'sync' sample group; without these, seeking
+// has nothing to land on but the first frame.
+inline void parseSbgp(std::span<const uint8_t> body, BMFFTrack& track) {
+  ByteReader r(body);
+  const uint8_t version = r.u8();
+  r.skip(3);
+  const auto grouping_bytes = r.bytes(4);
+  if (grouping_bytes.size() != 4) return;
+  const uint32_t grouping_type = load_u32(grouping_bytes.data());
+  if (grouping_type != ATOM('r', 'a', 'p', ' ') &&
+      grouping_type != ATOM('s', 'y', 'n', 'c')) {
+    return;
+  }
+  if (version == 1) r.skip(4); // grouping_type_parameter
+
+  const uint32_t count = clampEntryCount(r, r.u32be(), 8);
+  uint64_t sample_number = 1;
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t sample_count = r.u32be();
+    const uint32_t group_description_index = r.u32be();
+    if (!r.ok()) break;
+    // Index 0 means "not in any group of this type"; every described entry of
+    // these grouping types is a random access point.
+    // Kept as runs: the counts are unchecked here and only expanded against the
+    // real sample count once the table is built.
+    if (group_description_index != 0 && sample_count != 0) {
+      track.rap_ranges.emplace_back(sample_number, sample_count);
+    }
+    sample_number += sample_count;
+  }
+}
+
 inline void parseTrex(std::span<const uint8_t> body, std::vector<TREXEntry>& trex_entries) {
   if (body.size() < 24) return;
   ByteReader r(body);
@@ -1421,6 +1459,12 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
   track.samples.clear();
   track.samples.reserve(track.sample_sizes.size());
 
+  std::vector<bool> is_rap(track.sample_sizes.size());
+  for (const auto& [first, count] : track.rap_ranges) {
+    const uint64_t end = std::min<uint64_t>(first - 1 + count, is_rap.size());
+    for (uint64_t i = first - 1; i < end; ++i) is_rap[i] = true;
+  }
+
   auto stts_iter = detail::RleIterator(track.stts_entries,
                                        [](const STTSEntry& e) { return e.sample_delta; });
   auto ctts_iter = detail::RleIterator(track.ctts_entries,
@@ -1450,7 +1494,8 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
       const bool is_key = track.sync_samples.empty() ||
                           std::binary_search(track.sync_samples.begin(),
                                              track.sync_samples.end(),
-                                             sample_number);
+                                             sample_number) ||
+                          is_rap[sample_idx];
       const uint32_t sz = track.sample_sizes[sample_idx];
       if (sampleFitsInStream(offset, sz, stream_size)) {
         track.samples.push_back({offset, sz, pts, dts, duration, 0, is_key});
@@ -2305,6 +2350,11 @@ private:
       case ATOM('s', 't', 't', 's'): parseStts(body, track); break;
       case ATOM('c', 't', 't', 's'): parseCtts(body, track); break;
       case ATOM('s', 't', 's', 's'): parseStss(body, track); break;
+      case ATOM('s', 'b', 'g', 'p'):
+        // A traf's sbgp numbers the fragment's own samples; only stbl's maps
+        // onto the sample table built here.
+        if (!current_fragment_) parseSbgp(body, track);
+        break;
 
       // Video metadata
       case ATOM('b', 't', 'r', 't'): parseBtrt(body, track); break;
