@@ -317,6 +317,18 @@ if (OPENMEDIA_OPUS AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm" A
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_OPUS)
 endif ()
 
+if (OPENMEDIA_AC3)
+    target_sources(OpenMedia PRIVATE
+            src/audio/ac3/ac3.cpp
+            src/audio/ac3/ac3_decoder.cpp
+            src/audio/ac3/ac3_decoder.hpp
+            src/audio/ac3/ac3_imdct.cpp
+            src/audio/ac3/ac3_imdct.hpp
+            src/audio/ac3/ac3_tables.hpp
+            src/audio/ac3/eac3_vq_tables.cpp)
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_AC3)
+endif ()
+
 if (OPENMEDIA_VORBIS)
     target_link_libraries(OpenMedia PRIVATE Vorbis::vorbis Vorbis::vorbisenc Vorbis::vorbisfile)
     target_sources(OpenMedia PRIVATE src/audio/vorbis.cpp)

@@ -23,6 +23,11 @@ constexpr Key DAV1D_DEC_ALL_LAYERS = "dav1d.all_layers";
 // int32 - Max frame size in pixels (0 = unlimited)
 constexpr Key DAV1D_DEC_FRAME_SIZE_LIMIT = "dav1d.frame_size_limit";
 
+// AC-3 / E-AC-3
+// float - Dynamic range control scale: 0 ignores the transmitted gain words,
+// 1 applies them as transmitted (default)
+constexpr Key AC3_DEC_DRC_SCALE = "ac3.drc_scale";
+
 // int32 - Encoding application mode (VOIP(2048)/AUDIO(2049)/RESTRICTED_LOWDELAY(2051))
 constexpr Key OPUS_ENC_APPLICATION = "opus.application";
 // int32 - Target bitrate in bps (OPUS_AUTO or specific value)

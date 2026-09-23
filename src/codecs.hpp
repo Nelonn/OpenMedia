@@ -13,6 +13,8 @@ extern const CodecDescriptor CODEC_PCM_F64LE;
 extern const CodecDescriptor CODEC_ALAC;
 extern const CodecDescriptor CODEC_FDK_AAC;
 extern const CodecDescriptor CODEC_MP3;
+extern const CodecDescriptor CODEC_AC3;
+extern const CodecDescriptor CODEC_EAC3;
 extern const CodecDescriptor CODEC_FLAC;
 extern const CodecDescriptor CODEC_VORBIS;
 extern const CodecDescriptor CODEC_OPUS;

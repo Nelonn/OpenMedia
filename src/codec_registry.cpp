@@ -134,6 +134,10 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_AUDIO_TOOLBOX_AC3);
   registry->registerCodec(&CODEC_AUDIO_TOOLBOX_EAC3);
 #endif
+#if defined(OPENMEDIA_AC3)
+  registry->registerCodec(&CODEC_AC3);
+  registry->registerCodec(&CODEC_EAC3);
+#endif
 
   // Video - Software
 #if defined(OPENMEDIA_DAV1D)
