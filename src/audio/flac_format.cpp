@@ -1,8 +1,7 @@
+#include <algorithm>
 #include <array>
-#include <cassert>
+#include <bit>
 #include <cstring>
-#include <functional>
-#include <future>
 #include <openmedia/format_api.hpp>
 #include <openmedia/packet.hpp>
 #include <util/bit_reader.hpp>
@@ -40,12 +39,34 @@ struct FLACStreamInfo {
   uint8_t md5sum[16];
 };
 
+// The cover art bytes themselves live in the demuxer's metadata dictionary,
+// which is where both the image track and the cover-art packet read them from.
 struct FLACPicture {
   OMCodecId codec_id = OM_CODEC_NONE;
-  std::vector<uint8_t> cover_art;
   uint32_t width = 0;
   uint32_t height = 0;
 };
+
+struct FLACSeekPoint {
+  uint64_t sample_number;
+  uint64_t stream_offset;
+  uint16_t num_samples;
+};
+
+struct FLACFrameHeader {
+  int32_t size = 0;       // header bytes, including the trailing CRC-8
+  int32_t block_size = 0; // samples per channel
+  int32_t channel_assignment = 0;
+  int64_t coded_number = 0;
+  bool variable_block_size = false;
+};
+
+// RFC 9639 §9.1.5: a variable-block-size stream codes the sample number in the
+// frame header, a fixed-block-size one codes the frame number instead.
+static auto frameStartSample(const FLACFrameHeader& header) -> int64_t {
+  return header.variable_block_size ? header.coded_number
+                                    : header.coded_number * header.block_size;
+}
 
 static auto crc8(const uint8_t* data, size_t len) -> uint8_t {
   static constexpr auto S_TABLE = []() {
@@ -83,54 +104,28 @@ static auto crc16(const uint8_t* data, size_t len) -> uint16_t {
   return crc;
 }
 
+// A UTF-8 lead byte with n leading 1 bits is followed by n-1 continuation
+// bytes; anything else is not a valid lead byte.
 static auto decodeUtf8ExtraBytes(uint8_t b) -> int {
-  if ((b & 0x80) == 0x00)
-    return 0;
-  else if ((b & 0xE0) == 0xC0)
-    return 1;
-  else if ((b & 0xF0) == 0xE0)
-    return 2;
-  else if ((b & 0xF8) == 0xF0)
-    return 3;
-  else if ((b & 0xFC) == 0xF8)
-    return 4;
-  else if ((b & 0xFE) == 0xFC)
-    return 5;
-  else if (b == 0xFE)
-    return 6;
-  return -1;
+  if (b < 0x80) return 0;
+  const int ones = std::countl_one(b);
+  return (ones >= 2 && ones <= 7) ? ones - 1 : -1;
 }
 
-static auto decodeUtf8Number(const uint8_t* data, size_t& pos, size_t max_len) -> uint64_t {
-  if (pos >= max_len) return 0;
-  uint8_t b = data[pos++];
-  int extra = decodeUtf8ExtraBytes(b);
-  if (extra < 0 || pos + extra > max_len) return 0;
+// RFC 9639 §9.1.1. Codes 0, 6 and 7 are not in the table: 0 means "the
+// STREAMINFO minimum" and 6/7 carry the value in the header itself.
+static constexpr int32_t BLOCK_SIZE_CODES[16] = {
+    0, 192, 576, 1152, 2304, 4608, 0, 0,
+    256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
 
-  uint64_t v = 0;
-  if (extra == 0)
-    v = b;
-  else if (extra == 1)
-    v = b & 0x1F;
-  else if (extra == 2)
-    v = b & 0x0F;
-  else if (extra == 3)
-    v = b & 0x07;
-  else if (extra == 4)
-    v = b & 0x03;
-  else if (extra == 5)
-    v = b & 0x01;
+// RFC 9639 §9.1.2. Zero entries name no rate: code 0 defers to STREAMINFO,
+// codes 12-14 carry the value in the header and 15 is invalid.
+static constexpr uint32_t SAMPLE_RATE_CODES[16] = {
+    0, 88200, 176400, 192000, 8000, 16000, 22050, 24000,
+    32000, 44100, 48000, 96000, 0, 0, 0, 0};
 
-  for (int i = 0; i < extra; i++)
-    v = (v << 6) | (data[pos++] & 0x3F);
-  return v;
-}
-
-struct FLACSeekPoint {
-  uint64_t sample_number;
-  uint64_t stream_offset;
-  uint16_t num_samples;
-};
+// RFC 9639 §9.1.4. Code 0 defers to STREAMINFO and code 3 is reserved.
+static constexpr uint8_t BIT_DEPTH_CODES[8] = {0, 8, 12, 0, 16, 20, 24, 32};
 
 static auto parseStreamInfo(std::span<const uint8_t> body, FLACStreamInfo& stream) -> bool {
   if (body.size() != 34) return false;
@@ -174,7 +169,8 @@ static auto pictureCodecFromMime(std::string_view mime) -> OMCodecId {
 
 // METADATA_BLOCK_PICTURE, RFC 9639 §8.8. Keeps the front cover (type 3) or,
 // failing that, the first supported picture.
-static void parsePicture(std::span<const uint8_t> body, FLACPicture& picture) {
+static void parsePicture(std::span<const uint8_t> body, FLACPicture& picture,
+                         Dictionary& metadata) {
   ByteReader r(body);
   const uint32_t picture_type = r.u32be();
   const std::string_view mime = r.str(r.u32be());
@@ -187,57 +183,28 @@ static void parsePicture(std::span<const uint8_t> body, FLACPicture& picture) {
 
   const OMCodecId codec_id = pictureCodecFromMime(mime);
   if (codec_id == OM_CODEC_NONE) return;
-  if (picture_type != 3 && !picture.cover_art.empty()) return;
+  if (picture_type != 3 && picture.codec_id != OM_CODEC_NONE) return;
 
   picture.codec_id = codec_id;
-  picture.cover_art.assign(data.begin(), data.end());
   picture.width = width;
   picture.height = height;
-}
-
-struct FLACFrameInfo {
-  int64_t number = 0;
-  bool is_sample_number = false;
-  int block_size = 0;
-  int channel_assignment = 0;
-};
-
-static auto parseHeaderLen(const uint8_t* data, size_t avail) -> int32_t {
-  if (avail < 6) return -1;
-  if (data[0] != 0xFF || (data[1] & 0xFE) != 0xF8) return -1;
-
-  size_t pos = 4; // sync(2) + block_size/sr hints(1) + ch/bps/reserved(1)
-
-  if (pos >= avail) return -1;
-  int extra = decodeUtf8ExtraBytes(data[pos++]);
-  if (extra < 0) return -1;
-  pos += static_cast<size_t>(extra);
-
-  uint8_t bs_hint = (data[2] >> 4) & 0x0F;
-  if (bs_hint == 0x06) {
-    pos += 1;
-  } else if (bs_hint == 0x07) {
-    pos += 2;
-  }
-
-  uint8_t sr_hint = data[2] & 0x0F;
-  if (sr_hint == 0x0C) {
-    pos += 1;
-  } else if (sr_hint == 0x0D || sr_hint == 0x0E) {
-    pos += 2;
-  }
-
-  pos += 1; // CRC-8
-
-  if (pos > avail) return -1;
-  return static_cast<int32_t>(pos);
+  metadata.setBinary(COVER_ART, data);
+  metadata.setString(COVER_ART_MIME,
+                     codec_id == OM_CODEC_PNG ? std::string_view("image/png")
+                                              : std::string_view("image/jpeg"));
 }
 
 class FLACDemuxer final : public BaseDemuxer {
+  static constexpr size_t READ_CHUNK = 64 * 1024;
+  static constexpr size_t MIN_HEADER_SIZE = 6;
+  static constexpr size_t MAX_HEADER_SIZE = 16;
+  static constexpr size_t RESIDUAL_LOOKAHEAD = 4096;
+  // Where bisecting stops paying off and a forward scan is cheaper.
+  static constexpr int64_t SEARCH_GRANULARITY = 64 * 1024;
+  static constexpr size_t NO_SYNC = static_cast<size_t>(-1);
+
   int64_t audio_data_offset_ = 0;
   int64_t current_sample_pos_ = 0;
-  int64_t current_frame_index_ = 0;
-  bool is_sequential_ = true;
 
   FLACStreamInfo stream_info_ = {};
 
@@ -246,8 +213,13 @@ class FLACDemuxer final : public BaseDemuxer {
   bool cover_art_sent_ = false;
   int32_t cover_art_track_index_ = -1;
 
+  // read_buf_ is sized by hand so refills land straight in it: its size() is
+  // the capacity, and [read_begin_, read_end_) is the data read from the input
+  // but not yet delivered.
   std::vector<uint8_t> read_buf_;
-  int64_t read_buf_origin_ = 0;
+  size_t read_begin_ = 0;
+  size_t read_end_ = 0;
+  int64_t read_origin_ = 0; // file offset of read_buf_[read_begin_]
 
 public:
   auto open(std::unique_ptr<InputStream> input) -> OMError override {
@@ -297,29 +269,30 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
+    // Metadata blocks are read straight into the extradata that the decoder
+    // will be handed, and parsed in place; a PICTURE block can be megabytes,
+    // so staging each one in its own vector first is worth avoiding.
     std::vector<uint8_t> extradata(marker, marker + 4);
 
     bool found_streaminfo = false;
 
     while (true) {
-      uint8_t block_header[4];
-      if (readExact(block_header, 4) != 4) {
+      const size_t header_at = extradata.size();
+      extradata.resize(header_at + 4);
+      if (readExact(extradata.data() + header_at, 4) != 4) {
         return OM_IO_NOT_ENOUGH_DATA;
       }
 
-      bool is_last = (block_header[0] & 0x80) != 0;
-      auto block_type = static_cast<FLACMetadataType>(block_header[0] & 0x7F);
-      uint32_t body_len = load_u24_be(block_header + 1);
+      const bool is_last = (extradata[header_at] & 0x80) != 0;
+      const auto block_type = static_cast<FLACMetadataType>(extradata[header_at] & 0x7F);
+      const uint32_t body_len = load_u24_be(extradata.data() + header_at + 1);
 
-      extradata.insert(extradata.end(), block_header, block_header + 4);
-
-      std::vector<uint8_t> body(body_len);
-      if (body_len > 0) {
-        if (readExact(body.data(), body_len) != body_len) {
-          return OM_IO_NOT_ENOUGH_DATA;
-        }
-        extradata.insert(extradata.end(), body.begin(), body.end());
+      const size_t body_at = extradata.size();
+      extradata.resize(body_at + body_len);
+      if (body_len > 0 && readExact(extradata.data() + body_at, body_len) != body_len) {
+        return OM_IO_NOT_ENOUGH_DATA;
       }
+      const std::span<const uint8_t> body(extradata.data() + body_at, body_len);
 
       switch (block_type) {
         case FLACMetadataType::STREAMINFO:
@@ -335,15 +308,7 @@ public:
           parseVorbisComment(body, metadata_);
           break;
         case FLACMetadataType::PICTURE:
-          parsePicture(body, cover_art_);
-          if (!cover_art_.cover_art.empty()) {
-            metadata_.setBinary(COVER_ART, cover_art_.cover_art);
-            if (cover_art_.codec_id == OM_CODEC_JPEG) {
-              metadata_.setString(COVER_ART_MIME, std::string_view("image/jpeg"));
-            } else if (cover_art_.codec_id == OM_CODEC_PNG) {
-              metadata_.setString(COVER_ART_MIME, std::string_view("image/png"));
-            }
-          }
+          parsePicture(body, cover_art_, metadata_);
           break;
         default:
           break;
@@ -359,6 +324,9 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
+    resetBuffer(audio_data_offset_);
+    current_sample_pos_ = 0;
+
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_AUDIO;
@@ -371,9 +339,9 @@ public:
     track.extradata = std::move(extradata);
     track.metadata = metadata_;
 
-    tracks_.push_back(track);
+    tracks_.push_back(std::move(track));
 
-    if (!cover_art_.cover_art.empty()) {
+    if (cover_art_.codec_id != OM_CODEC_NONE) {
       Track image_track;
       image_track.index = static_cast<int32_t>(tracks_.size());
       image_track.format.type = OM_MEDIA_IMAGE;
@@ -397,405 +365,412 @@ public:
     cover_art_track_index_ = -1;
     cover_art_ = {};
     read_buf_.clear();
-    read_buf_origin_ = 0;
+    read_buf_.shrink_to_fit();
+    resetBuffer(0);
     audio_data_offset_ = 0;
     current_sample_pos_ = 0;
-    current_frame_index_ = 0;
     seek_points_.clear();
     stream_info_ = {};
   }
 
   auto readPacket() -> Result<Packet, OMError> override {
-    if (!cover_art_sent_ && !cover_art_.cover_art.empty()) {
+    if (!cover_art_sent_ && cover_art_.codec_id != OM_CODEC_NONE) {
       cover_art_sent_ = true;
-      Packet pkt;
-      pkt.allocate(cover_art_.cover_art.size());
-      memcpy(pkt.bytes.data(), cover_art_.cover_art.data(), cover_art_.cover_art.size());
-      pkt.stream_index = cover_art_track_index_ >= 0 ? cover_art_track_index_ : 1;
-      pkt.pos = 0;
-      pkt.pts = 0;
-      pkt.dts = 0;
-      pkt.duration = 1;
-      pkt.is_keyframe = true;
-      return Ok(std::move(pkt));
+      if (auto data = metadata_.getBinary(COVER_ART)) {
+        Packet pkt;
+        pkt.allocate(data->size());
+        memcpy(pkt.bytes.data(), data->data(), data->size());
+        pkt.stream_index = cover_art_track_index_ >= 0 ? cover_art_track_index_ : 1;
+        pkt.pos = 0;
+        pkt.pts = 0;
+        pkt.dts = 0;
+        pkt.duration = 1;
+        pkt.is_keyframe = true;
+        return Ok(std::move(pkt));
+      }
     }
     return scanAndDeliverFrame();
   }
 
-  // -----------------------------------------------------------------------
-  // seek()
-  //
-  // When stream_idx < 0: timestamp is in microseconds (us)
-  // Otherwise: timestamp is in track time base units (samples for FLAC)
-  //
-  // Strategy:
-  //   1. Convert the target timestamp to a sample number.
-  //   2. If a seek table exists, jump to the best seek point whose
-  //      sample_number <= target (stream_offset is relative to
-  //      audio_data_offset_).
-  //   3. If no seek table (or the best point is sample 0), seek the
-  //      underlying stream to audio_data_offset_.
-  //   4. Reset the read buffer and its origin to match the new stream
-  //      position.
-  //   5. Call seekScanSync() to advance frame-by-frame until
-  //      current_sample_pos_ reaches the frame that contains the target.
-  // -----------------------------------------------------------------------
-  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
-    is_sequential_ = false;
+  // `timestamp` is in microseconds when stream_idx < 0, otherwise in the
+  // track's time base, which for FLAC is samples.
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode /*mode*/) -> OMError override {
     if (timestamp > 0) {
       cover_art_sent_ = true;
     }
 
-    // Convert timestamp to samples.
-    // If stream_idx < 0, timestamp is in microseconds; otherwise it's already in track time base (samples).
-    const uint64_t sr = stream_info_.sample_rate;
     int64_t target_sample;
     if (stream_idx < 0) {
-      // timestamp is in microseconds
+      const uint64_t sr = stream_info_.sample_rate;
       const uint64_t ts = timestamp < 0 ? 0 : static_cast<uint64_t>(timestamp);
-      const uint64_t seconds = ts / 1'000'000;
-      const uint64_t micros = ts % 1'000'000;
-      const uint64_t samples_from_seconds = seconds * sr;
-      const uint64_t samples_from_micros = (micros * sr) / 1'000'000;
-      target_sample = static_cast<int64_t>(samples_from_seconds + samples_from_micros);
+      // Split at the second boundary so long files cannot overflow the product.
+      target_sample = static_cast<int64_t>((ts / 1'000'000) * sr +
+                                           ((ts % 1'000'000) * sr) / 1'000'000);
     } else {
-      // timestamp is already in track time base (samples)
       target_sample = timestamp;
     }
 
-    // Always discard buffered data — it belongs to the old position.
-    read_buf_.clear();
-    read_buf_origin_ = 0;
-
     if (target_sample <= 0) {
-      current_sample_pos_ = 0;
-      current_frame_index_ = 0;
       if (!input_->seek(audio_data_offset_, Whence::BEG)) {
         return OM_IO_SEEK_FAILED;
       }
-      read_buf_origin_ = audio_data_offset_;
+      resetBuffer(audio_data_offset_);
+      current_sample_pos_ = 0;
       return OM_SUCCESS;
     }
 
-    // ---- Use seek table if available ------------------------------------
-    int64_t seek_file_pos = audio_data_offset_; // absolute file position
-    int64_t seek_sample_pos = 0;                // sample at that position
-
-    if (!seek_points_.empty()) {
-      // Walk forward while the next point is still <= target.
-      // seek_points_ is ordered by sample_number ascending.
-      for (const auto& sp : seek_points_) {
-        if (static_cast<int64_t>(sp.sample_number) <= target_sample) {
-          seek_file_pos = audio_data_offset_ +
-                          static_cast<int64_t>(sp.stream_offset);
-          seek_sample_pos = static_cast<int64_t>(sp.sample_number);
-        } else {
-          break;
-        }
-      }
+    // Seek points are ordered by sample number, so the pair around the target
+    // brackets the region the frame can be in. Most FLAC files carry no seek
+    // table at all, in which case the bracket is the whole audio region.
+    int64_t lo_pos = audio_data_offset_;
+    int64_t lo_sample = 0;
+    int64_t hi_pos = input_->size();
+    int64_t hi_sample = static_cast<int64_t>(stream_info_.total_samples);
+    const auto after = std::upper_bound(
+        seek_points_.begin(), seek_points_.end(), static_cast<uint64_t>(target_sample),
+        [](uint64_t target, const FLACSeekPoint& sp) { return target < sp.sample_number; });
+    if (after != seek_points_.begin()) {
+      const auto& sp = *(after - 1);
+      lo_pos = audio_data_offset_ + static_cast<int64_t>(sp.stream_offset);
+      lo_sample = static_cast<int64_t>(sp.sample_number);
+    }
+    if (after != seek_points_.end()) {
+      hi_pos = audio_data_offset_ + static_cast<int64_t>(after->stream_offset);
+      hi_sample = static_cast<int64_t>(after->sample_number);
     }
 
-    // ---- Position the underlying stream --------------------------------
-    if (!input_->seek(seek_file_pos, Whence::BEG)) {
+    if (hi_pos > lo_pos && input_->canSeek()) {
+      narrowBySearch(target_sample, lo_pos, lo_sample, hi_pos, hi_sample);
+    }
+
+    if (!input_->seek(lo_pos, Whence::BEG)) {
       return OM_IO_SEEK_FAILED;
     }
-    read_buf_origin_ = seek_file_pos;
-    current_sample_pos_ = seek_sample_pos;
-    current_frame_index_ = 0; // will be corrected by seekScanSync
+    resetBuffer(lo_pos);
+    current_sample_pos_ = lo_sample;
 
-    // ---- Scan forward frame-by-frame to the target ---------------------
-    //
-    // seekScanSync() advances current_sample_pos_ by each frame's
-    // block_size and stops as soon as the *next* frame would overshoot
-    // target_sample, i.e. the current frame is the one containing the
-    // target.  The read buffer is left pointing at the start of that
-    // frame so scanAndDeliverFrame() can emit it immediately.
     seekScanSync(target_sample);
 
     return OM_SUCCESS;
   }
 
 private:
+  auto avail() const -> size_t { return read_end_ - read_begin_; }
+  auto cur() const -> const uint8_t* { return read_buf_.data() + read_begin_; }
 
-  // Grows read_buf_ until it holds at least `needed` bytes. read_buf_ may
-  // reallocate, so a BitReader over it must be rebound afterwards; use
-  // ensureAndRebind() for that.
+  void resetBuffer(int64_t origin) {
+    read_begin_ = 0;
+    read_end_ = 0;
+    read_origin_ = origin;
+  }
+
+  // Makes at least `needed` undelivered bytes available at cur(). The buffer
+  // may be compacted, so any pointer or BitReader over it must be re-derived;
+  // offsets relative to cur() stay valid. False at end of input.
   auto ensureBytes(size_t needed) -> bool {
-    while (read_buf_.size() < needed) {
-      uint8_t tmp[8192];
-      size_t n = input_->read(tmp);
+    if (avail() >= needed) return true;
+
+    if (read_begin_ > 0) {
+      const size_t keep = avail();
+      if (keep > 0) {
+        memmove(read_buf_.data(), read_buf_.data() + read_begin_, keep);
+      }
+      read_begin_ = 0;
+      read_end_ = keep;
+    }
+    if (read_buf_.size() < needed + READ_CHUNK) {
+      read_buf_.resize(needed + READ_CHUNK);
+    }
+
+    while (avail() < needed) {
+      const size_t n = input_->read(
+          std::span(read_buf_.data() + read_end_, read_buf_.size() - read_end_));
       if (n == 0) return false;
-      read_buf_.insert(read_buf_.end(), tmp, tmp + n);
+      read_end_ += n;
     }
     return true;
   }
 
-  // ensureBytes() + rebind `br` to the (possibly reallocated) buffer.
-  auto ensureAndRebind(size_t needed, BitReader& br) -> bool {
+  // ensureBytes() + re-point `br` at the buffer it may have moved.
+  auto ensureRebind(size_t needed, BitReader& br) -> bool {
     const bool ok = ensureBytes(needed);
-    br.rebind(read_buf_);
+    br.rebind(std::span(cur(), avail()));
     return ok;
   }
 
+  void consume(size_t n) {
+    read_begin_ += n;
+    read_origin_ += static_cast<int64_t>(n);
+    if (read_begin_ == read_end_) {
+      read_begin_ = 0;
+      read_end_ = 0;
+    }
+  }
+
+  // Offset of the next frame sync word, or NO_SYNC. A sync takes two bytes, so
+  // a trailing 0xFF is never reported as one.
+  static auto findSync(const uint8_t* p, size_t n) -> size_t {
+    for (size_t i = 0; i + 1 < n;) {
+      const auto* hit = static_cast<const uint8_t*>(memchr(p + i, 0xFF, n - 1 - i));
+      if (!hit) break;
+      i = static_cast<size_t>(hit - p);
+      if ((p[i + 1] & 0xFE) == 0xF8) return i;
+      ++i;
+    }
+    return NO_SYNC;
+  }
+
+  // RFC 9639 §9.1. Accepts only a header that fits in `size` and whose CRC-8
+  // matches, which is what tells a real frame from audio data that happens to
+  // contain the sync word.
+  auto parseFrameHeader(const uint8_t* d, size_t size, FLACFrameHeader& out) const -> bool {
+    if (size < MIN_HEADER_SIZE) return false;
+    if (d[0] != 0xFF || (d[1] & 0xFE) != 0xF8) return false;
+
+    const uint8_t bs_code = (d[2] >> 4) & 0x0F;
+    const uint8_t sr_code = d[2] & 0x0F;
+
+    // Cross-check the header against STREAMINFO. Audio data is full of byte
+    // pairs that look like a sync word and the CRC-8 lets one in 256 of them
+    // through; these fields are what make a header found at an arbitrary file
+    // offset trustworthy enough for a seek probe to act on.
+    const uint8_t channel_code = (d[3] >> 4) & 0x0F;
+    if (channel_code > 10) return false; // reserved
+    if ((channel_code < 8 ? channel_code + 1u : 2u) != stream_info_.channels) return false;
+
+    const uint8_t depth_code = (d[3] >> 1) & 0x07;
+    if (depth_code == 3) return false;  // reserved
+    if ((d[3] & 0x01) != 0) return false; // reserved bit
+    if (depth_code != 0 && BIT_DEPTH_CODES[depth_code] != stream_info_.bits_per_sample) return false;
+
+    if (sr_code == 0x0F) return false; // invalid
+    if (SAMPLE_RATE_CODES[sr_code] != 0 && SAMPLE_RATE_CODES[sr_code] != stream_info_.sample_rate) return false;
+
+    // sync(2) + block size/sample rate codes(1) + channels/bps(1), then the
+    // UTF-8 coded frame or sample number.
+    const uint8_t lead = d[4];
+    const int extra = decodeUtf8ExtraBytes(lead);
+    if (extra < 0) return false;
+    size_t pos = 5 + static_cast<size_t>(extra);
+    if (pos > size) return false;
+
+    uint64_t number = extra == 0 ? lead : (lead & (0x3Fu >> extra));
+    for (int i = 0; i < extra; i++) {
+      number = (number << 6) | (d[5 + i] & 0x3F);
+    }
+
+    int64_t block_size = BLOCK_SIZE_CODES[bs_code];
+    if (bs_code == 0x00) {
+      block_size = stream_info_.min_blocksize;
+    } else if (bs_code == 0x06) {
+      if (pos + 1 > size) return false;
+      block_size = static_cast<int64_t>(d[pos]) + 1;
+      pos += 1;
+    } else if (bs_code == 0x07) {
+      if (pos + 2 > size) return false;
+      block_size = static_cast<int64_t>(load_u16_be(d + pos)) + 1;
+      pos += 2;
+    }
+    if (block_size <= 0) return false;
+
+    if (sr_code == 0x0C) {
+      pos += 1;
+    } else if (sr_code == 0x0D || sr_code == 0x0E) {
+      pos += 2;
+    }
+
+    pos += 1; // CRC-8
+    if (pos > size) return false;
+    if (crc8(d, pos - 1) != d[pos - 1]) return false;
+
+    out.size = static_cast<int32_t>(pos);
+    out.block_size = static_cast<int32_t>(block_size);
+    out.channel_assignment = channel_code;
+    out.coded_number = static_cast<int64_t>(number);
+    out.variable_block_size = (d[1] & 0x01) != 0;
+    return true;
+  }
+
+  // Consumes everything up to the next valid frame header and leaves that
+  // header at cur(). False at end of input.
+  auto findNextFrameHeader(FLACFrameHeader& header) -> bool {
+    for (;;) {
+      // A short tail near the end of the file can still hold a last frame, so
+      // a failed top-up is not fatal by itself.
+      ensureBytes(MAX_HEADER_SIZE);
+      if (avail() < MIN_HEADER_SIZE) return false;
+
+      const size_t hit = findSync(cur(), avail());
+      if (hit == NO_SYNC) {
+        // Only the trailing byte can still be the first half of a sync word.
+        consume(avail() - 1);
+        if (!ensureBytes(avail() + READ_CHUNK)) return false;
+        continue;
+      }
+
+      consume(hit);
+      ensureBytes(MAX_HEADER_SIZE);
+      if (parseFrameHeader(cur(), avail(), header)) return true;
+      consume(1);
+    }
+  }
+
+  // Leaves a whole frame at cur() and reports its header and byte length.
+  // A frame carries no length, so the end is found by walking the subframe bits
+  // and confirming the trailing CRC-16 -- which is also what makes a hit
+  // trustworthy when the search started at an arbitrary file offset.
+  auto locateFrame(FLACFrameHeader& header, size_t& frame_size) -> bool {
+    for (;;) {
+      if (!findNextFrameHeader(header)) return false;
+
+      BitReader br(std::span(cur(), avail()));
+      br.skipBits(static_cast<size_t>(header.size) * 8);
+
+      if (!consumeSubframes(br, header) || !br.ok()) {
+        consume(1); // false sync inside audio data
+        continue;
+      }
+
+      br.alignToByte();
+      size_t size = br.bytePosition() + 2; // + CRC-16
+      if (!ensureRebind(size, br)) {
+        if (avail() < br.bytePosition()) return false;
+        size = avail(); // truncated last frame
+      }
+
+      if (size >= 2) {
+        const size_t crc_len = size - 2;
+        if (crc16(cur(), crc_len) != load_u16_be(cur() + crc_len)) {
+          consume(1);
+          continue;
+        }
+      }
+
+      frame_size = size;
+      return true;
+    }
+  }
+
   auto scanAndDeliverFrame() -> Result<Packet, OMError> {
-    // ------------------------------------------------------------------
-    // Phase 1: locate a sync word and validate the frame-header CRC-8.
-    // ------------------------------------------------------------------
-    size_t scan_pos = 0;
-
-    while (true) {
-      if (!ensureBytes(scan_pos + 2)) return Err(OM_FORMAT_END_OF_FILE);
-
-      if (read_buf_[scan_pos] != 0xFF ||
-          (read_buf_[scan_pos + 1] & 0xFE) != 0xF8) {
-        ++scan_pos;
-        continue;
-      }
-
-      // Candidate sync at scan_pos.  Need enough bytes for the maximum
-      // frame header (16 bytes).
-      if (!ensureBytes(scan_pos + 16)) {
-        if (!ensureBytes(scan_pos + 4)) return Err(OM_FORMAT_END_OF_FILE);
-      }
-
-      size_t avail = read_buf_.size() - scan_pos;
-      int hdr_len = parseHeaderLen(read_buf_.data() + scan_pos, avail);
-      if (hdr_len < 0) {
-        ++scan_pos;
-        continue;
-      }
-
-      uint8_t expected_crc = crc8(read_buf_.data() + scan_pos,
-                                  static_cast<size_t>(hdr_len - 1));
-      if (expected_crc != read_buf_[scan_pos + hdr_len - 1]) {
-        ++scan_pos;
-        continue;
-      }
-
-      break; // valid header found at scan_pos
-    }
-
-    size_t frame_start_in_buf = scan_pos;
-
-    // ------------------------------------------------------------------
-    // Phase 2: parse the frame header fields.
-    // ------------------------------------------------------------------
-    FLACFrameInfo info;
-    {
-      const uint8_t* hdr = read_buf_.data() + frame_start_in_buf;
-      size_t avail = read_buf_.size() - frame_start_in_buf;
-      if (!parseFrameHeaderFields(hdr, avail, info)) return Err(OM_FORMAT_PARSE_FAILED);
-    }
-
-    int ch_assignment = info.channel_assignment;
-    bool has_side = (ch_assignment >= 8 && ch_assignment <= 10);
-
-    // ------------------------------------------------------------------
-    // Phase 3: bit-accurate subframe consumption.
-    //
-    // `br` keeps its bit position across buffer growth; `ensure` rebinds it
-    // to read_buf_ after every reallocation.
-    // ------------------------------------------------------------------
-    int hdr_len = parseHeaderLen(read_buf_.data() + frame_start_in_buf,
-                                 read_buf_.size() - frame_start_in_buf);
-    if (hdr_len < 0) return Err(OM_FORMAT_PARSE_FAILED);
-
-    size_t subframe_start_byte = frame_start_in_buf + static_cast<size_t>(hdr_len);
-
-    // Ensure we have a reasonable initial window before starting.
-    if (!ensureBytes(subframe_start_byte + 64)) {
-      if (read_buf_.size() <= subframe_start_byte) return Err(OM_FORMAT_PARSE_FAILED);
-    }
-
-    BitReader br(read_buf_);
-    br.skipBits(subframe_start_byte * 8);
-
-    auto ensure = [&](size_t needed) -> bool {
-      return ensureAndRebind(needed, br);
-    };
-
-    int rc = consumeSubframes(br, ensure,
-                              stream_info_.channels, info.block_size,
-                              stream_info_.bits_per_sample, has_side, ch_assignment);
-    if (rc < 0 || !br.ok()) {
-      // False positive — step over this sync byte and retry.
-      read_buf_.erase(read_buf_.begin(),
-                      read_buf_.begin() + frame_start_in_buf + 1);
-      return scanAndDeliverFrame();
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 4: align to byte boundary, then consume the 2-byte CRC-16.
-    // ------------------------------------------------------------------
-    // br.bitPosition() is the exact bit position after the last subframe bit.
-    br.alignToByte();
-    size_t aligned_byte = br.bytePosition();         // first byte after subframe data
-    size_t frame_end_in_buf = aligned_byte + 2; // +2 for CRC-16
-
-    if (!ensure(frame_end_in_buf)) {
-      if (read_buf_.size() < aligned_byte) return Err(OM_FORMAT_PARSE_FAILED);
-      frame_end_in_buf = read_buf_.size();
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 4b: verify CRC-16.
-    // ------------------------------------------------------------------
-    if (frame_end_in_buf >= frame_start_in_buf + 2) {
-      size_t crc_data_len = frame_end_in_buf - frame_start_in_buf - 2;
-      uint16_t computed = crc16(read_buf_.data() + frame_start_in_buf, crc_data_len);
-      const uint8_t* crc_bytes = read_buf_.data() + frame_start_in_buf + crc_data_len;
-      uint16_t stored = static_cast<uint16_t>(load_u16_be(crc_bytes));
-
-      if (computed != stored) {
-        read_buf_.erase(read_buf_.begin(),
-                        read_buf_.begin() + frame_start_in_buf + 1);
-        return scanAndDeliverFrame();
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // Phase 5: emit the packet.
-    // ------------------------------------------------------------------
-    size_t frame_size = frame_end_in_buf - frame_start_in_buf;
+    FLACFrameHeader header = {};
+    size_t frame_size = 0;
+    if (!locateFrame(header, frame_size)) return Err(OM_FORMAT_END_OF_FILE);
 
     Packet pkt;
     pkt.allocate(frame_size);
-    memcpy(pkt.bytes.data(), read_buf_.data() + frame_start_in_buf, frame_size);
+    memcpy(pkt.bytes.data(), cur(), frame_size);
+
+    // The frame passed its CRC-16, so its own header is a better timestamp
+    // than a running total: a seek lands exactly, and a skipped or corrupt
+    // frame cannot shift everything that follows it.
+    current_sample_pos_ = frameStartSample(header);
 
     pkt.stream_index = 0;
-    pkt.pos = read_buf_origin_ + static_cast<int64_t>(frame_start_in_buf);
+    pkt.pos = read_origin_;
     pkt.pts = pkt.dts = current_sample_pos_;
-    pkt.duration = info.block_size;
+    pkt.duration = header.block_size;
 
-    current_sample_pos_ += info.block_size;
-    current_frame_index_ += 1;
-
-    read_buf_.erase(read_buf_.begin(),
-                    read_buf_.begin() + frame_end_in_buf);
-    read_buf_origin_ += static_cast<int64_t>(frame_end_in_buf);
+    current_sample_pos_ += header.block_size;
+    consume(frame_size);
 
     return Ok(std::move(pkt));
   }
 
-  // =======================================================================
-  // Bit-accurate subframe consumer (RFC 9639 §10.2 – §10.2.4).
+  // RFC 9639 §10.2 - §10.2.4. Steps over the subframe bits without decoding
+  // them; the demuxer only needs to know where the frame ends.
   //
-  // CONTRACT: `ensure(n)` rebinds br after growing the buffer, so br stays
-  // valid across reallocations. Nothing else here touches the buffer.
-  //
-  // Returns 0 on success, -1 on parse error.
-  // =======================================================================
-  auto consumeSubframes(BitReader& br,
-                        const std::function<bool(size_t)>& ensure,
-                        int channels, int block_size,
-                        int sample_bits, bool has_side, int ch_assignment) -> int {
+  // Every top-up goes through ensureRebind(): read_buf_ can move under `br`,
+  // and bit positions are relative to cur(), which survives that.
+  auto consumeSubframes(BitReader& br, const FLACFrameHeader& header) -> bool {
+    const int channels = static_cast<int>(stream_info_.channels);
+    const int block_size = header.block_size;
+    const int assignment = header.channel_assignment;
+    const bool has_side = assignment >= 8 && assignment <= 10;
+
     for (int ch = 0; ch < channels; ch++) {
-      int bps = sample_bits;
+      int bps = static_cast<int>(stream_info_.bits_per_sample);
       if (has_side) {
-        bool is_side =
-            (ch_assignment == 8 && ch == 1) ||
-            (ch_assignment == 9 && ch == 0) ||
-            (ch_assignment == 10 && ch == 1);
+        const bool is_side = (assignment == 8 && ch == 1) ||
+                             (assignment == 9 && ch == 0) ||
+                             (assignment == 10 && ch == 1);
         if (is_side) bps++;
       }
 
-      // ---- Subframe header (RFC 9639 §10.2) -------------------------
-      // Need at least 1 byte for the subframe header.
-      // We are always byte-aligned at this point (the frame header
-      // ends on a byte boundary, and each subframe ends on a bit
-      // boundary that we align after the last subframe).
-      if (!ensure(br.bytePosition() + 2)) return -1;
+      if (!ensureRebind(br.bytePosition() + 2, br)) return false;
 
-      uint32_t sf_hdr = br.readBits(8);
-      if (sf_hdr & 0x80) return -1; // reserved bit must be zero
+      const uint32_t sf_header = br.readBits(8);
+      if (sf_header & 0x80) return false; // reserved bit must be zero
 
-      int type = static_cast<int>((sf_hdr >> 1) & 0x3F);
+      const int type = static_cast<int>((sf_header >> 1) & 0x3F);
 
-      int wasted_bits = 0;
-      if (sf_hdr & 1) {
-        // Unary-coded wasted bits: consume 0-bits until stop bit 1.
-        // The number of wasted bits = zero_count + 1.
+      if (sf_header & 1) {
+        // Wasted bits are unary-coded: k zeros then a stop bit means k+1.
         int k = 0;
-        while (true) {
-          // Grow the buffer if we are near its edge mid-unary.
-          if (br.bytePosition() + 2 > read_buf_.size()) {
-            if (!ensure(br.bytePosition() + 64)) return -1;
+        for (;;) {
+          if (br.bytePosition() + 2 > avail() &&
+              !ensureRebind(br.bytePosition() + 64, br)) {
+            return false;
           }
           if (br.readBits(1) != 0) break;
-          if (++k > 30) return -1;
+          if (++k > 30) return false;
         }
-        wasted_bits = k + 1;
+        bps -= k + 1;
       }
-      bps -= wasted_bits;
-      if (bps <= 0) return -1;
+      if (bps <= 0) return false;
 
-      // ---- Subframe data (RFC 9639 §10.2.1 – §10.2.4) ---------------
-      if (type == 0) {
-        // SUBFRAME_CONSTANT
-        size_t need = br.bytePosition() + static_cast<size_t>((bps + 7) / 8) + 1;
-        if (!ensure(need)) return -1;
-        br.skipBits(bps);
+      if (type == 0) { // SUBFRAME_CONSTANT
+        if (!ensureRebind(br.bytePosition() + static_cast<size_t>((bps + 7) / 8) + 1, br)) return false;
+        br.skipBits(static_cast<size_t>(bps));
 
-      } else if (type == 1) {
-        // SUBFRAME_VERBATIM
-        int64_t verbatim_bits = static_cast<int64_t>(bps) * block_size;
-        size_t verbatim_bytes = static_cast<size_t>((verbatim_bits + 7) / 8);
-        if (!ensure(br.bytePosition() + verbatim_bytes + 1)) return -1;
-        br.skipBits(verbatim_bits);
+      } else if (type == 1) { // SUBFRAME_VERBATIM
+        const int64_t verbatim_bits = static_cast<int64_t>(bps) * block_size;
+        const size_t verbatim_bytes = static_cast<size_t>((verbatim_bits + 7) / 8);
+        if (!ensureRebind(br.bytePosition() + verbatim_bytes + 1, br)) return false;
+        br.skipBits(static_cast<size_t>(verbatim_bits));
 
-      } else if (type >= 8 && type <= 12) {
-        // SUBFRAME_FIXED
-        int order = type - 8;
-        if (order > block_size) return -1;
-        int64_t warmup_bits = static_cast<int64_t>(bps) * order;
-        if (!ensure(br.bytePosition() + static_cast<size_t>((warmup_bits + 7) / 8) + 16))
-          return -1;
-        br.skipBits(warmup_bits);
-        if (consumeResidual(br, ensure, block_size, order) < 0) return -1;
+      } else if (type >= 8 && type <= 12) { // SUBFRAME_FIXED
+        const int order = type - 8;
+        if (order > block_size) return false;
+        const int64_t warmup_bits = static_cast<int64_t>(bps) * order;
+        if (!ensureRebind(br.bytePosition() + static_cast<size_t>((warmup_bits + 7) / 8) + 16, br)) return false;
+        br.skipBits(static_cast<size_t>(warmup_bits));
+        if (!consumeResidual(br, block_size, order)) return false;
 
-      } else if (type >= 32 && type <= 63) {
-        // SUBFRAME_LPC
-        int order = type - 31;
-        if (order > block_size) return -1;
-        int64_t warmup_bits = static_cast<int64_t>(bps) * order;
-        if (!ensure(br.bytePosition() + static_cast<size_t>((warmup_bits + 7) / 8) + 32))
-          return -1;
-        br.skipBits(warmup_bits);
-        int qlp_prec = static_cast<int>(br.readBits(4)) + 1;
+      } else if (type >= 32 && type <= 63) { // SUBFRAME_LPC
+        const int order = type - 31;
+        if (order > block_size) return false;
+        const int64_t warmup_bits = static_cast<int64_t>(bps) * order;
+        if (!ensureRebind(br.bytePosition() + static_cast<size_t>((warmup_bits + 7) / 8) + 32, br)) return false;
+        br.skipBits(static_cast<size_t>(warmup_bits));
+        const int qlp_precision = static_cast<int>(br.readBits(4)) + 1;
         br.skipBits(5); // qlp_shift
-        int64_t coeff_bits = static_cast<int64_t>(qlp_prec) * order;
-        if (!ensure(br.bytePosition() + static_cast<size_t>((coeff_bits + 7) / 8) + 16))
-          return -1;
-        br.skipBits(coeff_bits);
-        if (consumeResidual(br, ensure, block_size, order) < 0) return -1;
+        const int64_t coeff_bits = static_cast<int64_t>(qlp_precision) * order;
+        if (!ensureRebind(br.bytePosition() + static_cast<size_t>((coeff_bits + 7) / 8) + 16, br)) return false;
+        br.skipBits(static_cast<size_t>(coeff_bits));
+        if (!consumeResidual(br, block_size, order)) return false;
 
       } else {
-        return -1; // reserved subframe type
+        return false; // reserved subframe type
       }
     }
-    return 0;
+    return true;
   }
 
-  // =======================================================================
-  // Rice-coded residual consumer (RFC 9639 §10.2.5).
-  // Returns 0 on success, -1 on error.
-  // =======================================================================
-  auto consumeResidual(BitReader& br,
-                       const std::function<bool(size_t)>& ensure,
-                       int block_size, int predictor_order) -> int {
-    if (!ensure(br.bytePosition() + 2)) return -1;
+  // Rice-coded residual, RFC 9639 §10.2.5.
+  auto consumeResidual(BitReader& br, int block_size, int predictor_order) -> bool {
+    if (!ensureRebind(br.bytePosition() + 2, br)) return false;
 
-    int coding_method = static_cast<int>(br.readBits(2));
-    if (coding_method > 1) return -1;
-    int partition_order = static_cast<int>(br.readBits(4));
-    int num_partitions = 1 << partition_order;
-    int rice_param_bits = (coding_method == 0) ? 4 : 5;
-    int escape_value = (coding_method == 0) ? 15 : 31;
+    const int coding_method = static_cast<int>(br.readBits(2));
+    if (coding_method > 1) return false;
+    const int partition_order = static_cast<int>(br.readBits(4));
+    const int num_partitions = 1 << partition_order;
+    const uint32_t rice_param_bits = (coding_method == 0) ? 4 : 5;
+    const int escape_value = (coding_method == 0) ? 15 : 31;
 
     for (int p = 0; p < num_partitions; p++) {
-      if (!ensure(br.bytePosition() + 4)) return -1;
+      if (!ensureRebind(br.bytePosition() + 4, br)) return false;
 
-      int rice_param = static_cast<int>(br.readBits(rice_param_bits));
+      const int rice_param = static_cast<int>(br.readBits(rice_param_bits));
 
       int samples_in_partition;
       if (partition_order == 0) {
@@ -805,200 +780,124 @@ private:
       } else {
         samples_in_partition = block_size >> partition_order;
       }
-      if (samples_in_partition < 0) return -1;
+      if (samples_in_partition < 0) return false;
 
       if (rice_param == escape_value) {
         // Escaped: 5 bits of raw_bits, then raw_bits per sample.
-        if (!ensure(br.bytePosition() + 2)) return -1;
-        int raw_bits = static_cast<int>(br.readBits(5));
-        int64_t total_bits = static_cast<int64_t>(raw_bits) * samples_in_partition;
-        size_t need_bytes = br.bytePosition() + static_cast<size_t>((total_bits + 7) / 8) + 1;
-        if (!ensure(need_bytes)) return -1;
-        br.skipBits(total_bits);
-
-      } else {
-        // Standard Rice: unary quotient (stop-bit = 1) + rice_param remainder bits.
-        for (int s = 0; s < samples_in_partition; s++) {
-          // Grow buffer on demand while reading the unary prefix.
-          int zeros = 0;
-          while (true) {
-            if (br.bytePosition() + 8 > read_buf_.size()) {
-              if (!ensure(br.bytePosition() + 4096)) return -1;
-            }
-            if (br.readBits(1) != 0) break;
-            if (++zeros > 65536) return -1;
-          }
-          if (rice_param > 0) {
-            if (br.bytePosition() + 8 > read_buf_.size()) {
-              if (!ensure(br.bytePosition() + 4096)) return -1;
-            }
-            br.skipBits(rice_param);
-          }
-        }
+        if (!ensureRebind(br.bytePosition() + 2, br)) return false;
+        const int raw_bits = static_cast<int>(br.readBits(5));
+        const int64_t total_bits = static_cast<int64_t>(raw_bits) * samples_in_partition;
+        const size_t need = br.bytePosition() + static_cast<size_t>((total_bits + 7) / 8) + 1;
+        if (!ensureRebind(need, br)) return false;
+        br.skipBits(static_cast<size_t>(total_bits));
+        continue;
       }
+
+      // Unary quotient terminated by a 1 bit, then rice_param remainder bits.
+      // Scanning the quotient 32 bits at a time needs a margin: one sample can
+      // consume 32 + 1 + 30 bits, and bytePosition() rounds down, so 16 bytes
+      // in reserve is the smallest that always covers it.
+      for (int s = 0; s < samples_in_partition; s++) {
+        uint32_t zeros = 0;
+        for (;;) {
+          if (br.bytePosition() + 16 > avail() &&
+              !ensureRebind(br.bytePosition() + RESIDUAL_LOOKAHEAD, br)) {
+            return false;
+          }
+          const auto lead = static_cast<uint32_t>(std::countl_zero(br.peekBits(32)));
+          if (lead < 32) {
+            br.skipBits(lead + 1);
+            break;
+          }
+          // peekBits() zero-pads past the end, so a whole word of zeros at the
+          // tail is padding rather than a quotient.
+          if (br.bitsLeft() < 32) return false;
+          br.skipBits(32);
+          zeros += 32;
+          if (zeros > 65536) return false;
+        }
+        br.skipBits(static_cast<size_t>(rice_param));
+      }
+      if (!br.ok()) return false;
     }
-    return 0;
-  }
-
-  auto parseFrameHeaderFields(const uint8_t* data, size_t avail,
-                              FLACFrameInfo& info) const -> bool {
-    int hdr_len = parseHeaderLen(data, avail);
-    if (hdr_len < 0) return false;
-
-    info.is_sample_number = (data[1] & 0x01) != 0;
-    info.channel_assignment = (data[3] >> 4) & 0x0F;
-    info.block_size = static_cast<int>(decodeBlockSizeFromHeader(data, avail));
-    if (info.block_size <= 0) return false;
-
-    size_t pos = 4;
-    info.number = static_cast<int64_t>(decodeUtf8Number(data, pos, avail));
     return true;
-  }
-
-  auto decodeBlockSizeFromHeader(const uint8_t* data, size_t avail) const -> int64_t {
-    if (avail < 3) return 0;
-    uint8_t hint = (data[2] >> 4) & 0x0F;
-    switch (hint) {
-      case 0x00: return stream_info_.min_blocksize;
-      case 0x01: return 192;
-      case 0x02: return 576;
-      case 0x03: return 1152;
-      case 0x04: return 2304;
-      case 0x05: return 4608;
-      case 0x08: return 256;
-      case 0x09: return 512;
-      case 0x0A: return 1024;
-      case 0x0B: return 2048;
-      case 0x0C: return 4096;
-      case 0x0D: return 8192;
-      case 0x0E: return 16384;
-      case 0x0F: return 32768;
-      default: break;
-    }
-    size_t pos = 4;
-    if (pos >= avail) return 0;
-    int extra = decodeUtf8ExtraBytes(data[pos++]);
-    if (extra < 0) return 0;
-    pos += static_cast<size_t>(extra);
-
-    if (hint == 0x06 && pos < avail)
-      return static_cast<int64_t>(data[pos]) + 1;
-    if (hint == 0x07 && pos + 1 < avail)
-      return static_cast<int64_t>(load_u16_be(data + pos)) + 1;
-    return 0;
   }
 
   auto readExact(void* dst, size_t n) -> size_t {
     return input_->read(std::span(static_cast<uint8_t*>(dst), n));
   }
 
-  // -----------------------------------------------------------------------
-  // seekScanSync — advance frame-by-frame until the frame that *contains*
-  // target_sample is at the front of read_buf_.
+  // Narrows [lo_pos, hi_pos) to the last frame starting at or before
+  // target_sample, by probing file positions and reading the sample number out
+  // of the first frame header at each one.
   //
-  // We stop when advancing by one more frame would push current_sample_pos_
-  // past target_sample, meaning the current frame is the right one to
-  // deliver first.
-  //
-  // All positions are in samples (same unit as current_sample_pos_ and
-  // target_sample).  read_buf_origin_ is kept in sync with every
-  // consume/trim of read_buf_.
-  //
-  // Bug fixes vs. original:
-  //   - Comparison is now sample vs. sample (was sample vs. ns).
-  //   - After a valid frame is found and consumed, the entire frame is
-  //     erased from read_buf_ (not just 2 bytes), so we advance correctly.
-  //   - current_frame_index_ is incremented for each consumed frame.
-  // -----------------------------------------------------------------------
-  void seekScanSync(int64_t target_sample) {
-    while (current_sample_pos_ < target_sample) {
+  // Without this a file with no seek table can only be seeked by scanning every
+  // frame from the start, which on a long hi-res stream means reading hundreds
+  // of megabytes to jump to the middle.
+  void narrowBySearch(int64_t target_sample, int64_t& lo_pos, int64_t& lo_sample,
+                      int64_t hi_pos, int64_t hi_sample) {
+    const int64_t granularity =
+        std::max<int64_t>(SEARCH_GRANULARITY, 4 * static_cast<int64_t>(stream_info_.max_framesize));
 
-      // Read ahead in large chunks, not 2 bytes at a time.
-      constexpr size_t CHUNK_SIZE = 65536;
-      if (read_buf_.size() < 16) {
-        if (!ensureBytes(CHUNK_SIZE)) return;
+    for (int probe = 0; hi_pos - lo_pos > granularity; probe++) {
+      // A FLAC stream's bitrate is steady enough over a long window that
+      // interpolating on the sample number usually lands within a frame or two,
+      // where bisecting the same range would take a dozen reads. Every other
+      // probe bisects anyway, so a stream that defeats the estimate still
+      // converges in a bounded number of steps.
+      int64_t guess = lo_pos + (hi_pos - lo_pos) / 2;
+      if (probe % 2 == 0 && hi_sample > lo_sample && target_sample > lo_sample) {
+        const double ratio = static_cast<double>(target_sample - lo_sample) /
+                             static_cast<double>(hi_sample - lo_sample);
+        guess = lo_pos + static_cast<int64_t>(static_cast<double>(hi_pos - lo_pos) * ratio);
+        guess = std::clamp(guess, lo_pos + 1, hi_pos - 1);
       }
 
-      // Scan for sync word.
-      size_t sync_pos = read_buf_.size(); // sentinel = not found
-      for (size_t i = 0; i + 1 < read_buf_.size(); i++) {
-        if (read_buf_[i] == 0xFF && (read_buf_[i + 1] & 0xFE) == 0xF8) {
-          sync_pos = i;
-          break;
-        }
-      }
+      if (!input_->seek(guess, Whence::BEG)) return;
+      resetBuffer(guess);
 
-      if (sync_pos == read_buf_.size()) {
-        // No sync found — discard all but last byte, fetch more.
-        size_t keep = read_buf_.empty() ? 0 : 1;
-        read_buf_origin_ += static_cast<int64_t>(read_buf_.size() - keep);
-        if (keep)
-          read_buf_ = {read_buf_.back()};
-        else
-          read_buf_.clear();
-        if (!ensureBytes(CHUNK_SIZE)) return;
+      FLACFrameHeader header = {};
+      if (!findNextFrameHeader(header)) {
+        hi_pos = guess; // nothing parseable beyond here
         continue;
       }
 
-      // Discard bytes before sync.
-      if (sync_pos > 0) {
-        read_buf_origin_ += static_cast<int64_t>(sync_pos);
-        read_buf_.erase(read_buf_.begin(), read_buf_.begin() + sync_pos);
-      }
-
-      // Need full header to validate.
-      if (!ensureBytes(16)) return;
-
-      int hdr_len = parseHeaderLen(read_buf_.data(), read_buf_.size());
-      if (hdr_len < 0) {
-        // False sync — skip this byte.
-        read_buf_origin_++;
-        read_buf_.erase(read_buf_.begin(), read_buf_.begin() + 1);
-        continue;
-      }
-
-      if (!ensureBytes(static_cast<size_t>(hdr_len))) return;
-      uint8_t expected_crc = crc8(read_buf_.data(), static_cast<size_t>(hdr_len - 1));
-      if (expected_crc != read_buf_[static_cast<size_t>(hdr_len - 1)]) {
-        // CRC-8 mismatch — false sync, skip one byte.
-        read_buf_origin_++;
-        read_buf_.erase(read_buf_.begin(), read_buf_.begin() + 1);
-        continue;
-      }
-
-      int64_t block_size = decodeBlockSizeFromHeader(read_buf_.data(), read_buf_.size());
-      if (block_size <= 0) {
-        read_buf_origin_++;
-        read_buf_.erase(read_buf_.begin(), read_buf_.begin() + 1);
-        continue;
-      }
-
-      // Is this the frame containing target_sample?
-      if (current_sample_pos_ + block_size > target_sample) {
-        break; // Leave this frame at front of read_buf_ for delivery.
-      }
-
-      // This frame is before the target. Skip the whole frame.
-      // Use min_framesize as a fast-forward hint if available.
-      uint32_t min_fs = stream_info_.min_framesize;
-      if (min_fs > 0 && static_cast<size_t>(hdr_len) + min_fs <= read_buf_.size()) {
-        // Skip at least min_framesize bytes from the frame start,
-        // past the header, so we don't re-match this sync word.
-        size_t skip = static_cast<size_t>(hdr_len) + min_fs;
-        // But don't skip past a potential next sync — just advance past
-        // the header so the scan loop can't re-find this sync word.
-        // Actually: skip hdr_len so we land INSIDE the frame body,
-        // guaranteeing the next scan won't re-match this sync.
-        read_buf_origin_ += static_cast<int64_t>(skip);
-        read_buf_.erase(read_buf_.begin(), read_buf_.begin() + skip);
+      const int64_t sample = frameStartSample(header);
+      if (sample <= target_sample) {
+        lo_pos = read_origin_; // the header's own offset, not the probe point
+        lo_sample = sample;
       } else {
-        // Skip just past the header to enter the frame body.
-        read_buf_origin_ += static_cast<int64_t>(hdr_len);
-        read_buf_.erase(read_buf_.begin(), read_buf_.begin() + hdr_len);
+        hi_pos = guess;
+        hi_sample = sample;
       }
+    }
+  }
 
-      current_sample_pos_ += block_size;
-      current_frame_index_ += 1;
+  // Advances frame by frame until the frame holding target_sample is at cur(),
+  // ready for the next readPacket(). It stops one frame short on purpose: the
+  // frame whose range covers the target is the one that has to be delivered.
+  void seekScanSync(int64_t target_sample) {
+    FLACFrameHeader header = {};
+
+    while (current_sample_pos_ < target_sample) {
+      if (!findNextFrameHeader(header)) return;
+
+      current_sample_pos_ = frameStartSample(header);
+      if (current_sample_pos_ + header.block_size > target_sample) return;
+
+      // The body is stepped over rather than parsed. Every frame is at least
+      // min_framesize bytes long, so skipping that far can never cross the next
+      // sync word; the header size alone is the fallback that still guarantees
+      // forward progress.
+      size_t skip = static_cast<size_t>(header.size);
+      const uint32_t min_framesize = stream_info_.min_framesize;
+      if (min_framesize > skip && min_framesize <= READ_CHUNK) {
+        skip = min_framesize;
+      }
+      if (!ensureBytes(skip)) return;
+      consume(skip);
+
+      current_sample_pos_ += header.block_size;
     }
   }
 };
@@ -1012,7 +911,6 @@ class FLACMuxer final : public BaseMuxer {
   uint32_t cover_art_width_ = 0;
   uint32_t cover_art_height_ = 0;
   uint64_t total_audio_samples_ = 0;
-  uint64_t total_audio_bytes_ = 0;
   int64_t streaminfo_offset_ = -1;
   std::vector<uint8_t> streaminfo_bytes_;
   uint32_t min_blocksize_ = 0xFFFF;
@@ -1031,42 +929,14 @@ public:
     }
     opened_ = true;
     finalized_ = false;
-    header_written_ = false;
-    audio_track_index_ = -1;
-    image_track_index_ = -1;
-    cover_art_data_.clear();
-    cover_art_codec_ = OM_CODEC_NONE;
-    cover_art_width_ = 0;
-    cover_art_height_ = 0;
-    total_audio_samples_ = 0;
-    total_audio_bytes_ = 0;
-    streaminfo_offset_ = -1;
-    streaminfo_bytes_.clear();
-    min_blocksize_ = 0xFFFF;
-    max_blocksize_ = 0;
-    min_framesize_ = 0xFFFFFF;
-    max_framesize_ = 0;
+    resetState();
     tracks_.clear();
     return OM_SUCCESS;
   }
 
   void close() override {
     BaseMuxer::close();
-    audio_track_index_ = -1;
-    image_track_index_ = -1;
-    header_written_ = false;
-    cover_art_data_.clear();
-    cover_art_codec_ = OM_CODEC_NONE;
-    cover_art_width_ = 0;
-    cover_art_height_ = 0;
-    total_audio_samples_ = 0;
-    total_audio_bytes_ = 0;
-    streaminfo_offset_ = -1;
-    streaminfo_bytes_.clear();
-    min_blocksize_ = 0xFFFF;
-    max_blocksize_ = 0;
-    min_framesize_ = 0xFFFFFF;
-    max_framesize_ = 0;
+    resetState();
   }
 
   auto addTrack(const Track& track) -> int32_t override {
@@ -1138,7 +1008,6 @@ public:
     uint32_t fs = static_cast<uint32_t>(packet.bytes.size());
     if (fs < min_framesize_) min_framesize_ = fs;
     if (fs > max_framesize_) max_framesize_ = fs;
-    total_audio_bytes_ += fs;
 
     size_t written = output_->write(packet.bytes);
     if (written != packet.bytes.size()) {
@@ -1188,6 +1057,23 @@ public:
   }
 
 private:
+  void resetState() {
+    audio_track_index_ = -1;
+    image_track_index_ = -1;
+    header_written_ = false;
+    cover_art_data_.clear();
+    cover_art_codec_ = OM_CODEC_NONE;
+    cover_art_width_ = 0;
+    cover_art_height_ = 0;
+    total_audio_samples_ = 0;
+    streaminfo_offset_ = -1;
+    streaminfo_bytes_.clear();
+    min_blocksize_ = 0xFFFF;
+    max_blocksize_ = 0;
+    min_framesize_ = 0xFFFFFF;
+    max_framesize_ = 0;
+  }
+
   auto writeHeader() -> OMError {
     if (audio_track_index_ < 0) {
       return OM_COMMON_NOT_INITIALIZED;
