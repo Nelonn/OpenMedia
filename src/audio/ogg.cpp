@@ -1,12 +1,12 @@
 #include <ogg/ogg.h>
+#include <array>
 #include <cstdlib>
 #include <cstring>
-#include <future>
 #include <deque>
-#include <map>
 #include <openmedia/format_api.hpp>
 #include <openmedia/packet.hpp>
 #include <openmedia/track.hpp>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <util/demuxer_base.hpp>
@@ -18,54 +18,58 @@ namespace openmedia {
 
 namespace {
 
-void appendOpusTags(std::vector<uint8_t>& packet, std::string_view vendor) {
-  packet.clear();
+auto buildOpusTags(std::string_view vendor) -> std::vector<uint8_t> {
+  std::vector<uint8_t> packet;
   packet.reserve(16 + vendor.size());
   packet.insert(packet.end(), {'O', 'p', 'u', 's', 'T', 'a', 'g', 's'});
-  packet.push_back(static_cast<uint8_t>(vendor.size() & 0xFF));
-  packet.push_back(static_cast<uint8_t>((vendor.size() >> 8) & 0xFF));
-  packet.push_back(static_cast<uint8_t>((vendor.size() >> 16) & 0xFF));
-  packet.push_back(static_cast<uint8_t>((vendor.size() >> 24) & 0xFF));
+  append_u32_le(packet, static_cast<uint32_t>(vendor.size()));
   packet.insert(packet.end(), vendor.begin(), vendor.end());
-  packet.insert(packet.end(), {0, 0, 0, 0});
+  append_u32_le(packet, 0); // user comment count
+  return packet;
 }
 
-auto splitVorbisExtradata(std::span<const uint8_t> extradata) -> std::vector<std::vector<uint8_t>> {
-  std::vector<std::vector<uint8_t>> packets;
-  if (extradata.size() < 3 || extradata[0] != 2) return packets;
+// Xiph lacing: the sizes of the first two of the three Vorbis headers, each a
+// run of 255s closed by a byte below 255; the third runs to the end.
+auto splitVorbisExtradata(std::span<const uint8_t> extradata)
+    -> std::optional<std::array<std::span<const uint8_t>, 3>> {
+  if (extradata.size() < 3 || extradata[0] != 2) return std::nullopt;
 
   size_t offset = 1;
   size_t sizes[2] = {0, 0};
-  for (size_t i = 0; i < 2; ++i) {
-    size_t size = 0;
+  for (size_t& size : sizes) {
     while (offset < extradata.size()) {
       const uint8_t value = extradata[offset++];
       size += value;
       if (value < 255) break;
     }
-    sizes[i] = size;
   }
 
-  if (offset + sizes[0] + sizes[1] > extradata.size()) return {};
-  const size_t size3 = extradata.size() - offset - sizes[0] - sizes[1];
-
-  packets.resize(3);
-  packets[0].assign(extradata.begin() + static_cast<std::ptrdiff_t>(offset), extradata.begin() + static_cast<std::ptrdiff_t>(offset + sizes[0]));
-  offset += sizes[0];
-  packets[1].assign(extradata.begin() + static_cast<std::ptrdiff_t>(offset), extradata.begin() + static_cast<std::ptrdiff_t>(offset + sizes[1]));
-  offset += sizes[1];
-  packets[2].assign(extradata.begin() + static_cast<std::ptrdiff_t>(offset), extradata.begin() + static_cast<std::ptrdiff_t>(offset + size3));
-  return packets;
+  if (offset + sizes[0] + sizes[1] > extradata.size()) return std::nullopt;
+  return std::array {
+      extradata.subspan(offset, sizes[0]),
+      extradata.subspan(offset + sizes[0], sizes[1]),
+      extradata.subspan(offset + sizes[0] + sizes[1]),
+  };
 }
 
+auto makePacket(const ogg_packet& op, int32_t stream_index) -> Packet {
+  const auto size = static_cast<size_t>(op.bytes);
+  Packet pkt;
+  pkt.allocate(size);
+  memcpy(pkt.bytes.data(), op.packet, size);
+  pkt.stream_index = stream_index;
+  pkt.pts = op.granulepos;
+  pkt.dts = op.granulepos;
+  return pkt;
 }
+
+} // namespace
 
 class OggMuxer final : public BaseMuxer {
   ogg_stream_state stream_ = {};
   bool stream_initialized_ = false;
   int64_t last_granulepos_ = 0;
   int64_t packetno_ = 0;
-  OMCodecId codec_id_ = OM_CODEC_NONE;
 
 public:
   ~OggMuxer() override { close(); }
@@ -80,7 +84,6 @@ public:
     tracks_.clear();
     last_granulepos_ = 0;
     packetno_ = 0;
-    codec_id_ = OM_CODEC_NONE;
     return OM_SUCCESS;
   }
 
@@ -91,7 +94,6 @@ public:
     }
     last_granulepos_ = 0;
     packetno_ = 0;
-    codec_id_ = OM_CODEC_NONE;
     BaseMuxer::close();
   }
 
@@ -111,7 +113,6 @@ public:
       return -1;
     }
     stream_initialized_ = true;
-    codec_id_ = track.format.codec_id;
 
     Track stored_track = track;
     stored_track.index = 0;
@@ -121,12 +122,10 @@ public:
     }
     tracks_.push_back(std::move(stored_track));
 
-    const OMError header_err = writeHeaders(tracks_.front());
-    if (header_err != OM_SUCCESS) {
+    if (writeHeaders(tracks_.front()) != OM_SUCCESS) {
       ogg_stream_clear(&stream_);
       stream_initialized_ = false;
       tracks_.clear();
-      codec_id_ = OM_CODEC_NONE;
       return -1;
     }
     return 0;
@@ -143,8 +142,6 @@ public:
     ogg_packet op = {};
     op.packet = const_cast<unsigned char*>(packet.bytes.data());
     op.bytes = static_cast<long>(packet.bytes.size());
-    op.b_o_s = 0;
-    op.e_o_s = 0;
     op.packetno = packetno_++;
     op.granulepos = updateGranulePosition(packet);
 
@@ -163,9 +160,6 @@ public:
     }
 
     ogg_packet eos = {};
-    eos.packet = nullptr;
-    eos.bytes = 0;
-    eos.b_o_s = 0;
     eos.e_o_s = 1;
     eos.packetno = packetno_++;
     eos.granulepos = last_granulepos_;
@@ -185,33 +179,29 @@ private:
       if (track.extradata.size() < 8 || std::memcmp(track.extradata.data(), "OpusHead", 8) != 0) {
         return OM_CODEC_INVALID_PARAMS;
       }
-
-      std::vector<uint8_t> tags;
-      appendOpusTags(tags, "OpenMedia");
-      const OMError head_err = submitHeaderPacket(track.extradata, true, false, 0);
+      const OMError head_err = submitHeaderPacket(track.extradata, true);
       if (head_err != OM_SUCCESS) return head_err;
-      return submitHeaderPacket(tags, false, false, 0);
+      return submitHeaderPacket(buildOpusTags("OpenMedia"), false);
     }
 
-    auto headers = splitVorbisExtradata(track.extradata);
-    if (headers.size() != 3) {
+    const auto headers = splitVorbisExtradata(track.extradata);
+    if (!headers) {
       return OM_CODEC_INVALID_PARAMS;
     }
-    for (size_t i = 0; i < headers.size(); ++i) {
-      const OMError err = submitHeaderPacket(headers[i], i == 0, false, 0);
+    for (size_t i = 0; i < headers->size(); ++i) {
+      const OMError err = submitHeaderPacket((*headers)[i], i == 0);
       if (err != OM_SUCCESS) return err;
     }
     return OM_SUCCESS;
   }
 
-  auto submitHeaderPacket(std::span<const uint8_t> bytes, bool bos, bool eos, int64_t granulepos) -> OMError {
+  auto submitHeaderPacket(std::span<const uint8_t> bytes, bool bos) -> OMError {
     ogg_packet op = {};
     op.packet = const_cast<unsigned char*>(bytes.data());
     op.bytes = static_cast<long>(bytes.size());
     op.b_o_s = bos ? 1 : 0;
-    op.e_o_s = eos ? 1 : 0;
     op.packetno = packetno_++;
-    op.granulepos = granulepos;
+    // A header may not share its page with audio data, so each one is flushed.
     if (ogg_stream_packetin(&stream_, &op) != 0) {
       return OM_FORMAT_MUXING_FAILED;
     }
@@ -231,10 +221,10 @@ private:
 
   auto updateGranulePosition(const Packet& packet) -> int64_t {
     int64_t duration = packet.duration;
-    if (duration <= 0 && packet.pts >= 0 && packet.dts >= 0 && packet.pts != packet.dts) {
+    if (duration <= 0 && packet.pts >= 0 && packet.dts >= 0) {
       duration = std::llabs(packet.pts - packet.dts);
     }
-    if (duration <= 0) {
+    if (duration < 0) {
       duration = 0;
     }
 
@@ -248,12 +238,22 @@ private:
 };
 
 class OggDemuxer final : public BaseDemuxer {
+  static constexpr size_t READ_CHUNK = 64 * 1024;
+
+  struct Stream {
+    ogg_stream_state state = {};
+    int serial = 0;
+    int32_t track_index = 0;
+    int32_t packet_count = 0;
+    bool header_complete = false;
+  };
+
   ogg_sync_state sync_ = {};
-  std::map<int, ogg_stream_state> streams_state_;
-  std::map<int, int> stream_id_to_index_;
-  std::map<int, bool> streams_header_complete_;
-  std::map<int, int> streams_packet_count_;
+  // libogg is handed &Stream::state by address, so the container must not
+  // relocate its elements as further streams are discovered.
+  std::deque<Stream> streams_;
   std::deque<Packet> buffered_packets_;
+  size_t pending_headers_ = 0;
 
 public:
   OggDemuxer() {
@@ -262,20 +262,18 @@ public:
 
   ~OggDemuxer() override {
     close();
+    ogg_sync_clear(&sync_);
   }
 
   void close() override {
     BaseDemuxer::close();
     buffered_packets_.clear();
-    for (auto& pair : streams_state_) {
-      ogg_stream_clear(&pair.second);
+    for (Stream& stream : streams_) {
+      ogg_stream_clear(&stream.state);
     }
-    streams_state_.clear();
-    stream_id_to_index_.clear();
-    streams_header_complete_.clear();
-    streams_packet_count_.clear();
-    ogg_sync_clear(&sync_);
-    ogg_sync_init(&sync_);
+    streams_.clear();
+    pending_headers_ = 0;
+    ogg_sync_reset(&sync_);
   }
 
   auto open(std::unique_ptr<InputStream> input) -> OMError override {
@@ -285,9 +283,8 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    while (tracks_.empty() || !all_headers_read()) {
-      if (!read_more_and_process()) break;
-      if (input_->isEOF() && tracks_.empty()) break;
+    while (tracks_.empty() || pending_headers_ > 0) {
+      if (!readMoreAndProcess()) break;
     }
 
     return tracks_.empty() ? OM_FORMAT_PARSE_FAILED : OM_SUCCESS;
@@ -300,126 +297,128 @@ public:
       return Ok(std::move(pkt));
     }
     while (true) {
-      for (auto& pair : streams_state_) {
+      for (Stream& stream : streams_) {
         ogg_packet op;
-        if (ogg_stream_packetout(&pair.second, &op) == 1) {
-          Packet pkt;
-          pkt.allocate(op.bytes);
-          memcpy(pkt.bytes.data(), op.packet, op.bytes);
-          pkt.stream_index = stream_id_to_index_[pair.first];
-          pkt.pts = op.granulepos;
-          pkt.dts = pkt.pts;
-          return Ok(std::move(pkt));
+        if (ogg_stream_packetout(&stream.state, &op) == 1) {
+          return Ok(makePacket(op, stream.track_index));
         }
       }
-      if (!read_more_and_process()) return Err(OM_FORMAT_PARSE_FAILED);
+      if (!readMoreAndProcess()) return Err(OM_FORMAT_END_OF_FILE);
     }
   }
 
   auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
-    if (timestamp == 0) {
-      buffered_packets_.clear();
-      input_->seek(0, Whence::BEG);
-      ogg_sync_reset(&sync_);
-      for (auto& pair : streams_state_) {
-        ogg_stream_reset(&pair.second);
-      }
-      return OM_SUCCESS;
+    if (timestamp != 0) {
+      return OM_FORMAT_PARSE_FAILED;
     }
-    return OM_FORMAT_PARSE_FAILED;
+    buffered_packets_.clear();
+    input_->seek(0, Whence::BEG);
+    ogg_sync_reset(&sync_);
+    for (Stream& stream : streams_) {
+      ogg_stream_reset(&stream.state);
+    }
+    return OM_SUCCESS;
   }
 
 private:
-  void process_headers(int serial) {
-    auto& stream = streams_state_[serial];
-    int track_idx = stream_id_to_index_[serial];
-    Track& track = tracks_[track_idx];
+  static auto parseIdentificationHeader(const ogg_packet& op, Track& track) -> bool {
+    if (op.bytes >= 7 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
+      track.format.type = OM_MEDIA_AUDIO;
+      track.format.codec_id = OM_CODEC_VORBIS;
+      if (op.bytes >= 30) {
+        track.format.audio.channels = op.packet[11];
+        track.format.audio.sample_rate = load_u32_le(op.packet + 12);
+        track.bitrate = load_u32_le(op.packet + 20);
+        track.time_base = {1, static_cast<int32_t>(track.format.audio.sample_rate)};
+      }
+      return true;
+    }
+    if (op.bytes >= 8 && memcmp(op.packet, "OpusHead", 8) == 0) {
+      track.format.type = OM_MEDIA_AUDIO;
+      track.format.codec_id = OM_CODEC_OPUS;
+      if (op.bytes >= 19) {
+        track.format.audio.channels = op.packet[9];
+        track.format.audio.sample_rate = load_u32_le(op.packet + 12);
+        // Opus granule positions count 48 kHz samples whatever the input rate.
+        track.time_base = {1, 48000};
+      }
+      return true;
+    }
+    return false;
+  }
+
+  void parseCommentHeader(const ogg_packet& op, Track& track) {
+    if (op.bytes >= 7 && op.packet[0] == 3 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
+      parseVorbisComment({op.packet + 7, static_cast<size_t>(op.bytes - 7)}, metadata_);
+    } else if (op.bytes >= 8 && memcmp(op.packet, "OpusTags", 8) == 0) {
+      parseVorbisComment({op.packet + 8, static_cast<size_t>(op.bytes - 8)}, metadata_);
+    } else {
+      return;
+    }
+    track.metadata = metadata_;
+  }
+
+  void markHeadersComplete(Stream& stream) {
+    if (stream.header_complete) return;
+    stream.header_complete = true;
+    --pending_headers_;
+  }
+
+  // The decoders take the headers as ordinary packets, so each one is queued
+  // for delivery as well as parsed here.
+  void processHeaders(Stream& stream) {
+    Track& track = tracks_[stream.track_index];
 
     ogg_packet op;
-    while (!streams_header_complete_[serial] && ogg_stream_packetout(&stream, &op) == 1) {
-      int count = streams_packet_count_[serial]++;
-      Packet pkt;
-      pkt.allocate(op.bytes);
-      memcpy(pkt.bytes.data(), op.packet, op.bytes);
-      pkt.stream_index = track.index;
-      pkt.pts = op.granulepos;
-      pkt.dts = pkt.pts;
-      buffered_packets_.push_back(std::move(pkt));
+    while (!stream.header_complete && ogg_stream_packetout(&stream.state, &op) == 1) {
+      const int32_t count = stream.packet_count++;
+      buffered_packets_.push_back(makePacket(op, stream.track_index));
 
       if (count == 0) {
-        if (op.bytes >= 7 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
-          track.format.type = OM_MEDIA_AUDIO;
-          track.format.codec_id = OM_CODEC_VORBIS;
-          if (op.bytes >= 30) {
-            track.format.audio.channels = op.packet[11];
-            track.format.audio.sample_rate = load_u32_le(op.packet + 12);
-            track.bitrate = load_u32_le(op.packet + 20);
-            track.time_base = {1, static_cast<int32_t>(track.format.audio.sample_rate)};
-          }
-        } else if (op.bytes >= 8 && memcmp(op.packet, "OpusHead", 8) == 0) {
-          track.format.type = OM_MEDIA_AUDIO;
-          track.format.codec_id = OM_CODEC_OPUS;
-          if (op.bytes >= 19) {
-            track.format.audio.channels = op.packet[9];
-            track.format.audio.sample_rate = load_u32_le(op.packet + 12);
-            track.time_base = {1, 48000};
-          }
-        } else {
-          streams_header_complete_[serial] = true;
-        }
+        if (!parseIdentificationHeader(op, track)) markHeadersComplete(stream);
       } else if (count == 1) {
-        if (op.bytes >= 7 && op.packet[0] == 3 && memcmp(op.packet + 1, "vorbis", 6) == 0) {
-          parseVorbisComment(std::span<const uint8_t>(op.packet + 7, op.bytes - 7), metadata_);
-          track.metadata = metadata_;
-        } else if (op.bytes >= 8 && memcmp(op.packet, "OpusTags", 8) == 0) {
-          parseVorbisComment(std::span<const uint8_t>(op.packet + 8, op.bytes - 8), metadata_);
-          track.metadata = metadata_;
-        }
-        if (track.format.codec_id == OM_CODEC_OPUS) {
-          streams_header_complete_[serial] = true;
-        }
-      } else if (count == 2) {
-        if (track.format.codec_id == OM_CODEC_VORBIS) {
-          streams_header_complete_[serial] = true;
-        }
+        parseCommentHeader(op, track);
+        if (track.format.codec_id == OM_CODEC_OPUS) markHeadersComplete(stream);
+      } else {
+        markHeadersComplete(stream);
       }
     }
   }
 
-  auto read_more_and_process() -> bool {
-    char* buffer = ogg_sync_buffer(&sync_, 8192);
-    size_t n = input_->read({reinterpret_cast<uint8_t*>(buffer), 8192});
-    if (n == 0) return false;
+  auto streamFor(int serial) -> Stream& {
+    for (Stream& stream : streams_) {
+      if (stream.serial == serial) return stream;
+    }
 
-    ogg_sync_wrote(&sync_, n);
+    Stream& stream = streams_.emplace_back();
+    ogg_stream_init(&stream.state, serial);
+    stream.serial = serial;
+    stream.track_index = static_cast<int32_t>(tracks_.size());
+    ++pending_headers_;
+
+    Track track;
+    track.index = stream.track_index;
+    track.id = serial;
+    tracks_.push_back(std::move(track));
+    return stream;
+  }
+
+  auto readMoreAndProcess() -> bool {
+    char* buffer = ogg_sync_buffer(&sync_, static_cast<long>(READ_CHUNK));
+    if (buffer == nullptr) return false;
+    const size_t n = input_->read({reinterpret_cast<uint8_t*>(buffer), READ_CHUNK});
+    if (n == 0) return false;
+    ogg_sync_wrote(&sync_, static_cast<long>(n));
 
     ogg_page og;
-    while (ogg_sync_pageout(&sync_, &og) == 1) {
-      int serial = ogg_page_serialno(&og);
-      if (!streams_state_.contains(serial)) {
-        ogg_stream_init(&streams_state_[serial], serial);
-
-        Track track;
-        track.index = static_cast<int32_t>(tracks_.size());
-        track.id = serial;
-        stream_id_to_index_[serial] = track.index;
-        tracks_.push_back(track);
-        streams_header_complete_[serial] = false;
-        streams_packet_count_[serial] = 0;
+    int ret;
+    while ((ret = ogg_sync_pageout(&sync_, &og)) != 0) {
+      if (ret < 0) continue; // hole in the stream, libogg resyncs on its own
+      Stream& stream = streamFor(ogg_page_serialno(&og));
+      ogg_stream_pagein(&stream.state, &og);
+      if (!stream.header_complete) {
+        processHeaders(stream);
       }
-      ogg_stream_pagein(&streams_state_[serial], &og);
-
-      if (!streams_header_complete_[serial]) {
-        process_headers(serial);
-      }
-    }
-    return true;
-  }
-
-  auto all_headers_read() const -> bool {
-    if (tracks_.empty()) return false;
-    for (const auto& stream : tracks_) {
-      if (!streams_header_complete_.contains(stream.id) || !streams_header_complete_.at(stream.id)) return false;
     }
     return true;
   }
