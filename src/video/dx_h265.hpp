@@ -15,6 +15,8 @@
 #endif
 
 #include <openmedia/frame.hpp>
+#include <openmedia/video.hpp>
+#include <util/color_codes.hpp>
 #include <video/parser/h265_parser.hpp>
 #include "dx_h264.hpp"
 #include "reorder_queue.hpp"
@@ -37,6 +39,31 @@ using StRefPicSet = video_parser::H265StRefPicSet;
 inline auto reorderDepth(const Sps& sps) -> size_t {
   const int layer = std::clamp(sps.max_sub_layers_minus1, 0, 7);
   return static_cast<size_t>(std::clamp(sps.sps_max_num_reorder_pics[layer], 0, 16));
+}
+
+// As dx_h264::applyColorDescription, for the SPS of an H.265 stream.
+inline auto applyColorDescription(const video_parser::H265AccessUnitParser& parser, VideoFormat& format) -> bool {
+  for (int i = 0; i < 16; ++i) {
+    const Sps& sps = parser.sps(i);
+    if (!sps.valid) continue;
+    if (!sps.vui_parameters_present_flag) return true;
+    if (sps.vui.colour_description_present_flag) {
+      format.color_primaries = color_codes::primariesFromCode(sps.vui.colour_primaries);
+      format.transfer_char = color_codes::transferFromCode(sps.vui.transfer_characteristics);
+      format.color_space = color_codes::colorSpaceFromMatrix(sps.vui.matrix_coeffs);
+    }
+    if (sps.vui.video_signal_type_present_flag)
+      format.color_range = sps.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+    return true;
+  }
+  return false;
+}
+
+// As dx_h264::lumaBitDepth, for an H.265 stream.
+inline auto lumaBitDepth(const video_parser::H265AccessUnitParser& parser) -> uint8_t {
+  for (int i = 0; i < 16; ++i)
+    if (parser.sps(i).valid) return static_cast<uint8_t>(parser.sps(i).bit_depth_luma_minus8 + 8);
+  return 0;
 }
 
 inline auto isIdr(int nal_type) noexcept -> bool {

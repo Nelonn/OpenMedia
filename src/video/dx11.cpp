@@ -1124,34 +1124,10 @@ public:
     output_format_.transfer_char = options.format.video.transfer_char;
     output_format_.color_primaries = options.format.video.color_primaries;
     output_format_.color_range = OM_COLOR_RANGE_UNSPECIFIED;
-    if (codec_id_ == OM_CODEC_H264 && h264_.has_sps) {
-      for (uint32_t i = 0; i < 32; ++i) {
-        if (!h264_.sps_valid[i]) continue;
-        const auto& s = h264_.sps[i];
-        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
-          output_format_.color_primaries = color_codes::primariesFromCode(s.vui.colour_primaries);
-          output_format_.transfer_char = color_codes::transferFromCode(s.vui.transfer_characteristics);
-          output_format_.color_space = color_codes::colorSpaceFromMatrix(s.vui.matrix_coefficients);
-        }
-        if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
-          output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
-        }
-        break;
-      }
-    } else if (codec_id_ == OM_CODEC_H265 && h265_ && h265_->hasSps()) {
-      for (int i = 0; i < 16; ++i) {
-        const auto& s = h265_->sps(i);
-        if (!s.valid) continue;
-        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
-          output_format_.color_primaries = color_codes::primariesFromCode(s.vui.colour_primaries);
-          output_format_.transfer_char = color_codes::transferFromCode(s.vui.transfer_characteristics);
-          output_format_.color_space = color_codes::colorSpaceFromMatrix(s.vui.matrix_coeffs);
-        }
-        if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
-          output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
-        }
-        break;
-      }
+    if (codec_id_ == OM_CODEC_H264) {
+      dx_h264::applyColorDescription(h264_, output_format_);
+    } else if (codec_id_ == OM_CODEC_H265 && h265_) {
+      dx_h265::applyColorDescription(*h265_, output_format_);
     }
 
     initialized_ = true;

@@ -16,7 +16,9 @@
 #include <dxva.h>
 #endif
 
+#include <openmedia/video.hpp>
 #include <util/bit_reader.hpp>
+#include <util/color_codes.hpp>
 #include <video/parser/h264_types.hpp>
 
 namespace openmedia::dx_h264 {
@@ -345,6 +347,36 @@ inline auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
     case 52: return 184320;
     default: return 696320; // level 6.x and anything newer
   }
+}
+
+// The colour description a stream states in its VUI, which is where it lives for
+// H.26x: containers often say nothing, and a hardware decoder that is handed the
+// bitstream whole reports nothing either. Left as it was when the stream stays
+// silent, so a container that did describe its colour keeps the last word.
+inline auto applyColorDescription(const State& state, VideoFormat& format) -> bool {
+  for (uint32_t i = 0; i < 32; ++i) {
+    if (!state.sps_valid[i]) continue;
+    const h264::SPS& sps = state.sps[i];
+    if (!sps.vui_parameters_present_flag) return true;
+    if (sps.vui.colour_description_present_flag) {
+      format.color_primaries = color_codes::primariesFromCode(sps.vui.colour_primaries);
+      format.transfer_char = color_codes::transferFromCode(sps.vui.transfer_characteristics);
+      format.color_space = color_codes::colorSpaceFromMatrix(sps.vui.matrix_coefficients);
+    }
+    if (sps.vui.video_signal_type_present_flag)
+      format.color_range = sps.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+    return true;
+  }
+  return false;
+}
+
+// The luma bit depth of the first sequence parameter set the stream carries, or
+// zero while none has been seen. A decoder has to know it before it opens, as
+// 10-bit content needs a 10-bit surface to come out of.
+inline auto lumaBitDepth(const State& state) -> uint8_t {
+  for (uint32_t i = 0; i < 32; ++i)
+    if (state.sps_valid[i]) return static_cast<uint8_t>(state.sps[i].bit_depth_luma_minus8 + 8);
+  return 0;
 }
 
 // How many decoded pictures may be held back to put them into output order.

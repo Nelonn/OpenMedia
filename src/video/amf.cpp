@@ -31,9 +31,14 @@
 #include <cstring>
 #include <optional>
 #include <thread>
+#include <memory>
 #include <util/color_codes.hpp>
 #include <vector>
 #include <video/decode_report.hpp>
+#include <video/hdr_sei.hpp>
+
+#include "dx_h264.hpp"
+#include "dx_h265.hpp"
 
 namespace openmedia {
 namespace {
@@ -275,9 +280,17 @@ class AMFDecoder final : public Decoder, private DecodeReport {
   amf::AMFContextPtr context_;
   amf::AMFComponentPtr decoder_;
   VideoFormat output_format_ = {};
+  OMCodecId codec_id_ = OM_CODEC_NONE;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   bool initialized_ = false;
+
+  // AMF answers nothing when asked what colour it decoded, so for H.26x the
+  // description is taken from the bitstream instead. The parser is only here
+  // until a sequence parameter set turns up, since neither is small.
+  std::unique_ptr<dx_h264::State> h264_parser_;
+  std::unique_ptr<video_parser::H265AccessUnitParser> h265_parser_;
+  uint8_t bit_depth_ = 0;
 
 public:
   AMFDecoder() : DecodeReport("amf") {}
@@ -288,9 +301,11 @@ public:
 
     const wchar_t* component_id = decoderId(options.format.codec_id);
     if (!component_id) return OM_CODEC_NOT_SUPPORTED;
+    codec_id_ = options.format.codec_id;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
     if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
+    output_format_ = {};
 
     amf::AMFFactory* factory = amfFactory();
     if (!factory) return OM_CODEC_HWACCEL_FAILED;
@@ -314,7 +329,20 @@ public:
     // back in decode order.
     decoder_->SetProperty(AMF_VIDEO_DECODER_REORDER_MODE, static_cast<amf_int64>(AMF_VIDEO_DECODER_MODE_REGULAR));
 
-    const amf::AMF_SURFACE_FORMAT requested = surfaceFormat(options.format.video.format);
+    if (codec_id_ == OM_CODEC_H264) h264_parser_ = std::make_unique<dx_h264::State>();
+    if (codec_id_ == OM_CODEC_H265) h265_parser_ = std::make_unique<video_parser::H265AccessUnitParser>();
+    output_format_.color_space = options.format.video.color_space;
+    output_format_.transfer_char = options.format.video.transfer_char;
+    output_format_.color_primaries = options.format.video.color_primaries;
+    output_format_.color_range = options.format.video.color_range;
+    output_format_.mastering_display = options.format.video.mastering_display;
+    output_format_.content_light_level = options.format.video.content_light_level;
+    readBitstreamColor(options.extradata);
+
+    // Asking for NV12 where the stream is 10-bit makes AMF hand back an 8-bit
+    // picture, so the depth the bitstream states decides what to ask for.
+    const amf::AMF_SURFACE_FORMAT requested =
+        bit_depth_ > 8 ? amf::AMF_SURFACE_P010 : surfaceFormat(options.format.video.format);
     if (const AMF_RESULT res = decoder_->Init(requested, static_cast<amf_int32>(width_), static_cast<amf_int32>(height_));
         res != AMF_OK) {
       log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "amf: decoder init failed ({})", (int) res);
@@ -324,16 +352,9 @@ public:
     amf_int64 negotiated = requested;
     decoder_->GetProperty(AMF_VIDEO_DECODER_OUTPUT_FORMAT, &negotiated);
 
-    output_format_ = {};
     output_format_.format = pixelFormat(static_cast<amf::AMF_SURFACE_FORMAT>(negotiated));
     output_format_.width = width_;
     output_format_.height = height_;
-    output_format_.color_space = options.format.video.color_space;
-    output_format_.transfer_char = options.format.video.transfer_char;
-    output_format_.color_primaries = options.format.video.color_primaries;
-    output_format_.color_range = options.format.video.color_range;
-    output_format_.mastering_display = options.format.video.mastering_display;
-    output_format_.content_light_level = options.format.video.content_light_level;
 
     initialized_ = true;
     log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "amf: decoding {}x{} into {} on {} device",
@@ -356,6 +377,14 @@ public:
     if (packet.bytes.empty()) {
       if (const OMError err = drain(frames); err != OM_SUCCESS) return Err(err);
       return Ok(std::move(frames));
+    }
+
+    // HDR10 static metadata is only in the bitstream, and the hardware keeps
+    // nothing of what it read, so it is taken out on the way past.
+    readBitstreamColor(packet.bytes);
+    if (codec_id_ == OM_CODEC_H264 || codec_id_ == OM_CODEC_H265) {
+      hdr_sei::parseAnnexB(packet.bytes, codec_id_ == OM_CODEC_H265, output_format_.mastering_display,
+                           output_format_.content_light_level);
     }
 
     if (const OMError err = submit(packet, frames); err != OM_SUCCESS) return Err(err);
@@ -383,7 +412,25 @@ private:
       context_->Terminate();
       context_ = nullptr;
     }
+    h264_parser_.reset();
+    h265_parser_.reset();
+    bit_depth_ = 0;
     initialized_ = false;
+  }
+
+  // Parameter sets reach a decoder either in the extradata or in the stream, so
+  // both are offered here until one of them yields the colour description.
+  void readBitstreamColor(std::span<const uint8_t> annexb) {
+    if (annexb.empty()) return;
+    if (h264_parser_) {
+      h264_parser_->parseExtradata(annexb);
+      bit_depth_ = std::max(bit_depth_, dx_h264::lumaBitDepth(*h264_parser_));
+      if (dx_h264::applyColorDescription(*h264_parser_, output_format_)) h264_parser_.reset();
+    } else if (h265_parser_) {
+      h265_parser_->parseExtradata(annexb);
+      bit_depth_ = std::max(bit_depth_, dx_h265::lumaBitDepth(*h265_parser_));
+      if (dx_h265::applyColorDescription(*h265_parser_, output_format_)) h265_parser_.reset();
+    }
   }
 
   void setExtradata(std::span<const uint8_t> extradata) {
