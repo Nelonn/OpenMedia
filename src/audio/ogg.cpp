@@ -12,6 +12,7 @@
 #include <util/demuxer_base.hpp>
 #include <util/io_util.hpp>
 #include <util/vorbis_comment.hpp>
+#include <util/xiph.hpp>
 #include <vector>
 
 namespace openmedia {
@@ -26,30 +27,6 @@ auto buildOpusTags(std::string_view vendor) -> std::vector<uint8_t> {
   packet.insert(packet.end(), vendor.begin(), vendor.end());
   append_u32_le(packet, 0); // user comment count
   return packet;
-}
-
-// Xiph lacing: the sizes of the first two of the three Vorbis headers, each a
-// run of 255s closed by a byte below 255; the third runs to the end.
-auto splitVorbisExtradata(std::span<const uint8_t> extradata)
-    -> std::optional<std::array<std::span<const uint8_t>, 3>> {
-  if (extradata.size() < 3 || extradata[0] != 2) return std::nullopt;
-
-  size_t offset = 1;
-  size_t sizes[2] = {0, 0};
-  for (size_t& size : sizes) {
-    while (offset < extradata.size()) {
-      const uint8_t value = extradata[offset++];
-      size += value;
-      if (value < 255) break;
-    }
-  }
-
-  if (offset + sizes[0] + sizes[1] > extradata.size()) return std::nullopt;
-  return std::array {
-      extradata.subspan(offset, sizes[0]),
-      extradata.subspan(offset + sizes[0], sizes[1]),
-      extradata.subspan(offset + sizes[0] + sizes[1]),
-  };
 }
 
 auto makePacket(const ogg_packet& op, int32_t stream_index) -> Packet {
