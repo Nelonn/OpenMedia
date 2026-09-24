@@ -163,6 +163,7 @@ public:
     if (!openDemuxer(path)) return false;
 
     const auto& tracks = demuxer_->tracks();
+    diag::reportTracks(tracks);
     const auto find = [&](auto pred) -> int {
       const auto it = std::ranges::find_if(tracks, pred);
       return it == tracks.end() ? -1 : int(it - tracks.begin());
@@ -409,7 +410,7 @@ private:
     const auto* pic = std::get_if<Picture>(&frame.data);
     if (!pic || pic->width == 0 || pic->height == 0) return std::nullopt;
     colors_.report("decoded", *pic);
-
+    frame_order_.report(frame.pts);
     VideoFrame vf;
     if (const auto* hw = std::get_if<std::shared_ptr<HardwarePicture>>(&pic->buffer)) {
       // This example renders through SDL, so hardware pictures come back to host memory.
@@ -432,8 +433,14 @@ private:
     for (Stream* stream : {&audio_, &video_})
       if (*stream) stream->decoder->flush();
 
-    if (const OMError err = demuxer_->seek(-1, int64_t(target * 1e6)); err != OM_SUCCESS)
+    frame_order_.reset();
+    const auto started = SteadyClock::now();
+    const OMError err = demuxer_->seek(-1, int64_t(target * 1e6));
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - started).count();
+    if (err != OM_SUCCESS)
       SDL_Log("[Player] Seek to %.2fs failed: %s", target, diag::describe(err));
+    else
+      SDL_Log("[Player] Seek to %.2fs took %.1f ms", target, elapsed_ms);
     clock_.reset(target);
     start();
   }
@@ -454,6 +461,7 @@ private:
   HwDevice hw_;
   std::string decoder_prefix_;
   diag::ColorReporter colors_;
+  diag::FrameOrderReporter frame_order_;
 
   std::unique_ptr<Demuxer> demuxer_;
   Stream audio_;

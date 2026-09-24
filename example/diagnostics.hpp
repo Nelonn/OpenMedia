@@ -8,7 +8,10 @@
 #include <openmedia/track.hpp>
 #include <openmedia/video.hpp>
 #include <openmedia/error.h>
+#include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 // Logging helpers. None of this affects playback; it only makes what the
 // library does visible, so a broken stream does not look like a slow one.
@@ -143,6 +146,17 @@ inline auto rangeName(OMColorRange r) -> const char* {
   }
 }
 
+inline auto mediaTypeName(OMMediaType type) -> const char* {
+  switch (type) {
+    case OM_MEDIA_VIDEO: return "video";
+    case OM_MEDIA_AUDIO: return "audio";
+    case OM_MEDIA_SUBTITLE: return "subtitle";
+    case OM_MEDIA_IMAGE: return "image";
+    case OM_MEDIA_ATTACHMENT: return "attachment";
+    default: return "unknown";
+  }
+}
+
 // Colour description as the container states it and as the bitstream does;
 // logging both shows whether HDR metadata survived. Logs only on change.
 class ColorReporter {
@@ -179,6 +193,41 @@ private:
   uint64_t last_key_ = ~0ull;
   const char* last_source_ = nullptr;
 };
+
+// A decoder that hands pictures back in decode order makes playback jump back
+// and forth, and from here that shows up as presentation timestamps running
+// backwards. The first step back is named, the rest counted.
+class FrameOrderReporter {
+public:
+  void report(int64_t pts) {
+    if (last_pts_ && pts < *last_pts_ && backwards_++ % 60 == 0)
+      SDL_Log("[Frames] Presentation order goes backwards: %lld after %lld (%llu so far)",
+              (long long) pts, (long long) *last_pts_, (unsigned long long) backwards_);
+    last_pts_ = pts;
+  }
+
+  // A seek legitimately moves the timestamps back, so it starts a new run.
+  void reset() { last_pts_.reset(); }
+
+private:
+  std::optional<int64_t> last_pts_;
+  uint64_t backwards_ = 0;
+};
+
+// One line per track, so a file's language and title tags can be checked
+// against what a tool like mkvinfo says the container holds.
+inline void reportTracks(const std::vector<openmedia::Track>& tracks) {
+  using namespace openmedia;
+  for (size_t i = 0; i < tracks.size(); ++i) {
+    const Track& track = tracks[i];
+    if (track.format.type == OM_MEDIA_ATTACHMENT) continue;
+    const std::string language = track.metadata.getString(LANGUAGE, "-");
+    const std::string title = track.metadata.getString(TITLE, "-");
+    SDL_Log("[Track] #%zu %s codec=%d lang=%s title=%s%s", i, mediaTypeName(track.format.type),
+            int(track.format.codec_id), language.c_str(), title.c_str(),
+            (track.disposition & OM_DISPOSITION_DEFAULT) ? " (default)" : "");
+  }
+}
 
 // Dolby Vision RPUs are not applied; say what that means for this profile.
 inline void reportDolbyVision(const openmedia::Track& track) {
