@@ -1,3 +1,17 @@
+#if !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+#if !defined(WIN32_LEAN_AND_MEAN)
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <openmedia/hw_dx11.h>
+#include <openmedia/hw_dx12.h>
+#include <openmedia/hw_vulkan.h>
+#include <openmedia/log.hpp>
+#include <openmedia/video.hpp>
+
 #include <components/ColorSpace.h>
 #include <components/Component.h>
 #include <components/VideoDecoderUVD.h>
@@ -6,90 +20,57 @@
 #include <components/VideoEncoderVCE.h>
 #include <core/Buffer.h>
 #include <core/Context.h>
+#include <core/D3D12AMF.h>
 #include <core/Factory.h>
 #include <core/Surface.h>
-#include <core/Trace.h>
-#include <d3d11.h>
-#include <openmedia/hw_dx11.h>
-#include <openmedia/hw_dx12.h>
-#include <openmedia/hw_vulkan.h>
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <wrl/client.h>
-#include <algorithm>
-#include <codecs.hpp>
-#include <cstring>
-#include <format>
-#include <memory>
-#include <openmedia/video.hpp>
-#include <string>
-#include <thread>
-#include <vector>
-
-#include "dx_h264.hpp"
-
-#include <core/D3D12AMF.h>
 #include <core/VulkanAMF.h>
 
+#include <algorithm>
+#include <chrono>
+#include <codecs.hpp>
+#include <cstring>
+#include <optional>
+#include <thread>
+#include <util/color_codes.hpp>
+#include <vector>
+#include <video/decode_report.hpp>
+
 namespace openmedia {
+namespace {
 
-using Microsoft::WRL::ComPtr;
+// The runtime ships with the display driver and stays loaded for the process:
+// the factory owns every context and component made through it, so there is no
+// later point at which unloading it would be safe.
+auto amfFactory() -> amf::AMFFactory* {
+  struct Runtime {
+    amf::AMFFactory* factory = nullptr;
 
-static HMODULE G_AMF_MODULE = nullptr;
-static amf::AMFFactory* G_AMF_FACTORY = nullptr;
+    Runtime() {
+      HMODULE module = LoadLibraryW(AMF_DLL_NAME);
+      if (!module) return;
 
-static std::string wstring_to_utf8(const wchar_t* wstr) {
-  if (!wstr) return "";
-  int size = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
-  if (size <= 0) return "";
-  std::string str(size, 0);
-  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &str[0], size, nullptr, nullptr);
-  while (!str.empty() && str.back() == '\0') str.pop_back();
-  return str;
+      auto init = reinterpret_cast<AMFInit_Fn>(GetProcAddress(module, AMF_INIT_FUNCTION_NAME));
+      if (!init || init(AMF_FULL_VERSION, &factory) != AMF_OK) {
+        factory = nullptr;
+        FreeLibrary(module);
+        return;
+      }
+
+      amf_uint64 version = 0;
+      if (auto query = reinterpret_cast<AMFQueryVersion_Fn>(GetProcAddress(module, AMF_QUERY_VERSION_FUNCTION_NAME)))
+        query(&version);
+      log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "amf: runtime {}.{}.{}.{}, built against {}.{}.{}.{}",
+          AMF_GET_MAJOR_VERSION(version), AMF_GET_MINOR_VERSION(version),
+          AMF_GET_SUBMINOR_VERSION(version), AMF_GET_BUILD_VERSION(version),
+          AMF_VERSION_MAJOR, AMF_VERSION_MINOR, AMF_VERSION_RELEASE, AMF_VERSION_BUILD_NUM);
+    }
+  };
+
+  static const Runtime runtime;
+  return runtime.factory;
 }
 
-class OMTraceWriter : public amf::AMFTraceWriter {
-public:
-  void AMF_CDECL_CALL Write(const wchar_t* scope, const wchar_t* message) override {
-    //auto msg = wstring_to_utf8(message);
-    //log(OM_CATEGORY_HARDWARE, OM_LEVEL_VERBOSE, "[AMF] {}: {}", wstring_to_utf8(scope), msg.substr(0, msg.size() - 2));
-  }
-  void AMF_CDECL_CALL Flush() override {}
-};
-
-static OMTraceWriter G_AMF_TRACE_WRITER;
-
-static auto load_amf_runtime() -> bool {
-  if (G_AMF_FACTORY) return true;
-
-  G_AMF_MODULE = LoadLibraryW(AMF_DLL_NAME);
-  if (!G_AMF_MODULE) return false;
-
-  auto init_fn = reinterpret_cast<AMFInit_Fn>(GetProcAddress(G_AMF_MODULE, AMF_INIT_FUNCTION_NAME));
-  if (!init_fn) {
-    FreeLibrary(G_AMF_MODULE);
-    G_AMF_MODULE = nullptr;
-    return false;
-  }
-
-  AMF_RESULT res = init_fn(AMF_FULL_VERSION, &G_AMF_FACTORY);
-  if (res != AMF_OK) {
-    FreeLibrary(G_AMF_MODULE);
-    G_AMF_MODULE = nullptr;
-    return false;
-  }
-
-  amf::AMFTrace* trace = nullptr;
-  if (G_AMF_FACTORY->GetTrace(&trace) == AMF_OK && trace) {
-    trace->RegisterWriter(L"OpenMediaTrace", &G_AMF_TRACE_WRITER, true);
-    trace->SetWriterLevel(L"OpenMediaTrace", AMF_TRACE_INFO);
-  }
-
-  return true;
-}
-
-static auto get_amf_decoder_id(OMCodecId codec_id) -> const wchar_t* {
+auto decoderId(OMCodecId codec_id) -> const wchar_t* {
   switch (codec_id) {
     case OM_CODEC_H264: return AMFVideoDecoderUVD_H264_AVC;
     case OM_CODEC_H265: return AMFVideoDecoderHW_H265_HEVC;
@@ -99,20 +80,15 @@ static auto get_amf_decoder_id(OMCodecId codec_id) -> const wchar_t* {
   }
 }
 
-static auto get_amf_encoder_id(OMCodecId codec_id) -> const wchar_t* {
-  switch (codec_id) {
-    case OM_CODEC_H264: return AMFVideoEncoderVCE_AVC;
-    case OM_CODEC_H265: return AMFVideoEncoder_HEVC;
-    case OM_CODEC_AV1: return AMFVideoEncoder_AV1;
-    default: return nullptr;
-  }
-}
-
-static auto get_amf_format(OMPixelFormat fmt) -> amf::AMF_SURFACE_FORMAT {
-  switch (fmt) {
-    case OM_FORMAT_NV12: return amf::AMF_SURFACE_NV12;
+auto surfaceFormat(OMPixelFormat format) -> amf::AMF_SURFACE_FORMAT {
+  switch (format) {
     case OM_FORMAT_YUV420P: return amf::AMF_SURFACE_YUV420P;
-    case OM_FORMAT_P010: return amf::AMF_SURFACE_P010;
+    case OM_FORMAT_P010:
+    case OM_FORMAT_P012:
+    case OM_FORMAT_P016:
+    case OM_FORMAT_YUV420P10:
+    case OM_FORMAT_YUV420P12:
+    case OM_FORMAT_YUV420P16: return amf::AMF_SURFACE_P010;
     case OM_FORMAT_R8G8B8A8: return amf::AMF_SURFACE_RGBA;
     case OM_FORMAT_B8G8R8A8: return amf::AMF_SURFACE_BGRA;
     case OM_FORMAT_GRAY8: return amf::AMF_SURFACE_GRAY8;
@@ -120,242 +96,248 @@ static auto get_amf_format(OMPixelFormat fmt) -> amf::AMF_SURFACE_FORMAT {
   }
 }
 
-static auto get_om_format(amf::AMF_SURFACE_FORMAT fmt) -> OMPixelFormat {
-  switch (fmt) {
-    case amf::AMF_SURFACE_NV12: return OM_FORMAT_NV12;
+auto pixelFormat(amf::AMF_SURFACE_FORMAT format) -> OMPixelFormat {
+  switch (format) {
     case amf::AMF_SURFACE_YUV420P: return OM_FORMAT_YUV420P;
     case amf::AMF_SURFACE_P010: return OM_FORMAT_P010;
     case amf::AMF_SURFACE_RGBA: return OM_FORMAT_R8G8B8A8;
     case amf::AMF_SURFACE_BGRA: return OM_FORMAT_B8G8R8A8;
+    case amf::AMF_SURFACE_GRAY8: return OM_FORMAT_GRAY8;
     default: return OM_FORMAT_NV12;
   }
 }
 
-static auto map_primaries_to_amf(OMColorPrimaries p) -> AMF_COLOR_PRIMARIES_ENUM {
-  switch (p) {
-    case OM_PRIMARIES_BT709: return AMF_COLOR_PRIMARIES_BT709;
-    case OM_PRIMARIES_BT2020: return AMF_COLOR_PRIMARIES_BT2020;
-    case OM_PRIMARIES_BT601: return AMF_COLOR_PRIMARIES_SMPTE170M;
-    default: return AMF_COLOR_PRIMARIES_UNDEFINED;
+auto formatName(OMPixelFormat format) -> const char* {
+  switch (format) {
+    case OM_FORMAT_NV12: return "NV12";
+    case OM_FORMAT_P010: return "P010";
+    case OM_FORMAT_YUV420P: return "YUV420P";
+    case OM_FORMAT_R8G8B8A8: return "RGBA";
+    case OM_FORMAT_B8G8R8A8: return "BGRA";
+    case OM_FORMAT_GRAY8: return "GRAY8";
+    default: return "?";
   }
 }
 
-static auto map_transfer_to_amf(OMTransferCharacteristic t) -> AMF_COLOR_TRANSFER_CHARACTERISTIC_ENUM {
-  switch (t) {
-    case OM_TRANSFER_BT709: return AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709;
-    case OM_TRANSFER_PQ: return AMF_COLOR_TRANSFER_CHARACTERISTIC_SMPTE2084;
-    case OM_TRANSFER_HLG: return AMF_COLOR_TRANSFER_CHARACTERISTIC_ARIB_STD_B67;
-    case OM_TRANSFER_GAMMA22: return AMF_COLOR_TRANSFER_CHARACTERISTIC_GAMMA22;
-    default: return AMF_COLOR_TRANSFER_CHARACTERISTIC_UNDEFINED;
+void copyRows(uint8_t* dst, size_t dst_stride, const uint8_t* src, size_t src_stride, size_t row_bytes, size_t rows) {
+  for (size_t row = 0; row < rows; ++row) std::memcpy(dst + row * dst_stride, src + row * src_stride, row_bytes);
+}
+
+// AMF states its colour enums as the ISO/IEC 23001-8 code points the bitstream
+// itself carries, so they go through the same tables as every demuxer and parser
+// rather than through a mapping of their own.
+void readColorDescription(amf::AMFSurface& surface, Picture& picture) {
+  amf_int64 value = 0;
+  if (surface.GetProperty(AMF_VIDEO_COLOR_PRIMARIES, &value) == AMF_OK) {
+    if (const auto primaries = color_codes::primariesFromCode(static_cast<uint32_t>(value));
+        primaries != OM_PRIMARIES_UNKNOWN)
+      picture.color_primaries = primaries;
+  }
+  if (surface.GetProperty(AMF_VIDEO_COLOR_TRANSFER_CHARACTERISTIC, &value) == AMF_OK) {
+    if (const auto transfer = color_codes::transferFromCode(static_cast<uint32_t>(value));
+        transfer != OM_TRANSFER_UNKNOWN)
+      picture.transfer_char = transfer;
+  }
+  if (surface.GetProperty(AMF_VIDEO_COLOR_RANGE, &value) == AMF_OK && value != AMF_COLOR_RANGE_UNDEFINED)
+    picture.color_range = value == AMF_COLOR_RANGE_FULL ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
+
+  // There is no matrix coefficient property on an AMF surface, so the matrix
+  // stays whatever the container stated.
+  amf::AMFInterfacePtr hdr_interface;
+  if (surface.GetProperty(AMF_VIDEO_COLOR_HDR_METADATA, &hdr_interface) != AMF_OK || !hdr_interface) return;
+  amf::AMFBufferPtr hdr_buffer;
+  if (hdr_interface->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&hdr_buffer)) != AMF_OK ||
+      !hdr_buffer || hdr_buffer->GetSize() < sizeof(AMFHDRMetadata))
+    return;
+  const auto* hdr = static_cast<const AMFHDRMetadata*>(hdr_buffer->GetNative());
+  if (!hdr) return;
+
+  // AMFHDRMetadata normalises the primaries to 50000 and the luminances to
+  // 10000, which is what OMMasteringDisplayMetadata carries as well.
+  auto& mastering = picture.mastering_display;
+  mastering.display_primaries[0][0] = hdr->redPrimary[0];
+  mastering.display_primaries[0][1] = hdr->redPrimary[1];
+  mastering.display_primaries[1][0] = hdr->greenPrimary[0];
+  mastering.display_primaries[1][1] = hdr->greenPrimary[1];
+  mastering.display_primaries[2][0] = hdr->bluePrimary[0];
+  mastering.display_primaries[2][1] = hdr->bluePrimary[1];
+  mastering.white_point[0] = hdr->whitePoint[0];
+  mastering.white_point[1] = hdr->whitePoint[1];
+  mastering.max_display_mastering_luminance = hdr->maxMasteringLuminance;
+  mastering.min_display_mastering_luminance = hdr->minMasteringLuminance;
+  mastering.has_value = true;
+
+  picture.content_light_level.max_content_light_level = hdr->maxContentLightLevel;
+  picture.content_light_level.max_pic_average_light_level = hdr->maxFrameAverageLightLevel;
+  picture.content_light_level.has_value = true;
+}
+
+auto hdrMetadata(const OMMasteringDisplayMetadata& mastering, const OMContentLightLevel& light) -> AMFHDRMetadata {
+  AMFHDRMetadata hdr = {};
+  hdr.redPrimary[0] = mastering.display_primaries[0][0];
+  hdr.redPrimary[1] = mastering.display_primaries[0][1];
+  hdr.greenPrimary[0] = mastering.display_primaries[1][0];
+  hdr.greenPrimary[1] = mastering.display_primaries[1][1];
+  hdr.bluePrimary[0] = mastering.display_primaries[2][0];
+  hdr.bluePrimary[1] = mastering.display_primaries[2][1];
+  hdr.whitePoint[0] = mastering.white_point[0];
+  hdr.whitePoint[1] = mastering.white_point[1];
+  hdr.maxMasteringLuminance = mastering.max_display_mastering_luminance;
+  hdr.minMasteringLuminance = mastering.min_display_mastering_luminance;
+  hdr.maxContentLightLevel = light.max_content_light_level;
+  hdr.maxFrameAverageLightLevel = light.max_pic_average_light_level;
+  return hdr;
+}
+
+auto deviceName(HWDeviceType type) -> const char* {
+  switch (type) {
+    case HWDeviceType::DX11: return "D3D11";
+    case HWDeviceType::DX12: return "D3D12";
+    case HWDeviceType::VULKAN: return "Vulkan";
+    default: return "unsupported";
   }
 }
 
-static auto map_matrix_to_amf(OMColorSpace c) -> AMF_COLOR_MATRIX_COEFF_ENUM {
-  switch (c) {
-    case OM_COLOR_SPACE_BT709: return AMF_COLOR_MATRIX_COEFF_BT_709;
-    case OM_COLOR_SPACE_BT2020: return AMF_COLOR_MATRIX_COEFF_BT_2020_NCL;
-    case OM_COLOR_SPACE_BT601: return AMF_COLOR_MATRIX_COEFF_BT_601;
-    default: return AMF_COLOR_MATRIX_COEFF_UNSPECIFIED;
+auto bindDevice(amf::AMFContext* context, const HWDevice& device) -> AMF_RESULT {
+  switch (device.type) {
+    case HWDeviceType::DX11: {
+      auto* dx11 = static_cast<OMDX11Context*>(device.context);
+      ID3D11Device* d3d11_device = dx11 ? HWD3D11Context_getDevice(dx11) : nullptr;
+      return d3d11_device ? context->InitDX11(d3d11_device) : AMF_INVALID_ARG;
+    }
+    case HWDeviceType::DX12: {
+      amf::AMFContext2Ptr context2;
+      if (context->QueryInterface(amf::AMFContext2::IID(), reinterpret_cast<void**>(&context2)) != AMF_OK || !context2)
+        return AMF_NOT_SUPPORTED;
+      auto* dx12 = static_cast<OMDX12Context*>(device.context);
+      ID3D12CommandQueue* queue = dx12 ? HWD3D12Context_getCommandQueue(dx12) : nullptr;
+      return queue ? context2->InitDX12(queue) : AMF_INVALID_ARG;
+    }
+    case HWDeviceType::VULKAN: {
+      amf::AMFContext1Ptr context1;
+      if (context->QueryInterface(amf::AMFContext1::IID(), reinterpret_cast<void**>(&context1)) != AMF_OK || !context1)
+        return AMF_NOT_SUPPORTED;
+      auto* vulkan = static_cast<OMVulkanContext*>(device.context);
+      if (!vulkan) return AMF_INVALID_ARG;
+      amf::AMFVulkanDevice vulkan_device = {};
+      vulkan_device.cbSizeof = sizeof(vulkan_device);
+      vulkan_device.hInstance = HWVulkanContext_getInstance(vulkan);
+      vulkan_device.hPhysicalDevice = HWVulkanContext_getPhysicalDevice(vulkan);
+      vulkan_device.hDevice = HWVulkanContext_getDevice(vulkan);
+      return context1->InitVulkan(&vulkan_device);
+    }
+    default: return AMF_NOT_SUPPORTED;
   }
 }
 
-static auto map_primaries_from_amf(amf_int64 p) -> OMColorPrimaries {
-  switch (p) {
-    case AMF_COLOR_PRIMARIES_BT709: return OM_PRIMARIES_BT709;
-    case AMF_COLOR_PRIMARIES_BT2020: return OM_PRIMARIES_BT2020;
-    case AMF_COLOR_PRIMARIES_SMPTE170M: return OM_PRIMARIES_BT601;
-    default: return OM_PRIMARIES_UNKNOWN;
-  }
-}
-
-static auto map_transfer_from_amf(amf_int64 t) -> OMTransferCharacteristic {
-  switch (t) {
-    case AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709: return OM_TRANSFER_BT709;
-    case AMF_COLOR_TRANSFER_CHARACTERISTIC_SMPTE2084: return OM_TRANSFER_PQ;
-    case AMF_COLOR_TRANSFER_CHARACTERISTIC_ARIB_STD_B67: return OM_TRANSFER_HLG;
-    case AMF_COLOR_TRANSFER_CHARACTERISTIC_GAMMA22: return OM_TRANSFER_GAMMA22;
-    default: return OM_TRANSFER_UNKNOWN;
-  }
-}
-
-static auto map_matrix_from_amf(amf_int64 m) -> OMColorSpace {
-  switch (m) {
-    case AMF_COLOR_MATRIX_COEFF_BT_709: return OM_COLOR_SPACE_BT709;
-    case AMF_COLOR_MATRIX_COEFF_BT_2020_NCL: return OM_COLOR_SPACE_BT2020;
-    case AMF_COLOR_MATRIX_COEFF_BT_601: return OM_COLOR_SPACE_BT601;
-    default: return OM_COLOR_SPACE_UNKNOWN;
-  }
-}
-
-struct AMFContextInitResult {
-  AMF_RESULT status = AMF_FAIL;
-  HWDeviceType device_type = HWDeviceType::NONE;
+struct BoundContext {
   amf::AMFContextPtr context;
-  amf::AMFContext1Ptr context1;
-  amf::AMFContext2Ptr context2;
-  OMDX11Context* owned_dx11_context = nullptr;
+  const char* device = "none";
+
+  explicit operator bool() const { return context != nullptr; }
 };
 
-static auto initAMFContext(const std::optional<HWDevice>& hw_device) -> AMFContextInitResult {
-  AMFContextInitResult result = {};
-  amf::AMFContextPtr ctx;
-  AMF_RESULT res = G_AMF_FACTORY->CreateContext(&ctx);
-  if (res != AMF_OK || !ctx) return result;
-  result.context = ctx;
+// A context binds to one device and cannot be re-bound, so a device AMF will not
+// take is answered with a fresh context on a device of its own. Letting AMF make
+// that device rather than making one here is what keeps it on the AMD GPU of a
+// machine that has more than one adapter.
+auto createContext(const std::optional<HWDevice>& hw_device) -> BoundContext {
+  amf::AMFFactory* factory = amfFactory();
+  if (!factory) return {};
 
-  amf::AMFContext1Ptr ctx1;
-  amf::AMFContext2Ptr ctx2;
-  ctx->QueryInterface(amf::AMFContext1::IID(), reinterpret_cast<void**>(&ctx1));
-  if (ctx1) {
-    result.context1 = ctx1;
-    ctx1->QueryInterface(amf::AMFContext2::IID(), reinterpret_cast<void**>(&ctx2));
-    if (ctx2) {
-      result.context2 = ctx2;
+  if (hw_device && hw_device->type != HWDeviceType::NONE) {
+    amf::AMFContextPtr context;
+    if (factory->CreateContext(&context) == AMF_OK && context) {
+      const AMF_RESULT res = bindDevice(context, *hw_device);
+      if (res == AMF_OK) return {context, deviceName(hw_device->type)};
+      log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING, "amf: cannot share the application's {} device ({}), using its own",
+          deviceName(hw_device->type), (int) res);
+      context->Terminate();
     }
   }
 
-  auto initDefaultDX11 = [&]() -> AMF_RESULT {
-    OMDX11Init init = {};
-    init.adapter_index = -1;
-    OMDX11Context* dx11_ctx = HWD3D11Context_create(init);
-    if (!dx11_ctx) return AMF_DIRECTX_FAILED;
-    ID3D11Device* device = HWD3D11Context_getDevice(dx11_ctx);
-    if (!device) {
-      HWD3D11Context_delete(dx11_ctx);
-      return AMF_DIRECTX_FAILED;
-    }
-    AMF_RESULT init_res = result.context->InitDX11(device);
-    if (init_res != AMF_OK) {
-      HWD3D11Context_delete(dx11_ctx);
-      return init_res;
-    }
-    result.owned_dx11_context = dx11_ctx;
-    result.device_type = HWDeviceType::DX11;
-    return AMF_OK;
-  };
-
-  if (hw_device) {
-    switch (hw_device->type) {
-      case HWDeviceType::DX11: {
-        ID3D11Device* d3d11_dev = HWD3D11Context_getDevice(static_cast<OMDX11Context*>(hw_device->context));
-        res = result.context->InitDX11(d3d11_dev);
-        if (res == AMF_OK) {
-          result.device_type = HWDeviceType::DX11;
-        }
-        break;
-      }
-      case HWDeviceType::DX12: {
-        if (result.context2) {
-          ID3D12CommandQueue* queue = HWD3D12Context_getCommandQueue(static_cast<OMDX12Context*>(hw_device->context));
-          res = result.context2->InitDX12(queue);
-          if (res == AMF_OK) result.device_type = HWDeviceType::DX12;
-        } else {
-          res = AMF_NOT_SUPPORTED;
-        }
-        break;
-      }
-      case HWDeviceType::VULKAN: {
-        if (result.context1) {
-          auto* vk_ctx = static_cast<OMVulkanContext*>(hw_device->context);
-          amf::AMFVulkanDevice amf_vk_dev = {};
-          amf_vk_dev.cbSizeof = sizeof(amf_vk_dev);
-          amf_vk_dev.hInstance = HWVulkanContext_getInstance(vk_ctx);
-          amf_vk_dev.hPhysicalDevice = HWVulkanContext_getPhysicalDevice(vk_ctx);
-          amf_vk_dev.hDevice = HWVulkanContext_getDevice(vk_ctx);
-          res = result.context1->InitVulkan(&amf_vk_dev);
-          if (res == AMF_OK) result.device_type = HWDeviceType::VULKAN;
-        } else {
-          res = AMF_NOT_SUPPORTED;
-        }
-        break;
-      }
-      case HWDeviceType::NONE:
-        res = AMF_OK;
-        result.device_type = HWDeviceType::NONE;
-        break;
-      default: res = initDefaultDX11(); break;
-    }
-    if (res != AMF_OK && hw_device->type != HWDeviceType::NONE) {
-      res = initDefaultDX11();
-    }
-  } else {
-    res = initDefaultDX11();
+  amf::AMFContextPtr context;
+  if (factory->CreateContext(&context) != AMF_OK || !context) return {};
+  if (const AMF_RESULT res = context->InitDX11(nullptr); res != AMF_OK) {
+    log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "amf: InitDX11 failed ({})", (int) res);
+    context->Terminate();
+    return {};
   }
-
-  result.status = res;
-  return result;
+  return {context, "its own D3D11"};
 }
 
-class AMFHardwarePicture : public HardwarePicture {
-public:
-  amf::AMFSurfacePtr surface;
-  AMFHardwarePicture(amf::AMFSurfacePtr surf)
-      : HardwarePicture(HWDeviceType::AMF), surface(surf) {}
-  ~AMFHardwarePicture() override = default;
-};
+} // namespace
 
-class AMFDecoder final : public Decoder {
-  amf::AMFContextPtr amf_context_;
+class AMFDecoder final : public Decoder, private DecodeReport {
+  static constexpr auto kDrainTimeout = std::chrono::milliseconds(500);
+  static constexpr auto kSubmitTimeout = std::chrono::milliseconds(500);
+
+  amf::AMFContextPtr context_;
   amf::AMFComponentPtr decoder_;
-  OMDX11Context* owned_dx11_context_ = nullptr;
-  bool initialized_ = false;
   VideoFormat output_format_ = {};
-  OMCodecId codec_id_ = OM_CODEC_NONE;
-  uint32_t width_ = 0, height_ = 0;
-  std::vector<uint8_t> extradata_;
-  dx_h264::State h264_;
+  uint32_t width_ = 0;
+  uint32_t height_ = 0;
+  bool initialized_ = false;
 
 public:
+  AMFDecoder() : DecodeReport("amf") {}
   ~AMFDecoder() override { close(); }
 
   auto configure(const DecoderOptions& options) -> OMError override {
     close();
-    codec_id_ = options.format.codec_id;
-    h264_ = {};
-    if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 && codec_id_ != OM_CODEC_VP9 && codec_id_ != OM_CODEC_AV1) return OM_CODEC_NOT_SUPPORTED;
+
+    const wchar_t* component_id = decoderId(options.format.codec_id);
+    if (!component_id) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
     if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
-    if (!options.extradata.empty()) {
-      extradata_.assign(options.extradata.begin(), options.extradata.end());
-      if (codec_id_ == OM_CODEC_H264) {
-        h264_.parseExtradata(options.extradata);
-      }
-    }
 
-    if (!load_amf_runtime()) return OM_CODEC_HWACCEL_FAILED;
-    auto init_result = initAMFContext(options.hw_device);
-    if (init_result.status != AMF_OK) return OM_CODEC_HWACCEL_FAILED;
-    amf_context_ = init_result.context;
-    owned_dx11_context_ = init_result.owned_dx11_context;
+    amf::AMFFactory* factory = amfFactory();
+    if (!factory) return OM_CODEC_HWACCEL_FAILED;
+    const BoundContext bound = createContext(options.hw_device);
+    if (!bound) return OM_CODEC_HWACCEL_FAILED;
+    context_ = bound.context;
 
-    const wchar_t* decoder_id = get_amf_decoder_id(codec_id_);
-    if (!decoder_id) return OM_CODEC_NOT_SUPPORTED;
-    AMF_RESULT res = G_AMF_FACTORY->CreateComponent(amf_context_.GetPtr(), decoder_id, &decoder_);
-    if (res != AMF_OK || !decoder_) return OM_CODEC_HWACCEL_FAILED;
+    if (factory->CreateComponent(context_, component_id, &decoder_) != AMF_OK || !decoder_)
+      return OM_CODEC_HWACCEL_FAILED;
 
-    if (!extradata_.empty()) {
-      amf::AMFBufferPtr extradata_buf;
-      if (amf_context_->AllocBuffer(amf::AMF_MEMORY_HOST, extradata_.size(), &extradata_buf) == AMF_OK) {
-        memcpy(extradata_buf->GetNative(), extradata_.data(), extradata_.size());
-        decoder_->SetProperty(AMF_VIDEO_DECODER_EXTRADATA, static_cast<amf::AMFInterface*>(extradata_buf));
-      }
-    }
+    if (!options.extradata.empty()) setExtradata(options.extradata);
 
-    decoder_->SetProperty(AMF_VIDEO_DECODER_REORDER_MODE, static_cast<amf_int64>(AMF_VIDEO_DECODER_MODE_LOW_LATENCY));
-    decoder_->SetProperty(AMF_VIDEO_DECODER_LOW_LATENCY, true);
-    decoder_->SetProperty(AMF_TIMESTAMP_MODE, static_cast<amf_int64>(AMF_TS_PRESENTATION));
+    // Pictures are read back to host memory, so the decoder is asked for copies
+    // rather than for the surfaces its DPB still references.
     decoder_->SetProperty(AMF_VIDEO_DECODER_SURFACE_COPY, true);
     decoder_->SetProperty(AMF_VIDEO_DECODER_SURFACE_CPU, true);
+    // Timestamps are passed through, so what comes back out is the packet's own
+    // pts in the stream's time base and not AMF's 100ns units.
+    decoder_->SetProperty(AMF_TIMESTAMP_MODE, static_cast<amf_int64>(AMF_TS_PRESENTATION));
+    // Low latency mode keeps no DPB at all, which hands a stream with B-frames
+    // back in decode order.
+    decoder_->SetProperty(AMF_VIDEO_DECODER_REORDER_MODE, static_cast<amf_int64>(AMF_VIDEO_DECODER_MODE_REGULAR));
 
-    res = decoder_->Init(amf::AMF_SURFACE_NV12, width_, height_);
-    if (res != AMF_OK) {
-      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "AMF: decoder->Init failed with error {}", (int) res);
+    const amf::AMF_SURFACE_FORMAT requested = surfaceFormat(options.format.video.format);
+    if (const AMF_RESULT res = decoder_->Init(requested, static_cast<amf_int32>(width_), static_cast<amf_int32>(height_));
+        res != AMF_OK) {
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "amf: decoder init failed ({})", (int) res);
       return OM_CODEC_HWACCEL_FAILED;
     }
 
-    output_format_ = {OM_FORMAT_NV12, width_, height_};
+    amf_int64 negotiated = requested;
+    decoder_->GetProperty(AMF_VIDEO_DECODER_OUTPUT_FORMAT, &negotiated);
+
+    output_format_ = {};
+    output_format_.format = pixelFormat(static_cast<amf::AMF_SURFACE_FORMAT>(negotiated));
+    output_format_.width = width_;
+    output_format_.height = height_;
+    output_format_.color_space = options.format.video.color_space;
+    output_format_.transfer_char = options.format.video.transfer_char;
+    output_format_.color_primaries = options.format.video.color_primaries;
+    output_format_.color_range = options.format.video.color_range;
+    output_format_.mastering_display = options.format.video.mastering_display;
+    output_format_.content_light_level = options.format.video.content_light_level;
+
     initialized_ = true;
+    log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "amf: decoding {}x{} into {} on {} device",
+        width_, height_, formatName(output_format_.format), bound.device);
     return OM_SUCCESS;
   }
 
@@ -368,231 +350,380 @@ public:
   }
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
-    std::vector<Frame> frames;
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-    if (packet.bytes.empty()) return drainFrames(frames);
 
-    AMF_RESULT res = submitInput(packet);
-    if (res == AMF_INPUT_FULL) {
-      auto out = processOutput(frames);
-      if (out.isErr()) return out;
-      frames = std::move(out).unwrap();
-      res = submitInput(packet);
+    std::vector<Frame> frames;
+    if (packet.bytes.empty()) {
+      if (const OMError err = drain(frames); err != OM_SUCCESS) return Err(err);
+      return Ok(std::move(frames));
     }
-    if (res != AMF_OK && res != AMF_NEED_MORE_INPUT) return Err(OM_CODEC_DECODE_FAILED);
-    return processOutput(frames);
+
+    if (const OMError err = submit(packet, frames); err != OM_SUCCESS) return Err(err);
+    if (auto state = collectOutput(frames); state.isErr()) return Err(std::move(state).unwrapErr());
+    return Ok(std::move(frames));
   }
 
   void flush() override {
+    resetReceiveState();
     if (decoder_) decoder_->Flush();
   }
 
 private:
+  enum class DecoderState {
+    NeedsInput,
+    EndOfStream,
+  };
+
   void close() {
     if (decoder_) {
       decoder_->Terminate();
       decoder_ = nullptr;
     }
-    if (amf_context_) amf_context_->Terminate();
-    amf_context_ = nullptr;
-    if (owned_dx11_context_) {
-      HWD3D11Context_delete(owned_dx11_context_);
-      owned_dx11_context_ = nullptr;
+    if (context_) {
+      context_->Terminate();
+      context_ = nullptr;
     }
     initialized_ = false;
   }
 
-  auto submitInput(const Packet& packet) -> AMF_RESULT {
-    amf::AMFBufferPtr buf;
-    std::span<const uint8_t> bytes = packet.bytes;
-    AMF_RESULT res = amf_context_->AllocBuffer(amf::AMF_MEMORY_HOST, bytes.size(), &buf);
-    if (res != AMF_OK) return res;
-    memcpy(buf->GetNative(), bytes.data(), bytes.size());
-    buf->SetSize(bytes.size());
-    buf->SetPts(packet.pts);
-    if (packet.is_keyframe) buf->SetProperty(L"IsKeyFrame", true);
-    return decoder_->SubmitInput(buf);
+  void setExtradata(std::span<const uint8_t> extradata) {
+    amf::AMFBufferPtr buffer;
+    if (context_->AllocBuffer(amf::AMF_MEMORY_HOST, extradata.size(), &buffer) != AMF_OK || !buffer) return;
+    std::memcpy(buffer->GetNative(), extradata.data(), extradata.size());
+    decoder_->SetProperty(AMF_VIDEO_DECODER_EXTRADATA, static_cast<amf::AMFInterface*>(buffer));
   }
 
-  auto processOutput(std::vector<Frame>& frames) -> Result<std::vector<Frame>, OMError> {
-    int empty_queries = 0;
-    while (empty_queries < 5) {
+  // The decoder refuses input while its queue is full or all of its surfaces are
+  // out, and the only way on from either is to take the pictures it has ready and
+  // offer the same packet again.
+  auto submit(const Packet& packet, std::vector<Frame>& frames) -> OMError {
+    amf::AMFBufferPtr buffer;
+    if (context_->AllocBuffer(amf::AMF_MEMORY_HOST, packet.bytes.size(), &buffer) != AMF_OK || !buffer)
+      return OM_COMMON_OUT_OF_MEMORY;
+    std::memcpy(buffer->GetNative(), packet.bytes.data(), packet.bytes.size());
+    buffer->SetPts(packet.pts);
+    if (packet.duration > 0) buffer->SetDuration(packet.duration);
+
+    const auto deadline = std::chrono::steady_clock::now() + kSubmitTimeout;
+    while (true) {
+      const AMF_RESULT res = decoder_->SubmitInput(buffer);
+      if (res == AMF_OK || res == AMF_NEED_MORE_INPUT) return OM_SUCCESS;
+      if (res != AMF_INPUT_FULL && res != AMF_DECODER_NO_FREE_SURFACES)
+        return rejectFrame(OM_CODEC_DECODE_FAILED, "SubmitInput failed ({})", (int) res);
+
+      auto state = collectOutput(frames);
+      if (state.isErr()) return std::move(state).unwrapErr();
+      if (std::chrono::steady_clock::now() >= deadline)
+        return rejectFrame(OM_CODEC_DECODE_FAILED, "decoder stopped accepting input");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  // Takes every picture the decoder has ready at this moment.
+  auto collectOutput(std::vector<Frame>& frames) -> Result<DecoderState, OMError> {
+    while (true) {
       amf::AMFDataPtr data;
-      AMF_RESULT res = decoder_->QueryOutput(&data);
-      if (res == AMF_EOF || res == AMF_REPEAT || res == AMF_NEED_MORE_INPUT || res == AMF_INPUT_FULL) {
-        if (res == AMF_REPEAT) {
-          empty_queries++;
-          continue;
-        }
-        return Ok(std::move(frames));
-      }
-      if (res != AMF_OK) {
-        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "AMF: QueryOutput failed with error {}", (int) res);
-        return Err(OM_CODEC_DECODE_FAILED);
-      }
-      if (!data) {
-        empty_queries++;
-        continue;
-      }
+      const AMF_RESULT res = decoder_->QueryOutput(&data);
+      if (res == AMF_EOF) return Ok(DecoderState::EndOfStream);
+      if (res == AMF_REPEAT || res == AMF_NEED_MORE_INPUT || !data) return Ok(DecoderState::NeedsInput);
+      if (res != AMF_OK) return Err(rejectFrame(OM_CODEC_DECODE_FAILED, "QueryOutput failed ({})", (int) res));
 
       amf::AMFSurfacePtr surface;
-      data->QueryInterface(amf::AMFSurface::IID(), reinterpret_cast<void**>(&surface));
-      if (!surface) continue;
-
-      amf::AMFSurfacePtr host_surface;
-      if (surface->GetMemoryType() == amf::AMF_MEMORY_HOST) {
-        host_surface = surface;
-      } else {
-        res = surface->Convert(amf::AMF_MEMORY_HOST);
-        if (res == AMF_OK) host_surface = surface;
-      }
-      if (!host_surface) {
-        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "AMF: Failed to convert surface to host memory");
-        return Err(OM_CODEC_DECODE_FAILED);
-      }
-
-      Frame frame = {};
-      frame.pts = data->GetPts();
-      frame.dts = frame.pts;
-      frame.data.emplace<Picture>(get_om_format(host_surface->GetFormat()), width_, height_);
-      Picture& pic = std::get<Picture>(frame.data);
-
-      amf_int64 primaries = AMF_COLOR_PRIMARIES_UNDEFINED, transfer = AMF_COLOR_TRANSFER_CHARACTERISTIC_UNDEFINED, matrix = AMF_COLOR_MATRIX_COEFF_UNSPECIFIED;
-      surface->GetProperty(AMF_VIDEO_COLOR_PRIMARIES, &primaries);
-      surface->GetProperty(AMF_VIDEO_COLOR_TRANSFER_CHARACTERISTIC, &transfer);
-      surface->GetProperty(L"ColorMatrix", &matrix);
-      pic.color_primaries = map_primaries_from_amf(primaries);
-      pic.transfer_char = map_transfer_from_amf(transfer);
-      pic.color_space = map_matrix_from_amf(matrix);
-
-      amf::AMFInterfacePtr hdr_intf;
-      if (surface->GetProperty(AMF_VIDEO_COLOR_HDR_METADATA, &hdr_intf) == AMF_OK && hdr_intf) {
-        amf::AMFBufferPtr hdr_buf;
-        if (hdr_intf->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&hdr_buf)) == AMF_OK && hdr_buf) {
-          const AMFHDRMetadata* hdr = static_cast<const AMFHDRMetadata*>(hdr_buf->GetNative());
-          if (hdr) {
-            pic.mastering_display.has_value = true;
-            memcpy(pic.mastering_display.display_primaries, hdr->redPrimary, 12);
-            pic.mastering_display.white_point[0] = hdr->whitePoint[0];
-            pic.mastering_display.white_point[1] = hdr->whitePoint[1];
-            pic.mastering_display.max_display_mastering_luminance = hdr->maxMasteringLuminance;
-            pic.mastering_display.min_display_mastering_luminance = hdr->minMasteringLuminance;
-            pic.content_light_level.has_value = true;
-            pic.content_light_level.max_content_light_level = hdr->maxContentLightLevel;
-            pic.content_light_level.max_pic_average_light_level = hdr->maxFrameAverageLightLevel;
-          }
-        }
-      }
-
-      for (amf_size i = 0; i < static_cast<amf_size>(std::min<amf_size>(host_surface->GetPlanesCount(), pic.planes.getPlaneCount())); ++i) {
-        amf::AMFPlane* plane = host_surface->GetPlaneAt(i);
-        const uint8_t* src = static_cast<const uint8_t*>(plane->GetNative());
-        uint8_t* dst = pic.planes.getData(i);
-        const uint32_t dst_stride = pic.planes.getLinesize(i);
-        const size_t row_bytes = std::min<size_t>(static_cast<size_t>(plane->GetWidth()) * plane->GetPixelSizeInBytes(), dst_stride);
-        const size_t rows = std::min<size_t>(static_cast<size_t>(plane->GetHeight()), pic.getPlaneDimensions(static_cast<uint32_t>(i)).second);
-        const int src_pitch = plane->GetHPitch();
-        for (size_t row = 0; row < rows; ++row) {
-          std::memcpy(dst + row * dst_stride, src + row * src_pitch, row_bytes);
-        }
-      }
-      frames.push_back(std::move(frame));
-      empty_queries = 0;
+      if (data->QueryInterface(amf::AMFSurface::IID(), reinterpret_cast<void**>(&surface)) != AMF_OK || !surface)
+        continue;
+      if (auto frame = toFrame(*surface)) frames.push_back(std::move(*frame));
     }
-    return Ok(std::move(frames));
   }
 
-  auto drainFrames(std::vector<Frame>& frames) -> Result<std::vector<Frame>, OMError> {
-    if (decoder_) decoder_->Drain();
+  auto drain(std::vector<Frame>& frames) -> OMError {
+    if (!decoder_) return OM_SUCCESS;
+    decoder_->Drain();
+
+    const auto deadline = std::chrono::steady_clock::now() + kDrainTimeout;
     while (true) {
-      const size_t before = frames.size();
-      auto result = processOutput(frames);
-      if (!result.isOk()) return result;
-      frames = std::move(result).unwrap();
-      if (frames.size() == before) break;
+      auto state = collectOutput(frames);
+      if (state.isErr()) return std::move(state).unwrapErr();
+      if (state.unwrap() == DecoderState::EndOfStream) return OM_SUCCESS;
+      if (std::chrono::steady_clock::now() >= deadline) {
+        log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING, "amf: decoder did not finish draining within {} ms",
+            static_cast<int>(kDrainTimeout.count()));
+        return OM_SUCCESS;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return Ok(std::move(frames));
+  }
+
+  auto toFrame(amf::AMFSurface& surface) -> std::optional<Frame> {
+    if (surface.GetMemoryType() != amf::AMF_MEMORY_HOST && surface.Convert(amf::AMF_MEMORY_HOST) != AMF_OK) {
+      rejectFrame(OM_CODEC_DECODE_FAILED, "cannot read a decoded surface back to host memory");
+      return std::nullopt;
+    }
+
+    Frame frame = {};
+    frame.pts = surface.GetPts();
+    frame.dts = frame.pts;
+
+    auto& picture = frame.data.emplace<Picture>(pixelFormat(surface.GetFormat()), width_, height_);
+    picture.color_space = output_format_.color_space;
+    picture.transfer_char = output_format_.transfer_char;
+    picture.color_primaries = output_format_.color_primaries;
+    picture.color_range = output_format_.color_range;
+    picture.mastering_display = output_format_.mastering_display;
+    picture.content_light_level = output_format_.content_light_level;
+    readColorDescription(surface, picture);
+
+    const auto planes = std::min<uint32_t>(static_cast<uint32_t>(surface.GetPlanesCount()),
+                                           picture.planes.getPlaneCount());
+    for (uint32_t i = 0; i < planes; ++i) {
+      amf::AMFPlane* plane = surface.GetPlaneAt(static_cast<amf_size>(i));
+      if (!plane) break;
+      const uint32_t dst_stride = picture.planes.getLinesize(i);
+      const auto [plane_width, plane_height] = picture.getPlaneDimensions(i);
+      copyRows(picture.planes.getData(i), dst_stride,
+               static_cast<const uint8_t*>(plane->GetNative()), static_cast<size_t>(plane->GetHPitch()),
+               std::min<size_t>(static_cast<size_t>(plane->GetWidth()) * plane->GetPixelSizeInBytes(), dst_stride),
+               std::min<size_t>(static_cast<size_t>(plane->GetHeight()), plane_height));
+    }
+    return frame;
   }
 };
 
+namespace {
+
+// Every encoder property is named after its codec -- AVC's "FrameSize" is
+// "HevcFrameSize" and "Av1FrameSize" elsewhere -- and a component ignores a name
+// it does not know without complaining, so a mix-up shows up not as an error but
+// as an encode that quietly keeps the driver's defaults.
+struct EncoderIds {
+  const wchar_t* component;
+  const wchar_t* frame_size;
+  const wchar_t* frame_rate;
+  const wchar_t* usage;
+  amf_int64 usage_transcoding;
+  const wchar_t* rate_control;
+  const wchar_t* target_bitrate;
+  const wchar_t* peak_bitrate;
+  const wchar_t* qp_intra;
+  const wchar_t* qp_inter;
+  // AV1 states its quantizer as a 1-255 q-index where AVC and HEVC use a 0-51 QP.
+  int32_t max_qp;
+  const wchar_t* extradata;
+  const wchar_t* color_bit_depth;
+  const wchar_t* input_primaries;
+  const wchar_t* input_transfer;
+  const wchar_t* input_matrix;
+  const wchar_t* input_hdr;
+  const wchar_t* output_primaries;
+  const wchar_t* output_transfer;
+  const wchar_t* output_matrix;
+};
+
+constexpr EncoderIds kEncoderAVC = {
+    AMFVideoEncoderVCE_AVC,
+    AMF_VIDEO_ENCODER_FRAMESIZE,
+    AMF_VIDEO_ENCODER_FRAMERATE,
+    AMF_VIDEO_ENCODER_USAGE,
+    AMF_VIDEO_ENCODER_USAGE_TRANSCODING,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
+    AMF_VIDEO_ENCODER_TARGET_BITRATE,
+    AMF_VIDEO_ENCODER_PEAK_BITRATE,
+    AMF_VIDEO_ENCODER_QP_I,
+    AMF_VIDEO_ENCODER_QP_P,
+    51,
+    AMF_VIDEO_ENCODER_EXTRADATA,
+    AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH,
+    AMF_VIDEO_ENCODER_INPUT_COLOR_PRIMARIES,
+    AMF_VIDEO_ENCODER_INPUT_TRANSFER_CHARACTERISTIC,
+    AMF_VIDEO_ENCODER_INPUT_MATRIX_COEFF,
+    AMF_VIDEO_ENCODER_INPUT_HDR_METADATA,
+    AMF_VIDEO_ENCODER_OUTPUT_COLOR_PRIMARIES,
+    AMF_VIDEO_ENCODER_OUTPUT_TRANSFER_CHARACTERISTIC,
+    AMF_VIDEO_ENCODER_OUTPUT_MATRIX_COEFF,
+};
+
+constexpr EncoderIds kEncoderHEVC = {
+    AMFVideoEncoder_HEVC,
+    AMF_VIDEO_ENCODER_HEVC_FRAMESIZE,
+    AMF_VIDEO_ENCODER_HEVC_FRAMERATE,
+    AMF_VIDEO_ENCODER_HEVC_USAGE,
+    AMF_VIDEO_ENCODER_HEVC_USAGE_TRANSCODING,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
+    AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE,
+    AMF_VIDEO_ENCODER_HEVC_PEAK_BITRATE,
+    AMF_VIDEO_ENCODER_HEVC_QP_I,
+    AMF_VIDEO_ENCODER_HEVC_QP_P,
+    51,
+    AMF_VIDEO_ENCODER_HEVC_EXTRADATA,
+    AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH,
+    AMF_VIDEO_ENCODER_HEVC_INPUT_COLOR_PRIMARIES,
+    AMF_VIDEO_ENCODER_HEVC_INPUT_TRANSFER_CHARACTERISTIC,
+    AMF_VIDEO_ENCODER_HEVC_INPUT_MATRIX_COEFF,
+    AMF_VIDEO_ENCODER_HEVC_INPUT_HDR_METADATA,
+    AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PRIMARIES,
+    AMF_VIDEO_ENCODER_HEVC_OUTPUT_TRANSFER_CHARACTERISTIC,
+    AMF_VIDEO_ENCODER_HEVC_OUTPUT_MATRIX_COEFF,
+};
+
+constexpr EncoderIds kEncoderAV1 = {
+    AMFVideoEncoder_AV1,
+    AMF_VIDEO_ENCODER_AV1_FRAMESIZE,
+    AMF_VIDEO_ENCODER_AV1_FRAMERATE,
+    AMF_VIDEO_ENCODER_AV1_USAGE,
+    AMF_VIDEO_ENCODER_AV1_USAGE_TRANSCODING,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD,
+    AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE,
+    AMF_VIDEO_ENCODER_AV1_PEAK_BITRATE,
+    AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTRA,
+    AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTER,
+    255,
+    AMF_VIDEO_ENCODER_AV1_EXTRA_DATA,
+    AMF_VIDEO_ENCODER_AV1_COLOR_BIT_DEPTH,
+    AMF_VIDEO_ENCODER_AV1_INPUT_COLOR_PRIMARIES,
+    AMF_VIDEO_ENCODER_AV1_INPUT_TRANSFER_CHARACTERISTIC,
+    AMF_VIDEO_ENCODER_AV1_INPUT_MATRIX_COEFF,
+    AMF_VIDEO_ENCODER_AV1_INPUT_HDR_METADATA,
+    AMF_VIDEO_ENCODER_AV1_OUTPUT_COLOR_PRIMARIES,
+    AMF_VIDEO_ENCODER_AV1_OUTPUT_TRANSFER_CHARACTERISTIC,
+    AMF_VIDEO_ENCODER_AV1_OUTPUT_MATRIX_COEFF,
+};
+
+auto encoderIds(OMCodecId codec_id) -> const EncoderIds* {
+  switch (codec_id) {
+    case OM_CODEC_H264: return &kEncoderAVC;
+    case OM_CODEC_H265: return &kEncoderHEVC;
+    case OM_CODEC_AV1: return &kEncoderAV1;
+    default: return nullptr;
+  }
+}
+
+// The rate control enumerations are per codec as well, and their values differ:
+// CBR is 1 for AVC but 3 for HEVC and AV1.
+auto rateControlMethod(OMCodecId codec_id, RateControlMode mode) -> amf_int64 {
+  const bool avc = codec_id == OM_CODEC_H264;
+  switch (mode) {
+    case RateControlMode::CQP:
+    case RateControlMode::CRF:
+    case RateControlMode::ICQ: return 0; // constant QP
+    case RateControlMode::CBR:
+    case RateControlMode::ABR: return avc ? 1 : 3;
+    case RateControlMode::VBR_LAT: return avc ? 3 : 1; // latency constrained VBR
+    case RateControlMode::QVBR: return 4;
+    case RateControlMode::HQVBR: return 5;
+    case RateControlMode::HQCBR: return 6;
+    default: return 2; // peak constrained VBR
+  }
+}
+
+struct RateControl {
+  amf_int64 method = 0;
+  std::optional<int64_t> target_bitrate;
+  std::optional<int64_t> peak_bitrate;
+  std::optional<int32_t> qp_intra;
+  std::optional<int32_t> qp_inter;
+};
+
+auto rateControl(const RateControlParams& params, OMCodecId codec_id) -> RateControl {
+  RateControl rc = {};
+  rc.method = rateControlMethod(codec_id, params.getMode());
+
+  const auto take = [&rc](const BitrateParams& bitrate) {
+    rc.target_bitrate = bitrate.target_bitrate;
+    rc.peak_bitrate = bitrate.max_bitrate;
+  };
+
+  const auto& variant = params.params;
+  if (const auto* cqp = std::get_if<CqpParams>(&variant)) {
+    rc.qp_intra = cqp->qp_i;
+    rc.qp_inter = cqp->qp_p;
+  } else if (const auto* crf = std::get_if<CrfParams>(&variant)) {
+    rc.qp_intra = static_cast<int32_t>(crf->quality);
+    rc.qp_inter = static_cast<int32_t>(crf->quality);
+  } else if (const auto* cbr = std::get_if<CbrParams>(&variant)) {
+    take(cbr->bitrate);
+  } else if (const auto* vbr = std::get_if<VbrParams>(&variant)) {
+    take(vbr->bitrate);
+  } else if (const auto* abr = std::get_if<AbrParams>(&variant)) {
+    rc.target_bitrate = abr->target_bitrate;
+  } else if (const auto* hqcbr = std::get_if<HqcbrParams>(&variant)) {
+    take(hqcbr->bitrate);
+  } else if (const auto* hqvbr = std::get_if<HqvbrParams>(&variant)) {
+    take(hqvbr->bitrate);
+  } else if (const auto* qvbr = std::get_if<QvbrParams>(&variant)) {
+    take(qvbr->bitrate);
+  } else if (const auto* latency = std::get_if<VbrLatParams>(&variant)) {
+    take(latency->bitrate);
+  }
+  return rc;
+}
+
+} // namespace
+
 class AMFEncoder final : public Encoder {
-  amf::AMFContextPtr amf_context_;
+  amf::AMFContextPtr context_;
   amf::AMFComponentPtr encoder_;
-  OMDX11Context* owned_dx11_context_ = nullptr;
-  bool initialized_ = false;
-  VideoFormat input_format_ = {};
+  const EncoderIds* ids_ = nullptr;
   OMCodecId codec_id_ = OM_CODEC_NONE;
-  uint32_t width_ = 0, height_ = 0, bitrate_ = 0, qp_ = 0;
-  Rational framerate_ = {};
-  HWDeviceType device_type_ = HWDeviceType::NONE;
+  VideoFormat input_format_ = {};
+  uint32_t width_ = 0;
+  uint32_t height_ = 0;
+  bool initialized_ = false;
 
 public:
   ~AMFEncoder() override { close(); }
 
   auto configure(const EncoderOptions& options) -> OMError override {
     close();
+
+    ids_ = encoderIds(options.format.codec_id);
+    if (!ids_) return OM_CODEC_NOT_SUPPORTED;
     codec_id_ = options.format.codec_id;
-    if (codec_id_ != OM_CODEC_H264 && codec_id_ != OM_CODEC_H265 && codec_id_ != OM_CODEC_AV1) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
-    framerate_ = options.format.video.framerate;
-    const auto& rc = options.rate_control;
-    if (auto* cqp = std::get_if<CqpParams>(&rc.params))
-      qp_ = cqp->qp_i;
-    else if (auto* cbr = std::get_if<CbrParams>(&rc.params))
-      bitrate_ = cbr->bitrate.target_bitrate;
-    else if (auto* vbr = std::get_if<VbrParams>(&rc.params))
-      bitrate_ = vbr->bitrate.target_bitrate;
+    if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
 
-    if (!load_amf_runtime()) return OM_CODEC_HWACCEL_FAILED;
-    auto init_result = initAMFContext(options.hw_device);
-    if (init_result.status != AMF_OK) return OM_CODEC_HWACCEL_FAILED;
-    amf_context_ = init_result.context;
-    owned_dx11_context_ = init_result.owned_dx11_context;
-    device_type_ = init_result.device_type;
+    amf::AMFFactory* factory = amfFactory();
+    if (!factory) return OM_CODEC_HWACCEL_FAILED;
+    const BoundContext bound = createContext(options.hw_device);
+    if (!bound) return OM_CODEC_HWACCEL_FAILED;
+    context_ = bound.context;
 
-    const wchar_t* encoder_id = get_amf_encoder_id(codec_id_);
-    if (!encoder_id) return OM_CODEC_NOT_SUPPORTED;
-    AMF_RESULT res = G_AMF_FACTORY->CreateComponent(amf_context_.GetPtr(), encoder_id, &encoder_);
-    if (res != AMF_OK || !encoder_) return OM_CODEC_HWACCEL_FAILED;
+    if (factory->CreateComponent(context_, ids_->component, &encoder_) != AMF_OK || !encoder_)
+      return OM_CODEC_HWACCEL_FAILED;
 
-    encoder_->SetProperty(AMF_VIDEO_ENCODER_FRAMESIZE, AMFSize(width_, height_));
-    encoder_->SetProperty(AMF_VIDEO_ENCODER_USAGE, static_cast<amf_int64>(AMF_VIDEO_ENCODER_USAGE_TRANSCODING));
-    encoder_->SetProperty(AMF_VIDEO_ENCODER_FRAMERATE, AMFRate {static_cast<amf_uint32>(framerate_.num), static_cast<amf_uint32>(framerate_.den)});
-    encoder_->SetProperty(AMF_VIDEO_COLOR_PRIMARIES, static_cast<amf_int64>(map_primaries_to_amf(options.format.video.color_primaries)));
-    encoder_->SetProperty(AMF_VIDEO_COLOR_TRANSFER_CHARACTERISTIC, static_cast<amf_int64>(map_transfer_to_amf(options.format.video.transfer_char)));
-    encoder_->SetProperty(L"ColorMatrix", static_cast<amf_int64>(map_matrix_to_amf(options.format.video.color_space)));
-    if (options.video_format.format == OM_FORMAT_P010) {
-      if (codec_id_ == OM_CODEC_H265)
-        encoder_->SetProperty(AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH, static_cast<amf_int64>(AMF_COLOR_BIT_DEPTH_10));
-      else if (codec_id_ == OM_CODEC_AV1)
-        encoder_->SetProperty(AMF_VIDEO_ENCODER_AV1_COLOR_BIT_DEPTH, static_cast<amf_int64>(AMF_COLOR_BIT_DEPTH_10));
+    const Rational framerate = options.format.video.framerate;
+    encoder_->SetProperty(ids_->usage, ids_->usage_transcoding);
+    encoder_->SetProperty(ids_->frame_size, AMFConstructSize(static_cast<amf_int32>(width_), static_cast<amf_int32>(height_)));
+    encoder_->SetProperty(ids_->frame_rate, AMFConstructRate(static_cast<amf_uint32>(framerate.num),
+                                                             static_cast<amf_uint32>(framerate.den)));
+    applyColor(options.video_format);
+    applyRateControl(rateControl(options.rate_control, codec_id_));
+
+    if (const AMF_RESULT res = encoder_->Init(surfaceFormat(options.video_format.format),
+                                              static_cast<amf_int32>(width_), static_cast<amf_int32>(height_));
+        res != AMF_OK) {
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "amf: encoder init failed ({})", (int) res);
+      return OM_CODEC_HWACCEL_FAILED;
     }
-    if (bitrate_ > 0) {
-      encoder_->SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, static_cast<amf_int64>(bitrate_));
-      encoder_->SetProperty(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, static_cast<amf_int64>(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR));
-    } else if (qp_ > 0) {
-      encoder_->SetProperty(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, static_cast<amf_int64>(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP));
-      encoder_->SetProperty(AMF_VIDEO_ENCODER_QP_I, static_cast<amf_int64>(qp_));
-      encoder_->SetProperty(AMF_VIDEO_ENCODER_QP_P, static_cast<amf_int64>(qp_));
-    }
-
-    res = encoder_->Init(get_amf_format(options.video_format.format), width_, height_);
-    if (res != AMF_OK) return OM_CODEC_HWACCEL_FAILED;
 
     input_format_ = options.video_format;
     initialized_ = true;
+    log(OM_CATEGORY_ENCODER, OM_LEVEL_INFO, "amf: encoding {}x{} {} on {} device",
+        width_, height_, formatName(input_format_.format), bound.device);
     return OM_SUCCESS;
   }
 
   auto getInfo() -> EncodingInfo override {
-    if (!initialized_) return {};
     EncodingInfo info = {};
+    if (!initialized_) return info;
+
     amf::AMFInterfacePtr extradata;
-    if (encoder_->GetProperty(AMF_VIDEO_ENCODER_EXTRADATA, &extradata) == AMF_OK && extradata) {
-      amf::AMFBufferPtr buf;
-      extradata->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&buf));
-      if (buf) info.extradata.assign(static_cast<const uint8_t*>(buf->GetNative()), static_cast<const uint8_t*>(buf->GetNative()) + buf->GetSize());
+    if (encoder_->GetProperty(ids_->extradata, &extradata) == AMF_OK && extradata) {
+      amf::AMFBufferPtr buffer;
+      extradata->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&buffer));
+      if (buffer) {
+        const auto* bytes = static_cast<const uint8_t*>(buffer->GetNative());
+        info.extradata.assign(bytes, bytes + buffer->GetSize());
+      }
     }
     info.mastering_display = input_format_.mastering_display;
     info.content_light_level = input_format_.content_light_level;
@@ -600,20 +731,35 @@ public:
   }
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
-    std::vector<Packet> packets;
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-    AMF_RESULT res = submitFrame(frame);
-    if (res == AMF_INPUT_FULL) {
-      auto out = processOutput(packets);
-      if (out.isErr()) return out;
-      packets = std::move(out).unwrap();
-      res = submitFrame(frame);
+    const auto* picture = std::get_if<Picture>(&frame.data);
+    if (!picture) return Err(OM_COMMON_INVALID_ARGUMENT);
+
+    amf::AMFSurfacePtr surface;
+    if (const OMError err = makeSurface(*picture, frame.pts, surface); err != OM_SUCCESS) return Err(err);
+
+    // As on the decoder, a full input queue is cleared by taking the packets the
+    // encoder already has and offering the same surface again.
+    std::vector<Packet> packets;
+    while (true) {
+      const AMF_RESULT res = encoder_->SubmitInput(surface);
+      if (res == AMF_OK || res == AMF_NEED_MORE_INPUT) break;
+      if (res != AMF_INPUT_FULL) return Err(OM_CODEC_ENCODE_FAILED);
+      if (const OMError err = collectOutput(packets); err != OM_SUCCESS) return Err(err);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (res != AMF_OK) return Err(OM_CODEC_ENCODE_FAILED);
-    return processOutput(packets);
+
+    if (const OMError err = collectOutput(packets); err != OM_SUCCESS) return Err(err);
+    return Ok(std::move(packets));
   }
 
-  auto updateBitrate(const RateControlParams&) -> OMError override { return OM_SUCCESS; }
+  auto updateBitrate(const RateControlParams& params) -> OMError override {
+    if (!initialized_) return OM_COMMON_NOT_INITIALIZED;
+    const RateControl rc = rateControl(params, codec_id_);
+    if (!rc.target_bitrate && !rc.qp_intra) return OM_CODEC_NOT_SUPPORTED;
+    applyRateControl(rc);
+    return OM_SUCCESS;
+  }
 
 private:
   void close() {
@@ -621,63 +767,83 @@ private:
       encoder_->Terminate();
       encoder_ = nullptr;
     }
-    if (amf_context_) amf_context_->Terminate();
-    amf_context_ = nullptr;
-    if (owned_dx11_context_) {
-      HWD3D11Context_delete(owned_dx11_context_);
-      owned_dx11_context_ = nullptr;
+    if (context_) {
+      context_->Terminate();
+      context_ = nullptr;
     }
     initialized_ = false;
   }
 
-  auto submitFrame(const Frame& frame) -> AMF_RESULT {
-    const auto& pic = std::get<Picture>(frame.data);
-    amf::AMFSurfacePtr surface;
-    AMF_RESULT res = amf_context_->AllocSurface(amf::AMF_MEMORY_HOST, get_amf_format(pic.format), width_, height_, &surface);
-    if (res != AMF_OK) return res;
-    for (amf_int32 i = 0; i < static_cast<amf_int32>(surface->GetPlanesCount()); i++) {
-      amf::AMFPlane* plane = surface->GetPlaneAt(i);
-      uint8_t* dst = static_cast<uint8_t*>(plane->GetNative());
-      const uint8_t* src = pic.planes.getData(i);
-      const uint32_t src_stride = pic.planes.getLinesize(i);
-      const size_t row_bytes = std::min<size_t>(static_cast<size_t>(plane->GetWidth()) * plane->GetPixelSizeInBytes(), src_stride);
-      for (size_t row = 0; row < static_cast<size_t>(plane->GetHeight()); ++row) std::memcpy(dst + row * plane->GetHPitch(), src + row * src_stride, row_bytes);
-    }
-    surface->SetPts(static_cast<amf_pts>(frame.pts));
-    if (pic.mastering_display.has_value) {
-      amf::AMFBufferPtr hdr_buf;
-      if (amf_context_->AllocBuffer(amf::AMF_MEMORY_HOST, sizeof(AMFHDRMetadata), &hdr_buf) == AMF_OK && hdr_buf) {
-        AMFHDRMetadata* hdr = static_cast<AMFHDRMetadata*>(hdr_buf->GetNative());
-        memcpy(hdr->redPrimary, pic.mastering_display.display_primaries, 12);
-        hdr->whitePoint[0] = pic.mastering_display.white_point[0];
-        hdr->whitePoint[1] = pic.mastering_display.white_point[1];
-        hdr->maxMasteringLuminance = pic.mastering_display.max_display_mastering_luminance;
-        hdr->minMasteringLuminance = pic.mastering_display.min_display_mastering_luminance;
-        hdr->maxContentLightLevel = pic.content_light_level.max_content_light_level;
-        hdr->maxFrameAverageLightLevel = pic.content_light_level.max_pic_average_light_level;
-        surface->SetProperty(AMF_VIDEO_COLOR_HDR_METADATA, static_cast<amf::AMFInterface*>(hdr_buf));
-      }
-    }
-    return encoder_->SubmitInput(surface);
+  void applyRateControl(const RateControl& rc) {
+    encoder_->SetProperty(ids_->rate_control, rc.method);
+    if (rc.target_bitrate) encoder_->SetProperty(ids_->target_bitrate, static_cast<amf_int64>(*rc.target_bitrate));
+    if (rc.peak_bitrate) encoder_->SetProperty(ids_->peak_bitrate, static_cast<amf_int64>(*rc.peak_bitrate));
+
+    const auto quantizer = [this](int32_t qp) {
+      return static_cast<amf_int64>(std::clamp(qp * ids_->max_qp / 51, 1, ids_->max_qp));
+    };
+    if (rc.qp_intra) encoder_->SetProperty(ids_->qp_intra, quantizer(*rc.qp_intra));
+    if (rc.qp_inter) encoder_->SetProperty(ids_->qp_inter, quantizer(*rc.qp_inter));
   }
 
-  auto processOutput(std::vector<Packet>& packets) -> Result<std::vector<Packet>, OMError> {
+  void applyColor(const VideoFormat& format) {
+    const auto primaries = static_cast<amf_int64>(color_codes::codeFromPrimaries(format.color_primaries));
+    const auto transfer = static_cast<amf_int64>(color_codes::codeFromTransfer(format.transfer_char));
+    const auto matrix = static_cast<amf_int64>(color_codes::matrixFromColorSpace(format.color_space));
+    for (const wchar_t* id : {ids_->input_primaries, ids_->output_primaries}) encoder_->SetProperty(id, primaries);
+    for (const wchar_t* id : {ids_->input_transfer, ids_->output_transfer}) encoder_->SetProperty(id, transfer);
+    for (const wchar_t* id : {ids_->input_matrix, ids_->output_matrix}) encoder_->SetProperty(id, matrix);
+
+    if (getBytesPerPixel(format.format, 0) > 1)
+      encoder_->SetProperty(ids_->color_bit_depth, static_cast<amf_int64>(AMF_COLOR_BIT_DEPTH_10));
+
+    if (!format.mastering_display.has_value) return;
+    amf::AMFBufferPtr buffer;
+    if (context_->AllocBuffer(amf::AMF_MEMORY_HOST, sizeof(AMFHDRMetadata), &buffer) != AMF_OK || !buffer) return;
+    const AMFHDRMetadata hdr = hdrMetadata(format.mastering_display, format.content_light_level);
+    std::memcpy(buffer->GetNative(), &hdr, sizeof(hdr));
+    encoder_->SetProperty(ids_->input_hdr, static_cast<amf::AMFInterface*>(buffer));
+  }
+
+  auto makeSurface(const Picture& picture, int64_t pts, amf::AMFSurfacePtr& surface) -> OMError {
+    if (!std::get_if<HostPicture>(&picture.buffer)) return OM_CODEC_NOT_SUPPORTED;
+    if (context_->AllocSurface(amf::AMF_MEMORY_HOST, surfaceFormat(picture.format),
+                               static_cast<amf_int32>(width_), static_cast<amf_int32>(height_), &surface) != AMF_OK)
+      return OM_COMMON_OUT_OF_MEMORY;
+
+    const auto planes = std::min<uint32_t>(static_cast<uint32_t>(surface->GetPlanesCount()),
+                                           picture.planes.getPlaneCount());
+    for (uint32_t i = 0; i < planes; ++i) {
+      amf::AMFPlane* plane = surface->GetPlaneAt(static_cast<amf_size>(i));
+      if (!plane) break;
+      const uint32_t src_stride = picture.planes.getLinesize(i);
+      const auto [plane_width, plane_height] = picture.getPlaneDimensions(i);
+      copyRows(static_cast<uint8_t*>(plane->GetNative()), static_cast<size_t>(plane->GetHPitch()),
+               picture.planes.getData(i), src_stride,
+               std::min<size_t>(static_cast<size_t>(plane->GetWidth()) * plane->GetPixelSizeInBytes(), src_stride),
+               std::min<size_t>(static_cast<size_t>(plane->GetHeight()), plane_height));
+    }
+    surface->SetPts(static_cast<amf_pts>(pts));
+    return OM_SUCCESS;
+  }
+
+  auto collectOutput(std::vector<Packet>& packets) -> OMError {
     while (true) {
       amf::AMFDataPtr data;
-      AMF_RESULT res = encoder_->QueryOutput(&data);
-      if (res == AMF_EOF || res == AMF_INPUT_FULL || res == AMF_NEED_MORE_INPUT || res == AMF_REPEAT) return Ok(std::move(packets));
-      if (res != AMF_OK || !data) break;
-      amf::AMFBufferPtr buf;
-      data->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&buf));
-      if (!buf) continue;
+      const AMF_RESULT res = encoder_->QueryOutput(&data);
+      if (res == AMF_EOF || res == AMF_REPEAT || res == AMF_NEED_MORE_INPUT || !data) return OM_SUCCESS;
+      if (res != AMF_OK) return OM_CODEC_ENCODE_FAILED;
+
+      amf::AMFBufferPtr buffer;
+      if (data->QueryInterface(amf::AMFBuffer::IID(), reinterpret_cast<void**>(&buffer)) != AMF_OK || !buffer) continue;
+
       Packet packet = {};
-      packet.allocate(buf->GetSize());
-      std::memcpy(packet.bytes.data(), buf->GetNative(), buf->GetSize());
+      packet.allocate(buffer->GetSize());
+      std::memcpy(packet.bytes.data(), buffer->GetNative(), buffer->GetSize());
       packet.pts = data->GetPts();
       packet.dts = packet.pts;
       packets.push_back(std::move(packet));
     }
-    return Ok(std::move(packets));
   }
 };
 
