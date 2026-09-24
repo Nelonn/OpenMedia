@@ -1401,7 +1401,12 @@ struct RleIterator {
     using T = decltype(value_fn(table[0]));
     if (idx >= table.size()) return T {};
     const auto val = value_fn(table[idx]);
-    --remaining;
+    // An exhausted entry has to be stepped over here: settle() only fills
+    // `remaining` in, so leaving idx where it is repeats the same entry for the
+    // whole track. That turned every composition offset into the first one,
+    // which reads as a stream that never reorders -- timestamps then rose in
+    // decode order and came back out of the decoder scrambled.
+    if (--remaining == 0) ++idx;
     settle();
     return val;
   }
