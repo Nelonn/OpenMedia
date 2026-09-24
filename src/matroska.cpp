@@ -1375,10 +1375,12 @@ private:
     if (const char* name = parser_track->GetNameAsUTF8(); name && *name) {
       track.metadata.setString(TITLE, std::string_view(name));
     }
-    if (const char* language = parser_track->GetLanguage();
-        language && *language && std::string_view(language) != "und") {
-      track.metadata.setString(LANGUAGE, std::string_view(language));
-    }
+    // Matroska's Language element defaults to "eng", and mkvmerge leaves it out
+    // of English tracks for that reason; libwebm reports no language at all.
+    const char* language = parser_track->GetLanguage();
+    const std::string_view language_view =
+        (language && *language) ? std::string_view(language) : std::string_view("eng");
+    if (language_view != "und") track.metadata.setString(LANGUAGE, language_view);
 
     // FlagDefault is 1 unless the file says otherwise; FlagForced is 0.
     bool flag_default = true;
