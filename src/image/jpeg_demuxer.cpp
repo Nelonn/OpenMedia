@@ -9,68 +9,35 @@ namespace openmedia {
 class JPEGDemuxer final : public BaseDemuxer {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
-  std::vector<uint8_t> header_buf_;
   bool packet_read_ = false;
 
-  auto readByte(uint8_t& byte) -> bool {
-    if (input_->read({&byte, 1}) < 1) {
-      return false;
-    }
-    header_buf_.push_back(byte);
-    return true;
+  // 0xC0..0xCF are the frame headers except for DHT, JPG and DAC.
+  static auto isSOF(uint8_t marker) -> bool {
+    return marker >= 0xC0 && marker <= 0xCF &&
+           marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
   }
 
-  auto readBytes(uint8_t* dst, size_t n) -> size_t {
-    size_t result = input_->read({dst, n});
-    header_buf_.insert(header_buf_.end(), dst, dst + result);
-    return result;
-  }
-
-  auto parseSofMarker() -> OMError {
-    uint8_t sof_data[9];
-    if (readBytes(sof_data, 9) < 9) {
-      return OM_IO_NOT_ENOUGH_DATA;
+  // Returns the next marker code, or 0 at EOF. A marker is 0xFF followed by a
+  // non-zero code; any number of 0xFF fill bytes may precede it, and a 0xFF
+  // 0x00 pair is stuffed data, so both are skipped.
+  auto readMarker() -> uint8_t {
+    uint8_t byte;
+    for (;;) {
+      if (input_->read({&byte, 1}) < 1) {
+        return 0;
+      }
+      if (byte != 0xFF) {
+        continue;
+      }
+      do {
+        if (input_->read({&byte, 1}) < 1) {
+          return 0;
+        }
+      } while (byte == 0xFF);
+      if (byte != 0x00) {
+        return byte;
+      }
     }
-
-    // SOF marker format:
-    // [0-1]: length (includes these 2 bytes)
-    // [2]:   precision (bits per sample)
-    // [3-4]: height
-    // [5-6]: width
-    // [7]:   number of components
-
-    height_ = (sof_data[3] << 8) | sof_data[4];
-    width_  = (sof_data[5] << 8) | sof_data[6];
-
-    if (width_ == 0 || height_ == 0) {
-      return OM_FORMAT_PARSE_FAILED;
-    }
-
-    return OM_SUCCESS;
-  }
-
-  auto skipVariableMarker() -> OMError {
-    uint8_t length_bytes[2];
-    if (readBytes(length_bytes, 2) < 2) {
-      return OM_IO_NOT_ENOUGH_DATA;
-    }
-
-    uint16_t length = (length_bytes[0] << 8) | length_bytes[1];
-    if (length < 2) {
-      return OM_FORMAT_PARSE_FAILED;
-    }
-
-    // Read and accumulate the rest of the marker data (length includes the 2 length bytes)
-    size_t remaining = length - 2;
-    std::vector<uint8_t> marker_data(remaining);
-    size_t bytes_read = input_->read(std::span(marker_data.data(), remaining));
-    header_buf_.insert(header_buf_.end(), marker_data.begin(), marker_data.begin() + bytes_read);
-
-    if (bytes_read < remaining) {
-      return OM_IO_NOT_ENOUGH_DATA;
-    }
-
-    return OM_SUCCESS;
   }
 
 public:
@@ -80,107 +47,59 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Check JPEG SOI marker (0xFFD8)
     uint8_t soi[2];
-    if (readBytes(soi, 2) < 2) {
+    if (input_->read(soi) < 2) {
       return OM_IO_NOT_ENOUGH_DATA;
     }
-
     if (soi[0] != 0xFF || soi[1] != 0xD8) {
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Parse JPEG markers to find SOF and image dimensions
-    bool found_sof = false;
-    while (!input_->isEOF()) {
-      uint8_t marker_prefix;
-      if (!readByte(marker_prefix)) {
-        break;
-      }
+    for (;;) {
+      uint8_t marker = readMarker();
 
-      if (marker_prefix != 0xFF) {
+      // TEM and the restart markers carry no payload.
+      if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
         continue;
       }
 
-      uint8_t marker;
-      if (!readByte(marker)) {
-        break;
+      // EOI, SOS or EOF before a frame header: there are no dimensions to find.
+      if (marker == 0x00 || marker == 0xD9 || marker == 0xDA) {
+        return OM_FORMAT_PARSE_FAILED;
       }
 
-      // Skip padding 0xFF bytes
-      while (marker == 0xFF) {
-        if (!readByte(marker)) {
-          goto done;
+      uint8_t length_bytes[2];
+      if (input_->read(length_bytes) < 2) {
+        return OM_IO_NOT_ENOUGH_DATA;
+      }
+
+      uint16_t length = load_u16_be(length_bytes);
+      if (length < 2) {
+        return OM_FORMAT_PARSE_FAILED;
+      }
+
+      if (!isSOF(marker)) {
+        if (!input_->skip(length - 2)) {
+          return OM_IO_NOT_ENOUGH_DATA;
         }
-      }
-
-      if (marker == 0x00) { // Stuff byte
         continue;
       }
 
-      if (marker == 0xD9) { // EOI
-        break;
+      // SOF payload: precision, height, width, component count.
+      uint8_t sof[6];
+      if (length < 8 || input_->read(sof) < 6) {
+        return OM_IO_NOT_ENOUGH_DATA;
       }
 
-      // SOF markers (Start Of Frame)
-      // SOF0: 0xC0, SOF1: 0xC1, SOF2: 0xC2, SOF3: 0xC3
-      // SOF5: 0xC5, SOF6: 0xC6, SOF7: 0xC7
-      // SOF9: 0xC9, SOF10: 0xCA, SOF11: 0xCB
-      // SOF13: 0xCD, SOF14: 0xCE, SOF15: 0xCF
-      if ((marker >= 0xC0 && marker <= 0xC3) ||
-          (marker >= 0xC5 && marker <= 0xC7) ||
-          (marker >= 0xC9 && marker <= 0xCB) ||
-          (marker >= 0xCD && marker <= 0xCF)) {
-        auto err = parseSofMarker();
-        if (err != OM_SUCCESS) {
-          return err;
-        }
-        found_sof = true;
-        // Stop accumulating — the rest will be read fresh in read_packet
-        break;
-      }
-
-      // SOS (Start Of Scan) - accumulate scan data until EOI
-      if (marker == 0xDA) {
-        while (!input_->isEOF()) {
-          uint8_t byte;
-          if (!readByte(byte)) {
-            break;
-          }
-          if (byte == 0xFF) {
-            uint8_t next;
-            if (!readByte(next)) {
-              break;
-            }
-            if (next == 0xD9) { // EOI
-              break;
-            }
-            if (next != 0x00) { // Not a stuff byte, put back via re-process
-              // next is already accumulated; just continue scanning
-            }
-          }
-        }
-        break;
-      }
-
-      // Skip standalone markers (no length field)
-      if (marker >= 0xD0 && marker <= 0xD8) {
-        continue;
-      }
-
-      // Markers with length field
-      auto err = skipVariableMarker();
-      if (err != OM_SUCCESS) {
-        break;
-      }
+      height_ = load_u16_be(sof + 1);
+      width_ = load_u16_be(sof + 3);
+      break;
     }
 
-    done:
-    if (!found_sof || width_ == 0 || height_ == 0) {
+    if (width_ == 0 || height_ == 0) {
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Create track
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;
@@ -201,16 +120,22 @@ public:
     }
     packet_read_ = true;
 
+    int64_t size = input_->size();
+    if (size <= 0) {
+      return Err(OM_IO_NOT_ENOUGH_DATA);
+    }
+    if (!input_->seek(0, Whence::BEG)) {
+      return Err(OM_IO_SEEK_FAILED);
+    }
+
     Packet pkt;
-    size_t size = static_cast<size_t>(input_->size());
-    pkt.allocate(size);
+    pkt.allocate(static_cast<size_t>(size));
     pkt.stream_index = 0;
     pkt.pos = 0;
     pkt.pts = 0;
     pkt.dts = 0;
     pkt.is_keyframe = true;
 
-    input_->seek(0, Whence::BEG);
     size_t bytes_read = input_->read(pkt.bytes);
     pkt.bytes = pkt.bytes.subspan(0, bytes_read);
 
