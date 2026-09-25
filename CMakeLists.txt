@@ -66,6 +66,7 @@ target_sources(OpenMedia PRIVATE
         src/audio/pcm.cpp
         src/bitstream_filter.hpp
         src/bmff_demuxer.cpp
+        src/buffer.cpp
         src/codec_defs.cpp
         src/codec_registry.cpp
         src/codecs.hpp

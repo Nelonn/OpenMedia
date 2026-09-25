@@ -369,8 +369,9 @@ private:
       size_t total_samples = static_cast<size_t>(av_frame->nb_samples) * av_frame->ch_layout.nb_channels;
       size_t buffer_size = total_samples * static_cast<size_t>(bytes_per_sample);
 
-      if (buffer_size > 0) {
-        samples.buffer = BufferPool::getInstance().get(buffer_size);
+      // samples.allocate() above already took a pooled buffer of this size;
+      // taking a second one here would churn the pool for nothing.
+      if (buffer_size > 0 && samples.buffer && samples.buffer->bytes().size() >= buffer_size) {
         uint8_t* dst_ptr = samples.buffer->bytes().data();
 
         if (samples.format.planar) {
