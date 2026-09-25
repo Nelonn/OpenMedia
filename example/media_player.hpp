@@ -27,6 +27,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -386,8 +387,12 @@ private:
   }
 
   void audioLoop(std::stop_token stop) {
+    bool logged = false;
     const bool ended = media::decodeStream(*audio_.decoder, audio_packets_, stop, "Audio", [&](const Frame& frame) {
       const auto* samples = std::get_if<AudioSamples>(&frame.data);
+      if (samples && samples->nb_samples > 0 && !std::exchange(logged, true))
+        SDL_Log("[Audio] First frame: %u Hz, %u ch, %u samples, pts %.3fs", samples->format.sample_rate,
+                samples->format.channels, samples->nb_samples, media::seconds(frame.pts, audio_.time_base));
       if (samples && samples->nb_samples > 0 && audio_sink_.configure(media::audioSpec(samples->format)))
         audio_sink_.push(media::interleavedPcm(*samples), media::seconds(frame.pts, audio_.time_base), stop);
       return true;
