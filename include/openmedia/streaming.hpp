@@ -80,6 +80,11 @@ struct OPENMEDIA_ABI StreamOptions {
   uint32_t max_width = 0;
   uint32_t max_height = 0;
   bool with_subtitles = true;
+  // The most any one track may hold in segments handed over and not yet read. How
+  // deep to prefetch is the caller's decision, but it is made against a ceiling, so
+  // that a downloader running away with itself is reported rather than answered with
+  // however much memory it asks for. Zero lifts the limit.
+  size_t max_buffered_bytes = 64u << 20;
   // Called on a buffer miss instead of reporting OM_IO_NOT_ENOUGH_DATA.
   FetchFn fetch;
 };
@@ -129,6 +134,10 @@ public:
    * A request that is no longer wanted -- seeked past, or belonging to an
    * alternative that has since been switched away from -- is dropped, which is not
    * an error.
+   *
+   * OM_COMMON_OVERFLOW means the track is already holding
+   * StreamOptions::max_buffered_bytes and this segment was not taken: keep it and
+   * offer it again once readPacket() has drained some of what is there.
    */
   virtual auto appendSegment(const SegmentRequest& request, std::vector<uint8_t> bytes)
       -> OMError = 0;
