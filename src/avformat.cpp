@@ -130,6 +130,7 @@ public:
   }
 
   auto open(std::unique_ptr<InputStream> input) -> OMError override {
+    close();
     auto& format_loader = LibAVFormat::getInstance();
     auto& codec_loader = LibAVCodec::getInstance();
     auto& util_loader = LibAVUtil::getInstance();
