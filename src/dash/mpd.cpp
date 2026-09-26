@@ -53,8 +53,8 @@ auto attrRational(const xml::Node& node, std::string_view key) -> Rational {
   return {static_cast<int32_t>(num), static_cast<int32_t>(den == 0 ? 1 : den)};
 }
 
-/** `@audioSamplingRate` may list several rates; the first is the one that
- * matters, since a representation carries one. */
+// `@audioSamplingRate` may list several rates; the first is the one that
+// matters, since a representation carries one.
 auto attrFirstUInt(const xml::Node& node, std::string_view key) -> uint32_t {
   const auto value = node.attribute(key);
   if (!value) return 0;
@@ -63,7 +63,7 @@ auto attrFirstUInt(const xml::Node& node, std::string_view key) -> uint32_t {
       toUInt(space == std::string_view::npos ? *value : value->substr(0, space)));
 }
 
-/** `first-last`, inclusive at both ends, as an offset and a length. */
+// `first-last`, inclusive at both ends, as an offset and a length.
 auto parseRange(std::string_view text) -> ByteRange {
   const size_t dash = text.find('-');
   if (dash == std::string_view::npos) return {static_cast<int64_t>(toUInt(text)), -1};
@@ -137,9 +137,9 @@ auto parseIsoDuration(std::string_view text) -> int64_t {
 
 namespace {
 
-/** Which identifiers this pass is able to fill in. One that is not available is
- * written back out exactly as it was found, format specifier and all, so a later
- * pass can still substitute it. */
+// Which identifiers this pass is able to fill in. One that is not available is
+// written back out exactly as it was found, format specifier and all, so a later
+// pass can still substitute it.
 struct TemplateValues {
   std::string_view representation_id;
   uint32_t bandwidth = 0;
@@ -410,8 +410,8 @@ auto Representation::coveredDuration() const -> uint64_t {
 
 namespace {
 
-/** Attributes a Representation may inherit from its AdaptationSet, and an
- * AdaptationSet from its Period. */
+// Attributes a Representation may inherit from its AdaptationSet, and an
+// AdaptationSet from its Period.
 struct MediaAttrs {
   std::string mime_type;
   std::string codecs;
@@ -448,8 +448,8 @@ void readMediaAttrs(const xml::Node& node, MediaAttrs& attrs) {
   }
 }
 
-/** Everything about segment addressing that a level can declare, accumulated as
- * the parse descends. */
+// Everything about segment addressing that a level can declare, accumulated as
+// the parse descends.
 struct SegmentCtx {
   uint32_t timescale = 0;
   uint64_t start_number = 0;
@@ -473,7 +473,7 @@ struct SegmentCtx {
   bool has_segment_base = false;
 };
 
-/** SegmentBase attributes, shared by SegmentTemplate and SegmentList. */
+// SegmentBase attributes, shared by SegmentTemplate and SegmentList.
 void readSegmentBaseAttrs(const xml::Node& node, std::string_view base_url, SegmentCtx& ctx) {
   if (node.attribute("timescale")) {
     ctx.timescale = static_cast<uint32_t>(attrUInt(node, "timescale"));
@@ -554,10 +554,10 @@ void readSegmentBase(const xml::Node& node, std::string_view base_url, SegmentCt
   ctx.has_segment_base = true;
 }
 
-/** Applies whichever of the three addressing elements a level carries. Each is
- * read fresh, so a Representation naming its own SegmentTemplate replaces the
- * AdaptationSet's rather than merging with it -- except for the attributes it
- * leaves out, which is exactly what inheritance is for. */
+// Applies whichever of the three addressing elements a level carries. Each is
+// read fresh, so a Representation naming its own SegmentTemplate replaces the
+// AdaptationSet's rather than merging with it -- except for the attributes it
+// leaves out, which is exactly what inheritance is for.
 void readAddressing(const xml::Node& node, std::string_view base_url, SegmentCtx& ctx) {
   if (const xml::Node* tmpl = node.child("SegmentTemplate")) {
     readSegmentTemplate(*tmpl, base_url, ctx);
@@ -570,9 +570,9 @@ void readAddressing(const xml::Node& node, std::string_view base_url, SegmentCtx
   }
 }
 
-/** The first non-empty BaseURL of a level, resolved against what it inherits.
- * Alternatives beyond the first describe other servers holding the same bytes,
- * which is a redundancy policy and so the caller's business, not the parser's. */
+// The first non-empty BaseURL of a level, resolved against what it inherits.
+// Alternatives beyond the first describe other servers holding the same bytes,
+// which is a redundancy policy and so the caller's business, not the parser's.
 auto descendBaseUrl(const xml::Node& node, const std::string& inherited) -> std::string {
   for (const xml::Node* base : node.childrenNamed("BaseURL")) {
     if (!base->text.empty()) return resolveUrl(inherited, base->text);

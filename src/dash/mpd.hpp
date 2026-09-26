@@ -23,7 +23,7 @@ struct ByteRange {
   auto isWhole() const -> bool { return offset == 0 && length < 0; }
 };
 
-/** One `S` element of a SegmentTimeline. */
+// One `S` element of a SegmentTimeline.
 struct TimelineRun {
   int64_t start = 0;     // @t, in the representation's timescale
   uint64_t duration = 0; // @d
@@ -35,9 +35,7 @@ struct ListEntry {
   ByteRange range;
 };
 
-/** How a representation names its segments. The four forms are exclusive, and a
- * manifest that gives none addresses its media as one self-contained resource.
- */
+// Exclusive; a manifest giving none addresses its media as one whole resource.
 enum class Addressing : uint8_t {
   None,
   Number,   // SegmentTemplate with $Number$ and @duration
@@ -83,26 +81,19 @@ struct Representation {
 
   int64_t period_duration_ns = 0; // 0 when the period has no known end
 
-  /** The initialization segment, if this representation has one apart from its
-   * media. */
   auto initSegment() const -> std::optional<SegmentRequest>;
 
-  /** How many media segments there are, or nothing when the manifest does not
-   * bound them -- a live timeline, or a template with no period duration. */
+  // Nothing when the manifest does not bound them: a live timeline, or a template
+  // with no period duration.
   auto segmentCount() const -> std::optional<uint64_t>;
 
-  /** The `ordinal`-th media segment, counting from zero whatever @startNumber
-   * says. Nothing when `ordinal` is past the end of a bounded representation. */
+  // Ordinals count from zero whatever @startNumber says.
   auto segmentAt(uint64_t ordinal) const -> std::optional<Segment>;
 
-  /** The segment holding `time` (in this representation's timescale), or the
-   * last one when `time` is past the end. */
+  // `time` is media time in this representation's timescale; past the end clamps.
   auto ordinalForTime(int64_t time) const -> uint64_t;
 
-  /** Total media time covered, in the representation's timescale; 0 when
-   * unbounded. */
-  auto coveredDuration() const -> uint64_t;
-
+  auto coveredDuration() const -> uint64_t; // in `timescale` units, 0 if unbounded
   auto mediaType() const -> OMMediaType;
 };
 
@@ -123,10 +114,8 @@ struct Manifest {
   bool dynamic = false;
   int64_t duration_ns = 0;
   int64_t min_buffer_ns = 0;
-  // -1 when the manifest is not to be reloaded. A dynamic manifest that gives a
-  // period here expects the caller to fetch it again that often; OpenMedia never
-  // fetches anything, so it reports the figure and leaves the reload to the
-  // application, which can hand the new bytes to openDashManifest().
+  // -1 when the manifest is not to be reloaded. Reloading is the caller's to do:
+  // fetch the new bytes and open them again.
   int64_t minimum_update_period_ns = -1;
   std::string availability_start_time;
   std::vector<Period> periods;
@@ -135,21 +124,17 @@ struct Manifest {
 auto parseManifest(std::span<const uint8_t> document, std::string_view manifest_url)
     -> Result<Manifest, OMError>;
 
-// --- Exposed for their own sake, and so they can be tested on their own -------
+// Exposed so they can be tested on their own.
 
-/** An xs:duration as nanoseconds. Only the forms a manifest uses: `PT1H2M3.5S`,
- * `P1DT4H`, and so on. Negative on anything unparseable. */
+// Negative on anything unparseable.
 auto parseIsoDuration(std::string_view text) -> int64_t;
 
-/** Substitutes `$Number$`, `$Time$`, `$RepresentationID$`, `$Bandwidth$` and
- * `$$`, honouring the `%0<width>d` format each identifier may carry. */
+// Honours the `%0<width>d` format an identifier may carry, and `$$`.
 auto expandTemplate(std::string_view tmpl, std::string_view representation_id,
                     uint32_t bandwidth, uint64_t number, int64_t time) -> std::string;
 
-/** Substitutes only what depends on the representation -- `$RepresentationID$`
- * and `$Bandwidth$` -- and writes `$Number$` and `$Time$` back out untouched for
- * segmentAt() to fill in later. Naming a segment then needs nothing but its
- * number and its time. */
+// Leaves `$Number$` and `$Time$` for segmentAt() to fill in, so naming a segment
+// later needs nothing but its number and its time.
 auto expandRepresentationTemplate(std::string_view tmpl, std::string_view representation_id,
                                   uint32_t bandwidth) -> std::string;
 
