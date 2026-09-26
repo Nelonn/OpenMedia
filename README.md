@@ -45,15 +45,15 @@ integration while maintaining a simple, intuitive API.
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Codec        | Decoding | Encoding | Backends                        |
-|--------------|:--------:|:--------:|---------------------------------|
-| AV1          |    ✅     |    🔧    | Hardware, dav1d (decoding only) |
-| VP8/VP9      |    ✅     |    ✅     | Hardware, libvpx                |
-| H264/AVC     |    ✅     |    ✅     | Hardware, OpenH264, FFmpeg      |
-| H265/HEVC    |    ✅     |    ✅     | Hardware, FFmpeg                |
-| H266/VVC     |    ✅     |    🔧    | VVdeC (Broken), VVenC, FFmpeg   |
-| Apple ProRes |    ✅     |    🔧    | Apple Hardware + FFmpeg only    |
-| EVC          | Untested | Untested | xevd, xeve                      |
+| Codec        | Decoding | Encoding | Backends                      |
+|--------------|:--------:|:--------:|-------------------------------|
+| AV1          |    ✅    |    ✅    | Hardware, dav1d               |
+| VP8/VP9      |    ✅    |    ✅    | Hardware, libvpx              |
+| H264/AVC     |    ✅    |    ✅    | Hardware, OpenH264, FFmpeg    |
+| H265/HEVC    |    ✅    |    ✅    | Hardware, FFmpeg              |
+| H266/VVC     |    ✅    |    🔧    | VVdeC (Broken), VVenC, FFmpeg |
+| Apple ProRes |    ✅    |    🔧    | Apple Hardware + FFmpeg only  |
+| EVC          | Untested | Untested | xevd, xeve                    |
 
 ### Image Codecs
 
@@ -61,9 +61,9 @@ integration while maintaining a simple, intuitive API.
 
 | Codec | Decoding | Encoding | Backends                                      |
 |-------|:--------:|:--------:|-----------------------------------------------|
-| PNG   |    ✅    |    🔧    | Portable Network Graphics (decoder & demuxer) |
+| PNG   |    ✅    |    ✅    | Portable Network Graphics (decoder & demuxer) |
 | JPEG  |    ✅    |    🔧    | Joint Photographic Experts Group              |
-| WebP  |    ✅    |    🔧    | Modern image format by Google                 |
+| WebP  |    ✅    |    ✅    | Modern image format by Google                 |
 | GIF   |    ✅    |    🔧    | Graphics Interchange Format                   |
 | BMP   |    ✅    |    🔧    | Bitmap image format                           |
 | TIFF  |    ✅    |    🔧    | Tagged Image File Format                      |
@@ -81,18 +81,18 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| API              |          Status          | Platform      | 
-|------------------|:------------------------:|---------------|
-| VideoToolbox     |           Done           | macOS         |
-| VA-API           |      Only H264 High      | Linux         |
-| AMF              |      Decoding Only       | Windows       |
-| Vulkan Video     |     Only H264 Decode     | Windows/Linux |
-| DirectX 11 Video | Mostly done but unstable | Windows       |
-| DirectX 12 Video | Mostly done but unstable | Windows       |
-| CUDA/NVDEC       |           TBD            | Windows/Linux |
-| NVENC            |           TBD            | Windows/Linux |
-| Intel® Media SDK |            🔧            | Windows       |
-| MediaCodec       |         Untested         | Android       |
+| API              |            Status            | Platform      | 
+|------------------|:----------------------------:|---------------|
+| VideoToolbox     |             Done             | macOS         |
+| VA-API           |        Only H264 High        | Linux         |
+| AMF              |             Done             | Windows       |
+| Vulkan Video     | Mostly decoding and Unstable | Windows/Linux |
+| DirectX 11 Video |             Done             | Windows       |
+| DirectX 12 Video |             Done             | Windows       |
+| CUDA/NVDEC       |             TBD              | Windows/Linux |
+| NVENC            |             TBD              | Windows/Linux |
+| Intel® Media SDK |              🔧              | Windows       |
+| MediaCodec       |           Untested           | Android       |
 
 ---
 
@@ -100,16 +100,18 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| Format                  | Demuxing | Muxing      | Description                  |
-|-------------------------|:--------:|-------------|------------------------------|
-| Matroska (MKV/MKA/WebM) |    ✅     | ✅           | Matroska container (libwebm) |
-| MP4/MOV/M4A (BMFF)      |    ✅     | 🔧          | ISO Base Media File Format   |
-| MOV/QuickTime (BMFF)    |    ✅     | 🔧          | Apple QuickTime format       |
-| Ogg                     |    ✅     | ✅           | Ogg container                |
-| WAV                     |    ✅     | ✅           | WAV container                |
-| FLAC                    |    ✅     | 🔧          | FLAC container               |
-| MP3                     |    ✅     | 🔧          | MP3 container                |
-| AVI                     |    🔧    | Not planned | Audio Video Interleave       |
+| Format                  | Demuxing | Muxing | Description                             |
+|-------------------------|:--------:|:------:|-----------------------------------------|
+| Matroska (MKV/MKA/WebM) |    ✅    |   ✅   | Matroska container (libwebm)            |
+| MP4/MOV/M4A (BMFF)      |    ✅    |   🔧   | ISO Base Media File Format              |
+| MOV/QuickTime (BMFF)    |    ✅    |   🔧   | Apple QuickTime format                  |
+| MPEG-DASH               |    ✅    |   -    | MPD, fragmented MP4 segments            |
+| HLS                     |    ✅    |   -    | M3U8 playlists, fragmented MP4 segments |
+| Ogg                     |    ✅    |   ✅   | Ogg container                           |
+| WAV                     |    ✅    |   ✅   | WAV container                           |
+| FLAC                    |    ✅    |   ✅   | FLAC container                          |
+| MP3                     |    ✅    |   🔧   | MP3 container                           |
+| AVI                     |    🔧    |   -    | Audio Video Interleave                  |
 
 ---
 
