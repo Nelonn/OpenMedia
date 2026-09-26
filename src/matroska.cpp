@@ -204,12 +204,12 @@ static void setDolbyVisionConfigurationMetadata(Dictionary& metadata, std::span<
 }
 
 class InputStreamMkvReader final : public mkvparser::IMkvReader {
-  std::unique_ptr<RandomRead> random_;
+  std::optional<RandomRead> random_;
 
 public:
   explicit InputStreamMkvReader(InputStream* stream) {
     if (stream && stream->canSeek()) {
-      random_ = std::make_unique<RandomRead>(stream);
+      random_ = RandomRead(stream);
     }
   }
 
