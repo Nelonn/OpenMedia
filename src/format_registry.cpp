@@ -73,6 +73,10 @@ void registerBuiltInFormats(FormatRegistry* registry) noexcept {
 
   // Container formats
   registry->registerFormat(&FORMAT_BMFF);
+#if defined(OPENMEDIA_STREAMING)
+  registry->registerFormat(&FORMAT_DASH);
+  registry->registerFormat(&FORMAT_HLS);
+#endif
 #if defined(OPENMEDIA_MATROSKA)
   registry->registerFormat(&FORMAT_MATROSKA);
 #endif

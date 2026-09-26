@@ -16,6 +16,7 @@ option(OPENMEDIA_FFMPEG "FFmpeg" ${LINUX})
 
 # Container
 option(OPENMEDIA_MATROSKA "MKV/MKA/WEBM" ON)
+option(OPENMEDIA_STREAMING "HLS/DASH" ON)
 
 # Audio
 option(OPENMEDIA_FDK_AAC "FDK-AAC" OFF) # patent

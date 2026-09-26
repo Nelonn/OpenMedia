@@ -11,16 +11,10 @@
 
 namespace openmedia::hls {
 
-/**
- * HLS playlists, RFC 8216 and the tags added since.
- *
- * Unlike an MPD, which describes a whole presentation in one document, HLS is two
- * documents deep: a master playlist lists variants, and each variant's segments
- * live in a media playlist of its own that has to be fetched separately. So
- * parsing is two calls with a fetch in between, and detectKind() says which kind
- * of playlist arrived -- a single-variant stream is published as a media playlist
- * with no master above it at all.
- */
+// HLS is two documents deep: a master playlist lists variants, and each variant's
+// segments live in a media playlist of its own, fetched separately. So parsing is two
+// calls with a fetch in between, and a single-variant stream is published as a media
+// playlist with no master above it at all.
 enum class PlaylistKind : uint8_t {
   Unknown, // not a playlist, or nothing in it says which kind
   Master,
@@ -42,8 +36,7 @@ enum class KeyMethod : uint8_t {
   Unsupported, // a method this parser does not know; the segments are unreadable
 };
 
-/** `#EXT-X-KEY`. The key itself is behind `uri` and is the caller's to fetch, the
- * same as everything else a playlist points at. */
+// `#EXT-X-KEY`. The key behind `uri` is the caller's to fetch, like everything else.
 struct Key {
   KeyMethod method = KeyMethod::None;
   std::string uri; // resolved
@@ -104,14 +97,10 @@ struct MediaPlaylist {
 
   std::vector<MediaSegment> segments;
 
-  /** Whether the playlist is still growing, and so has to be fetched again. Live
-   * in the sense that matters to a reader: `#EXT-X-ENDLIST` is the only promise
-   * that it will not change. */
+  // `#EXT-X-ENDLIST` is the only promise that the playlist will not change.
   auto isLive() const -> bool { return !endlist; }
 
-  auto totalDuration() const -> double;
-
-  /** Whether any segment is encrypted. */
+  auto totalDuration() const -> double; // seconds
   auto isEncrypted() const -> bool;
 };
 
@@ -120,7 +109,7 @@ struct Resolution {
   uint32_t height = 0;
 };
 
-/** `#EXT-X-STREAM-INF`, one rendition of the whole presentation. */
+// `#EXT-X-STREAM-INF`, one rendition of the whole presentation.
 struct Variant {
   std::string url; // resolved; the media playlist to fetch next
   uint32_t bandwidth = 0;
@@ -142,7 +131,7 @@ struct Variant {
 
 enum class RenditionType : uint8_t { Unknown, Audio, Video, Subtitles, ClosedCaptions };
 
-/** `#EXT-X-MEDIA`, one alternative track within a group. */
+// `#EXT-X-MEDIA`, one alternative track within a group.
 struct Rendition {
   RenditionType type = RenditionType::Unknown;
   std::string group_id;
@@ -166,8 +155,7 @@ struct MasterPlaylist {
   std::vector<Rendition> renditions;
 };
 
-/** Which kind of playlist this is, decided by the tags present rather than by the
- * file name -- `.m3u8` says nothing about it. */
+// Decided by the tags present: `.m3u8` says nothing about which kind it is.
 auto detectKind(std::span<const uint8_t> document) -> PlaylistKind;
 
 auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_url)
@@ -176,21 +164,18 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
 auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url)
     -> Result<MediaPlaylist, OMError>;
 
-// --- Exposed so they can be tested on their own -------------------------------
+// Exposed so they can be tested on their own.
 
-/** An HLS attribute list: `KEY=VALUE` separated by commas, where a quoted value
- * may itself contain commas -- which `CODECS="avc1.4d401f,mp4a.40.2"` always
- * does, and which is the one thing a naive split gets wrong. Quotes are removed
- * and keys are returned as written. */
+// `KEY=VALUE` separated by commas, where a quoted value may contain commas of its own
+// -- which `CODECS="avc1.4d401f,mp4a.40.2"` always does, and which is the one thing a
+// naive split gets wrong. Quotes are removed.
 auto parseAttributes(std::string_view list) -> std::vector<std::pair<std::string, std::string>>;
 
-/** `#EXT-X-BYTERANGE` -- `<length>[@<offset>]`. With no offset the range follows
- * whatever was read from the same resource last, which the caller tracks and
- * passes as `previous_end`. */
+// `<length>[@<offset>]`. With no offset the range follows `previous_end`, the end of
+// the last range read from the same resource.
 auto parseByteRange(std::string_view text, int64_t previous_end) -> ByteRange;
 
-/** An ISO 8601 timestamp as milliseconds since the Unix epoch, or -1. Accepts a
- * `Z`, a numeric offset, or none, and fractional seconds. */
+// Milliseconds since the Unix epoch, or -1.
 auto parseIso8601Ms(std::string_view text) -> int64_t;
 
 } // namespace openmedia::hls

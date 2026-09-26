@@ -45,9 +45,9 @@ auto toDouble(std::string_view text) -> double {
   return (end == owned.c_str()) ? 0.0 : value;
 }
 
-/** Walks the lines of a playlist, dropping blank ones and comments. A line
- * beginning with `#` is a tag only when it begins with `#EXT`; anything else is a
- * comment and carries no meaning. */
+// Walks the lines of a playlist, dropping blank ones and comments. A line
+// beginning with `#` is a tag only when it begins with `#EXT`; anything else is a
+// comment and carries no meaning.
 class LineReader {
   std::string_view text_;
   size_t pos_ = 0;
@@ -72,8 +72,8 @@ public:
   }
 };
 
-/** Splits `#EXT-X-NAME:value` into its name and its value. A tag with no colon
- * has no value, which for the boolean tags is the whole of their meaning. */
+// Splits `#EXT-X-NAME:value` into its name and its value. A tag with no colon
+// has no value, which for the boolean tags is the whole of their meaning.
 void splitTag(std::string_view line, std::string_view& name, std::string_view& value) {
   const size_t colon = line.find(':');
   if (colon == std::string_view::npos) {
@@ -115,11 +115,11 @@ public:
             static_cast<uint32_t>(toUInt(value.substr(x + 1)))};
   }
 
-  /** A frame rate is written as a decimal, which loses the ratio it came from, so
-   * the two families that actually occur are reconstructed: whole rates, and the
-   * `n * 1000/1001` ones. The tolerance is set by how a playlist writes them --
-   * `29.970`, not `29.97002997` -- so it has to allow for that rounding rather
-   * than for floating-point error. */
+  // A frame rate is written as a decimal, which loses the ratio it came from, so
+  // the two families that actually occur are reconstructed: whole rates, and the
+  // `n * 1000/1001` ones. The tolerance is set by how a playlist writes them --
+  // `29.970`, not `29.97002997` -- so it has to allow for that rounding rather
+  // than for floating-point error.
   auto framerate(std::string_view key) const -> Rational {
     const double value = real(key);
     if (value <= 0) return {};
@@ -136,7 +136,7 @@ public:
     return {static_cast<int32_t>(std::round(value * 1000.0)), 1000};
   }
 
-  /** `CHANNELS` is a slash-separated list whose first field is the count. */
+  // `CHANNELS` is a slash-separated list whose first field is the count.
   auto channels(std::string_view key) const -> uint32_t {
     const std::string_view value = find(key);
     const size_t slash = value.find('/');

@@ -18,6 +18,50 @@ void FormatDetector::addDetector(FormatDetectFn detector) {
   detectors_.push_back(std::move(detector));
 }
 
+// A DASH manifest has no magic number, because it is XML: what identifies it is
+// the name of its root element. That element may sit behind a byte-order mark, an
+// XML declaration, a doctype, comments and any amount of whitespace, so the check
+// is for the element itself rather than for anything at a fixed offset. A prefixed
+// root -- `<dash:MPD` -- names the same element.
+static auto isDashManifest(std::span<const uint8_t> data) -> bool {
+  size_t i = 0;
+  if (data.size() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
+  while (i < data.size() && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' ||
+                             data[i] == '\n')) {
+    ++i;
+  }
+  if (i >= data.size() || data[i] != '<') return false;
+
+  static constexpr std::string_view ROOT = "MPD";
+  const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
+  for (size_t at = text.find(ROOT, i); at != std::string_view::npos;
+       at = text.find(ROOT, at + 1)) {
+    if (at == 0) continue;
+    const char before = text[at - 1];
+    if (before != '<' && before != ':') continue;
+    // The element name ends here; `MPDSomething` is a different element.
+    if (at + ROOT.size() < text.size()) {
+      const char after = text[at + ROOT.size()];
+      const bool name_continues = (after >= 'a' && after <= 'z') ||
+                                  (after >= 'A' && after <= 'Z') ||
+                                  (after >= '0' && after <= '9') || after == '-' || after == '_';
+      if (name_continues) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+// An HLS playlist is identified by its first line, which the format requires to be
+// `#EXTM3U`. A plain `.m3u` without that line is a playlist for a music player
+// rather than a stream, and is not this.
+static auto isHlsPlaylist(std::span<const uint8_t> data) -> bool {
+  size_t i = 0;
+  if (data.size() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
+  const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
+  return text.substr(i).starts_with("#EXTM3U");
+}
+
 void FormatDetector::addStandardContainers() {
   addDetector([](std::span<const uint8_t> data) -> DetectedFormat {
     const uint32_t v0 = load_u32(data.data());
@@ -35,6 +79,8 @@ void FormatDetector::addStandardContainers() {
     if (v0 == magic_u32(0x00, 0x00, 0x01, 0xBA)) return DetectedFormat::fromContainer(OM_CONTAINER_MPEG_PS);
     if (v0 == 0x47 && data.size() >= 189 && data[188] == 0x47) return DetectedFormat::fromContainer(OM_CONTAINER_MPEG_TS);
     if (v0 == magic_u32(0x30, 0x26, 0xB2, 0x75)) return DetectedFormat::fromContainer(OM_CONTAINER_ASF);
+    if (isDashManifest(data)) return DetectedFormat::fromContainer(OM_CONTAINER_DASH);
+    if (isHlsPlaylist(data)) return DetectedFormat::fromContainer(OM_CONTAINER_HLS);
     if (v0 == magic_u32('F', 'L', 'V', 0x01)) return DetectedFormat::fromContainer(OM_CONTAINER_FLV);
     if (v0 == magic_u32('N', 'U', 'T', 'S')) return DetectedFormat::fromContainer(OM_CONTAINER_NUT);
     return DetectedFormat::unknown();

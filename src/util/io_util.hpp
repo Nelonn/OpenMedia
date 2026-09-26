@@ -168,9 +168,37 @@ static void copyPlane(uint8_t* dst, ptrdiff_t dst_stride, const uint8_t* src, pt
   }
 }
 
+/** Reads a stream to its end. */
+inline auto readAll(InputStream& input) -> std::vector<uint8_t> {
+  std::vector<uint8_t> bytes;
+  const int64_t known = input.size();
+  if (known > 0) {
+    bytes.reserve(static_cast<size_t>(known));
+  }
+
+  uint8_t chunk[64 * 1024];
+  for (;;) {
+    const size_t n = input.read(chunk);
+    if (n == 0) break;
+    bytes.insert(bytes.end(), chunk, chunk + n);
+    if (n < sizeof(chunk)) break;
+  }
+  return bytes;
+}
+
+/**
+ * Random access to a byte source, over a stream or over memory.
+ *
+ * The stream form keeps a small window cached, because a box walker reads a great
+ * many small headers and a syscall each would be absurd. The memory form has
+ * nothing to cache: the bytes are already there, so a read is one memcpy and
+ * view() hands them out without even that. Wrapping a memory buffer in a stream
+ * just to reuse the cached path would copy every byte twice for no reason.
+ */
 class RandomRead {
 private:
   InputStream* input_ = nullptr;
+  std::span<const uint8_t> memory_;
   std::vector<uint8_t> cache_;
   size_t cache_pos_ = 0;
   size_t cache_size_ = 0;
@@ -183,11 +211,11 @@ private:
   }
 
   auto loadCache(size_t pos) -> bool {
-    if (!input_ || pos >= stream_size_) return false;
+    if (!input_ || pos >= size()) return false;
     invalidateCache();
     if (!input_->seek(pos, Whence::BEG)) return false;
     cache_pos_ = pos;
-    const size_t to_read = std::min(DEFAULT_CACHE_SIZE, static_cast<size_t>(stream_size_ - pos));
+    const size_t to_read = std::min(DEFAULT_CACHE_SIZE, size() - pos);
     const size_t n = input_->read(std::span<uint8_t>(cache_.data(), to_read));
     cache_size_ = n;
     return n > 0;
@@ -200,19 +228,36 @@ private:
 public:
   explicit RandomRead(InputStream* input = nullptr) : input_(input) {
     if (input_) {
-      stream_size_ = input_->size();
+      // A stream of unknown length cannot be addressed by offset at all, and
+      // treating -1 as a size would make every bounds check pass.
+      const int64_t reported = input_->size();
+      stream_size_ = reported > 0 ? reported : 0;
       cache_.resize(DEFAULT_CACHE_SIZE);
     }
   }
 
-  auto ok() const -> bool { return input_ != nullptr; }
+  /** Over bytes the caller owns and keeps alive for as long as this reader is used. */
+  explicit RandomRead(std::span<const uint8_t> data)
+      : memory_(data), stream_size_(static_cast<int64_t>(data.size())) {}
 
-  auto size() const -> size_t { return stream_size_; }
+  auto ok() const -> bool { return input_ != nullptr || !memory_.empty(); }
+
+  auto size() const -> size_t { return static_cast<size_t>(stream_size_); }
+
+  /** True when reads are served straight out of memory, so view() is usable. */
+  auto isInMemory() const -> bool { return !memory_.empty(); }
 
   auto read(size_t pos, void* dst, size_t n) -> bool;
 
   auto read(size_t pos, std::span<uint8_t> dst) -> bool {
     return read(pos, dst.data(), dst.size());
+  }
+
+  /** The bytes at `pos` without copying them, or an empty span when this reader is
+   * over a stream rather than over memory. */
+  auto view(size_t pos, size_t n) const -> std::span<const uint8_t> {
+    if (memory_.empty() || n > memory_.size() || pos > memory_.size() - n) return {};
+    return memory_.subspan(pos, n);
   }
 
   auto readBuf(size_t pos, size_t size) -> std::vector<uint8_t> {

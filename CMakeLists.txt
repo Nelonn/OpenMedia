@@ -61,11 +61,15 @@ target_sources(OpenMedia PRIVATE
         src/util/id3_parser.hpp
         src/util/io_util.cpp
         src/util/io_util.hpp
+        src/util/timescale.hpp
+        src/util/url.cpp
+        src/util/url.hpp
         src/util/still_image_muxer.hpp
         src/util/vorbis_comment.hpp
         src/audio/pcm.cpp
         src/bitstream_filter.hpp
         src/bmff_demuxer.cpp
+        src/bmff_fragment.hpp
         src/buffer.cpp
         src/codec_defs.cpp
         src/codec_registry.cpp
@@ -284,6 +288,24 @@ if (OPENMEDIA_MATROSKA)
     target_link_libraries(OpenMedia PRIVATE webm::webm)
     target_sources(OpenMedia PRIVATE src/matroska.cpp)
     target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_MATROSKA)
+endif ()
+
+if (OPENMEDIA_STREAMING)
+    target_sources(OpenMedia PRIVATE
+            include/openmedia/streaming.hpp
+            src/dash_demuxer.cpp
+            src/dash/mpd.cpp
+            src/dash/mpd.hpp
+            src/dash/xml.cpp
+            src/dash/xml.hpp
+            src/hls_demuxer.cpp
+            src/hls/m3u8.cpp
+            src/hls/m3u8.hpp
+            src/streaming/segment_demuxer.cpp
+            src/streaming/segment_demuxer.hpp
+            src/streaming/segment_index.hpp
+    )
+    target_compile_definitions(OpenMedia PRIVATE OPENMEDIA_STREAMING)
 endif ()
 
 if (OPENMEDIA_FDK_AAC)

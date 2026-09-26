@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <annexb.hpp>
+#include <bmff_fragment.hpp>
 #include <nal_config.hpp>
 #include <cstdint>
 #include <cstring>
@@ -68,6 +69,16 @@ static auto isIgnoredBox(uint32_t type) -> bool {
       ATOM('w', 'i', 'd', 'e'),
       ATOM('p', 'n', 'o', 't'),
       ATOM('j', 'P', '2', ' '),
+      // Segment furniture. `styp` names the segment's brands, and `sidx`,
+      // `ssix`, `prft` and `mfra` index or timestamp segments from outside -- all
+      // of it addressed to a reader choosing what to fetch, which here is the
+      // caller, working from the manifest. Naming them keeps their bodies from
+      // being read in only to be dropped.
+      ATOM('s', 't', 'y', 'p'),
+      ATOM('s', 'i', 'd', 'x'),
+      ATOM('s', 's', 'i', 'x'),
+      ATOM('p', 'r', 'f', 't'),
+      ATOM('m', 'f', 'r', 'a'),
   };
   return containsAtom(TABLE, type);
 }
@@ -587,6 +598,11 @@ struct BMFFTrack {
   int32_t index = -1;
   int64_t start_dts = 0;
   int64_t track_duration = 0;
+  // Where the next fragment's samples start when it carries no `tfdt`. Only the
+  // segment-at-a-time reader uses it: there, the previous fragment's samples have
+  // already been dropped by the time the next one is parsed, so the running
+  // decode time cannot be recovered from them.
+  int64_t next_fragment_dts = 0;
   Track track = {};
   std::unique_ptr<BitStreamFilter> bsf;
 
@@ -1513,6 +1529,19 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
   }
 }
 
+// The bytes of one segment, owned as a Buffer so that a Packet can share them:
+// Packet::buffer is a shared_ptr<Buffer> already, so a packet whose payload needs no
+// rewriting can point into the segment it came from rather than get a copy of it.
+class SegmentBuffer final : public Buffer {
+  std::vector<uint8_t> storage_;
+
+public:
+  explicit SegmentBuffer(std::vector<uint8_t> data) : storage_(std::move(data)) {}
+
+  auto bytes() -> std::span<uint8_t> override { return storage_; }
+  auto view() const -> std::span<const uint8_t> { return storage_; }
+};
+
 class BMFFDemuxer final : public BaseDemuxer {
   struct FragmentContext {
     uint32_t track_id = 0;
@@ -1565,6 +1594,17 @@ class BMFFDemuxer final : public BaseDemuxer {
   uint64_t current_moof_offset_ = 0;
   std::optional<FragmentContext> current_fragment_;
 
+  // Set when this demuxer is being driven a segment at a time rather than over a
+  // whole file. What changes: tracks are published before any sample is known,
+  // a `tfhd` base offset into the original file is not trusted, and the running
+  // decode time is carried on the track instead of read back off its samples.
+  bool fragment_mode_ = false;
+
+  // The segment being read, in fragment mode. Packets point into it rather than copy
+  // out of it, so it outlives not just the parse but every packet still in flight --
+  // which is what the shared ownership is for.
+  std::shared_ptr<SegmentBuffer> segment_;
+
   RandomRead random_;
 
   static constexpr size_t NO_TRACK = static_cast<size_t>(-1);
@@ -1607,6 +1647,12 @@ public:
     movie_timescale_ = 0;
     pcm_little_endian_ = false;
     fatal_ = false;
+    fragment_mode_ = false;
+    // `random_` reads through whichever of the two it was given, so it is dropped
+    // before them. Releasing `segment_` here only gives up this demuxer's share:
+    // packets already handed out keep theirs.
+    random_ = RandomRead();
+    segment_.reset();
     parsing_state_ = ParsingState::READING_HEADER;
   }
 
@@ -1630,7 +1676,7 @@ public:
     }
 
     extractMetaItemAttachments(stream_size);
-    publishTracks();
+    publishTracks(/*require_samples=*/true);
     // `fatal_` alone is not a verdict: a file truncated after a complete moov
     // still yields every track it described. Only the absence of usable tracks
     // is, and a structural failure explains why there are none.
@@ -1662,27 +1708,54 @@ public:
     const auto prefix = (bsf && sample.is_keyframe) ? bsf->keyframePrefix()
                                                     : std::span<const uint8_t> {};
 
-    // The sample is read straight into the packet's own buffer, behind space
-    // reserved for the keyframe prefix, and converted there. Staging it in a
-    // scratch vector first would mean zero-filling it, reading it, filtering it
-    // into a second vector and copying that into the packet — four passes over
-    // a buffer that can be several megabytes on a 4K keyframe.
     Packet pkt;
-    pkt.allocate(prefix.size() + sample.size);
-    if (!random_.read(sample.offset, pkt.bytes.data() + prefix.size(), sample.size))
-      return Err(OM_FORMAT_END_OF_FILE);
 
-    if (bsf) {
-      const auto payload = pkt.bytes.subspan(prefix.size());
-      if (const auto filtered_size = bsf->filterInPlace(payload)) {
-        pkt.bytes = pkt.bytes.first(prefix.size() + *filtered_size);
-      } else if (!reframeOutOfPlace(pkt, *bsf, prefix.size())) {
-        return Err(OM_FORMAT_INVALID_PACKET);
+    // Nothing to rewrite, and the bytes are already in memory: the packet shares the
+    // segment instead of getting a copy of it -- one allocation per segment rather
+    // than one per packet, and no memcpy at all. The segment outlives the packet
+    // because both hold the same shared buffer.
+    //
+    // Which payloads qualify is decided by the bitstream filter, not by this branch.
+    // AAC, Opus, FLAC, PCM, VP9 and AV1 are stored as the decoder wants them and take
+    // this path; H.264, HEVC and VVC do not, because their length prefixes have to
+    // become start codes and their parameter sets have to be prepended, so a video
+    // track in MP4 is usually still copied. Audio is where this pays, and it pays
+    // often: a second of AAC is dozens of packets.
+    //
+    // Packet::bytes is a mutable span, so a consumer that writes through it would be
+    // writing into the segment. Nothing in this library does; the one component that
+    // rewrites a payload in place is the bitstream filter, which is exactly the case
+    // excluded here.
+    if (!bsf && segment_ && sample.offset >= 0) {
+      const size_t at = static_cast<size_t>(sample.offset);
+      if (!random_.view(at, sample.size).empty()) {
+        pkt.buffer = segment_;
+        pkt.bytes = segment_->bytes().subspan(at, sample.size);
       }
     }
 
-    if (!prefix.empty()) {
-      memcpy(pkt.bytes.data(), prefix.data(), prefix.size());
+    // Otherwise the sample is read straight into the packet's own buffer, behind
+    // space reserved for the keyframe prefix, and converted there. Staging it in a
+    // scratch vector first would mean zero-filling it, reading it, filtering it into
+    // a second vector and copying that into the packet — four passes over a buffer
+    // that can be several megabytes on a 4K keyframe.
+    if (!pkt.buffer) {
+      pkt.allocate(prefix.size() + sample.size);
+      if (!random_.read(sample.offset, pkt.bytes.data() + prefix.size(), sample.size))
+        return Err(OM_FORMAT_END_OF_FILE);
+
+      if (bsf) {
+        const auto payload = pkt.bytes.subspan(prefix.size());
+        if (const auto filtered_size = bsf->filterInPlace(payload)) {
+          pkt.bytes = pkt.bytes.first(prefix.size() + *filtered_size);
+        } else if (!reframeOutOfPlace(pkt, *bsf, prefix.size())) {
+          return Err(OM_FORMAT_INVALID_PACKET);
+        }
+      }
+
+      if (!prefix.empty()) {
+        memcpy(pkt.bytes.data(), prefix.data(), prefix.size());
+      }
     }
 
     pkt.stream_index = sample.stream_index;
@@ -1725,7 +1798,137 @@ public:
     return OM_SUCCESS;
   }
 
+  // --- Segment-at-a-time reading ---------------------------------------------
+  //
+  // The same box parsing, pointed at one segment instead of a whole file. What
+  // the file path builds once -- tracks, `trex` defaults, the sample index -- is
+  // split in two here: the initialization segment settles the tracks for good,
+  // and each media segment contributes a sample index that lives only as long as
+  // that segment does.
+
+  auto openInit(std::span<const uint8_t> init) -> OMError {
+    close();
+    if (init.empty()) return OM_COMMON_INVALID_ARGUMENT;
+
+    fragment_mode_ = true;
+    segment_ = std::make_shared<SegmentBuffer>(std::vector<uint8_t>(init.begin(), init.end()));
+    random_ = RandomRead(segment_->view());
+
+    parseBoxes(0, random_.size());
+    for (auto& t : bmff_tracks_) {
+      applyEditList(t, movie_timescale_);
+    }
+    publishTracks(/*require_samples=*/false);
+    if (tracks_.empty()) {
+      const OMError error = fatal_ ? OM_FORMAT_CORRUPTED : OM_FORMAT_NO_STREAMS;
+      close();
+      return error;
+    }
+
+    // Sample entries, extradata and edit lists have all been copied out by now, and
+    // no sample addresses these bytes, so the header need not be kept.
+    random_ = RandomRead();
+    segment_.reset();
+
+    parsing_state_ = ParsingState::READY;
+    return OM_SUCCESS;
+  }
+
+  auto pushSegment(std::vector<uint8_t> bytes) -> OMError {
+    if (!fragment_mode_ || parsing_state_ != ParsingState::READY) {
+      return OM_COMMON_NOT_INITIALIZED;
+    }
+    if (bytes.empty()) return OM_COMMON_INVALID_ARGUMENT;
+
+    dropSegment();
+    segment_ = std::make_shared<SegmentBuffer>(std::move(bytes));
+    random_ = RandomRead(segment_->view());
+    fatal_ = false;
+
+    parseBoxes(0, random_.size());
+
+    // `publishTracks` stamps each sample with its public index, and it ran back
+    // when the tracks were settled; these samples are new and still unstamped.
+    for (const size_t slot : public_to_slot_) {
+      BMFFTrack& track = bmff_tracks_[slot];
+      for (Sample& sample : track.samples) {
+        sample.stream_index = track.index;
+      }
+    }
+
+    mergeSamplesByDecodeTime();
+    buildKeyframeIndex();
+    current_sample_index_ = 0;
+
+    if (samples_.empty()) {
+      // A segment that describes no sample is either corrupt or addressed to a
+      // track this reader does not carry. Either way there is nothing to read out
+      // of it, and holding on to its bytes would serve nothing.
+      const OMError error = fatal_ ? OM_FORMAT_CORRUPTED : OM_FORMAT_NO_STREAMS;
+      dropSegment();
+      return error;
+    }
+    return OM_SUCCESS;
+  }
+
+  auto needsSegment() const -> bool {
+    return current_sample_index_ >= samples_.size();
+  }
+
+  auto nextDecodeTimeNs() const -> int64_t {
+    if (needsSegment()) return INT64_MAX;
+    const Sample& sample = samples_[current_sample_index_];
+    return toNanoseconds(sample.dts, publicTimescale(sample.stream_index));
+  }
+
+  auto remainingDurationNs() const -> int64_t {
+    if (needsSegment()) return 0;
+    const Sample& next = samples_[current_sample_index_];
+    const Sample& last = samples_.back();
+    // `samples_` is in decode order, so the last entry ends last.
+    const int64_t end = toNanoseconds(last.dts + static_cast<int64_t>(last.duration),
+                                      publicTimescale(last.stream_index));
+    const int64_t start = toNanoseconds(next.dts, publicTimescale(next.stream_index));
+    return end > start ? end - start : 0;
+  }
+
+  auto publicTimescale(int32_t public_index) const -> uint32_t {
+    if (public_index < 0 || static_cast<size_t>(public_index) >= public_to_slot_.size()) {
+      return movie_timescale_;
+    }
+    const uint32_t timescale = bmff_tracks_[public_to_slot_[public_index]].timescale;
+    return timescale != 0 ? timescale : movie_timescale_;
+  }
+
+  void flushSegments() {
+    dropSegment();
+    // A seek lands wherever it lands, so a fragment arriving without a `tfdt`
+    // after one cannot be continuing anything.
+    for (BMFFTrack& track : bmff_tracks_) {
+      track.next_fragment_dts = 0;
+    }
+  }
+
 private:
+  void dropSegment() {
+    // Every track, not only the published ones. A `trun` addressed to a track that
+    // publishTracks() dropped still appends to it, and nothing else would ever empty
+    // it again -- one segment's worth of samples retained per segment, for as long as
+    // the stream plays.
+    for (BMFFTrack& track : bmff_tracks_) {
+      track.samples.clear();
+    }
+    samples_.clear();
+    keyframes_.clear();
+    current_sample_index_ = 0;
+    current_fragment_.reset();
+    current_moof_offset_ = 0;
+    current_track_slot_ = NO_TRACK;
+
+    random_ = RandomRead();
+    segment_.reset();
+  }
+
   auto trackTimescale(int32_t public_index) -> uint32_t {
     const BMFFTrack* track = trackForPublicIndex(public_index);
     const uint32_t timescale = track ? track->timescale : 0;
@@ -1866,13 +2069,19 @@ private:
   //
   // A recognised media type with no codec id is still published: the caller
   // needs to know the track is there before it can report it as unsupported.
-  void publishTracks() {
+  // `require_samples` is what tells a file apart from an initialization segment.
+  // In a file, a track with no samples is a track the reader cannot offer
+  // anything from -- a timecode or reference track, or one whose sample table did
+  // not survive. An initialization segment, on the other hand, describes tracks
+  // whose samples arrive later by definition, and dropping them would leave the
+  // reader with nothing at all.
+  void publishTracks(bool require_samples) {
     public_to_slot_.clear();
 
     for (size_t slot = 0; slot < bmff_tracks_.size(); ++slot) {
       auto& t = bmff_tracks_[slot];
 
-      if (t.track.format.type == OM_MEDIA_NONE || t.samples.empty()) {
+      if (t.track.format.type == OM_MEDIA_NONE || (require_samples && t.samples.empty())) {
         t.index = -1;
         t.samples.clear();
         t.samples.shrink_to_fit();
@@ -1882,6 +2091,17 @@ private:
       t.index = static_cast<int32_t>(public_to_slot_.size());
       t.track.index = t.index;
       public_to_slot_.push_back(slot);
+
+      if (t.samples.empty()) {
+        // Reachable only for an initialization segment, since a file drops such a
+        // track above. Everything below is measured off the samples, and there are
+        // none yet.
+        // `mdhd` and `tkhd` already gave the duration, and the timeline starts
+        // wherever the first fragment says it does.
+        t.track.duration = t.track_duration;
+        tracks_.push_back(t.track);
+        continue;
+      }
 
       int64_t min_pts = INT64_MAX;
       int64_t max_pts_end = INT64_MIN;
@@ -1926,6 +2146,11 @@ private:
 
     for (const size_t slot : public_to_slot_) {
       auto& t = bmff_tracks_[slot];
+      // A track with nothing in this pass is not a run. Over a whole file that
+      // never happens, since a track without samples is not published at all;
+      // over one segment of a DASH representation it is the normal case, because
+      // the other tracks live in other segments entirely.
+      if (t.samples.empty()) continue;
       total_samples += t.samples.size();
       runs.push_back({t.samples.begin(), t.samples.end(),
                       t.timescale ? t.timescale : movie_timescale_});
@@ -1948,11 +2173,14 @@ private:
       if (++best->cur == best->end) runs.erase(best);
     }
 
-    // The merged list is the only one read from here on; the per-track copies
-    // would otherwise double the demuxer's resident size for the whole session.
+    // The merged list is the only one read from here on; the per-track copies would
+    // otherwise double the demuxer's resident size for the whole session. Reading a
+    // file this happens once, so the memory is handed back; reading segments it
+    // happens for every one of them, and freeing a buffer that the next segment will
+    // immediately ask for again is churn rather than thrift.
     for (const size_t slot : public_to_slot_) {
       bmff_tracks_[slot].samples.clear();
-      bmff_tracks_[slot].samples.shrink_to_fit();
+      if (!fragment_mode_) bmff_tracks_[slot].samples.shrink_to_fit();
     }
   }
 
@@ -1991,20 +2219,28 @@ private:
   enum class ParsingState { READING_HEADER, READY };
   ParsingState parsing_state_ = ParsingState::READING_HEADER;
 
-  // Read a leaf box body into memory. A short read is fatal for parsing, but
-  // the caller keeps whatever it had already decoded.
-  auto readBoxData(size_t pos, size_t n) -> std::vector<uint8_t> {
-    std::vector<uint8_t> buf;
+  // The body of a leaf box. Over memory the span points straight into it and
+  // `storage` is never touched; over a stream the bytes are read into `storage`,
+  // which belongs to the caller so that no two bodies can share one scratch buffer.
+  // A short read is fatal for parsing, but the caller keeps whatever it had already
+  // decoded.
+  auto readBoxBody(size_t pos, size_t n, std::vector<uint8_t>& storage)
+      -> std::span<const uint8_t> {
     if (n > random_.size() || pos > random_.size() - n) {
       fatal_ = true;
-      return buf;
+      return {};
     }
-    buf.resize(n);
-    if (!random_.read(pos, buf.data(), n)) {
+    if (n == 0) return {};
+    if (const std::span<const uint8_t> inside = random_.view(pos, n); !inside.empty()) {
+      return inside;
+    }
+    storage.resize(n);
+    if (!random_.read(pos, storage.data(), n)) {
       fatal_ = true;
-      buf.clear();
+      storage.clear();
+      return {};
     }
-    return buf;
+    return storage;
   }
 
   void parseBoxes(size_t start, size_t end) {
@@ -2101,7 +2337,15 @@ private:
     }
 
     if (flags & 0x000001u) {
-      fragment.base_data_offset = r.u64be();
+      const uint64_t declared = r.u64be();
+      // In a whole file this is an offset into that file and is simply correct.
+      // In a segment read on its own it is an offset into the presentation the
+      // segment was cut out of, which addresses nothing here -- so take it only
+      // when it happens to land inside the segment, and otherwise fall back to
+      // the `moof`, which is what every DASH packager means anyway.
+      if (!fragment_mode_ || declared < random_.size()) {
+        fragment.base_data_offset = declared;
+      }
     }
     if (flags & 0x000002u) {
       r.u32be();
@@ -2158,9 +2402,16 @@ private:
 
     int64_t sample_offset = static_cast<int64_t>(current_fragment_->base_data_offset) +
                             static_cast<int64_t>(data_offset);
+    // A fragment without `tfdt` continues from where the previous one ended. In
+    // a whole file that is the last sample parsed; read a segment at a time and
+    // those samples are already gone, so the track carries the figure forward.
+    const int64_t continued_dts =
+        !track->samples.empty()
+            ? (track->samples.back().dts + static_cast<int64_t>(track->samples.back().duration))
+            : (fragment_mode_ ? track->next_fragment_dts : 0);
     int64_t current_dts = current_fragment_->has_decode_time
         ? (current_fragment_->decode_time - getEditListStartDts(*track, movie_timescale_))
-        : (track->samples.empty() ? 0 : (track->samples.back().dts + static_cast<int64_t>(track->samples.back().duration)));
+        : continued_dts;
 
     // sample_count is a 32-bit field from the file; the loop is bounded by the
     // box body instead, so a corrupt count cannot push millions of zero-sized
@@ -2205,6 +2456,8 @@ private:
       sample_offset += static_cast<int64_t>(size);
       current_dts += duration;
     }
+
+    track->next_fragment_dts = current_dts;
   }
 
   void handleBox(uint32_t type, size_t box_start, size_t pos, uint64_t size) {
@@ -2296,8 +2549,9 @@ private:
     // there is nothing to parse and nothing to remember about the box itself.
     if (type == ATOM('m', 'd', 'a', 't')) return;
 
-    // --- Leaf boxes: read payload into a buffer then dispatch ---
-    auto body = readBoxData(pos, size);
+    // --- Leaf boxes: take the payload, then dispatch ---
+    std::vector<uint8_t> body_storage;
+    const std::span<const uint8_t> body = readBoxBody(pos, size, body_storage);
     if (fatal_) return;
 
     if (type == ATOM('m', 'v', 'h', 'd')) {
@@ -2852,7 +3106,8 @@ private:
     constexpr uint64_t MAX_ITEM_SIZE = 16u * 1024 * 1024;
     if (size < 8 || size > MAX_ITEM_SIZE) return;
 
-    const auto body = readBoxData(pos, static_cast<size_t>(size));
+    std::vector<uint8_t> body_storage;
+    const std::span<const uint8_t> body = readBoxBody(pos, static_cast<size_t>(size), body_storage);
     if (fatal_ || body.empty()) return;
 
     ByteReader r(body);
@@ -2965,7 +3220,8 @@ private:
     constexpr uint64_t MAX_ITEM_SIZE = 64u * 1024;
     if (size < 4 || size > MAX_ITEM_SIZE) return;
 
-    const auto body = readBoxData(pos, static_cast<size_t>(size));
+    std::vector<uint8_t> body_storage;
+    const std::span<const uint8_t> body = readBoxBody(pos, static_cast<size_t>(size), body_storage);
     if (fatal_ || body.size() < 4) return;
 
     const size_t declared = load_u16_be(body.data());
@@ -3108,7 +3364,42 @@ private:
   }
 };
 
+// The same demuxer, offered through the narrow interface a segment-at-a-time
+// caller needs. Wrapping rather than inheriting keeps `Demuxer` and this out of
+// each other's way: one is opened on a stream and seeks within it, the other is
+// handed segments and has no stream at all.
+class FragmentReader final : public FragmentedMP4Reader {
+  BMFFDemuxer demuxer_;
+
+public:
+  auto openInit(std::span<const uint8_t> init) -> OMError override {
+    return demuxer_.openInit(init);
+  }
+
+  auto tracks() const -> const std::vector<Track>& override { return demuxer_.tracks(); }
+  auto metadata() const -> const Dictionary& override { return demuxer_.metadata(); }
+
+  auto pushSegment(std::vector<uint8_t> segment) -> OMError override {
+    return demuxer_.pushSegment(std::move(segment));
+  }
+
+  auto needsSegment() const -> bool override { return demuxer_.needsSegment(); }
+  auto readPacket() -> Result<Packet, OMError> override { return demuxer_.readPacket(); }
+  auto nextDecodeTimeNs() const -> int64_t override { return demuxer_.nextDecodeTimeNs(); }
+  auto remainingDurationNs() const -> int64_t override { return demuxer_.remainingDurationNs(); }
+
+  auto timescaleOf(int32_t stream_index) const -> uint32_t override {
+    return demuxer_.publicTimescale(stream_index);
+  }
+
+  void flushSegments() override { demuxer_.flushSegments(); }
+};
+
 } // namespace
+
+auto createFragmentedMP4Reader() -> std::unique_ptr<FragmentedMP4Reader> {
+  return std::make_unique<FragmentReader>();
+}
 
 const FormatDescriptor FORMAT_BMFF = {
     .container_id = OM_CONTAINER_MP4,

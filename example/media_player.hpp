@@ -7,6 +7,7 @@
 #include "blocking_queue.hpp"
 #include "diagnostics.hpp"
 #include "hw_device.hpp"
+#include "segment_prefetcher.hpp"
 #include "video_renderer.hpp"
 
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <openmedia/format_detector.hpp>
 #include <openmedia/format_registry.hpp>
 #include <openmedia/io.hpp>
+#include <openmedia/streaming.hpp>
 #include <openmedia/video.hpp>
 #include <optional>
 #include <ranges>
@@ -195,6 +197,8 @@ public:
     halt();
     audio_sink_.close();
     video_renderer_.reset();
+    prefetcher_.reset();
+    segmented_ = nullptr;
     if (demuxer_) demuxer_->close();
     demuxer_.reset();
     audio_ = {};
@@ -260,9 +264,19 @@ private:
     auto input = InputStream::createFileStream(path);
     if (!input || !input->isValid()) return fail("Cannot open " + path);
 
+    // A DASH manifest is recognised by its root element, like any other
+    // container by its header, so nothing here has to guess from the file name.
     uint8_t probe[2048];
     const DetectedFormat detected = detector_.detect({probe, input->read(probe)});
     input->seek(0, Whence::BEG);
+
+    // A manifest or a playlist is not opened from its own bytes alone: the media it
+    // describes is fetched separately, and this player does that on a loader thread
+    // rather than on the thread that has frames to deliver.
+    if (detected.isContainer() &&
+        (detected.container == OM_CONTAINER_DASH || detected.container == OM_CONTAINER_HLS)) {
+      return openSegmented(path, *input, detected.container);
+    }
 
     const auto* desc = detected.isContainer() ? formats_.getFormat(detected.container) : nullptr;
     if (!desc || !desc->isDemuxing()) return fail("Unsupported format: " + path);
@@ -273,6 +287,90 @@ private:
       return fail(std::string("Cannot demux: ") + diag::describe(err));
     }
     return true;
+  }
+
+
+  // How far ahead the loader runs, in media time. Seconds, not segments: a segment
+  // count says nothing about whether playback survives a slow link.
+  static constexpr int64_t TARGET_BUFFER_NS = INT64_C(20000000000);
+  static constexpr size_t PREFETCH_DEPTH = 8;
+
+  auto openSegmented(const std::string& path, InputStream& manifest, OMContainerId kind) -> bool {
+    std::vector<uint8_t> document;
+    uint8_t chunk[64 * 1024];
+    for (;;) {
+      const size_t n = manifest.read(chunk);
+      if (n == 0) break;
+      document.insert(document.end(), chunk, chunk + n);
+      if (n < sizeof(chunk)) break;
+    }
+    if (document.empty()) return fail("Empty manifest: " + path);
+
+    // No StreamOptions::fetch: the demuxer never fetches and never blocks, it only
+    // says what it wants next. Here the bytes come off the local disk, and a
+    // networked player changes exactly one thing -- fileFetch() for an HTTP client.
+    prefetcher_.emplace(fileFetch());
+
+    auto opened = (kind == OM_CONTAINER_DASH) ? openDashManifest(document, path, StreamOptions {})
+                                              : openPlaylists(document, path);
+    if (opened.isErr()) {
+      prefetcher_.reset();
+      return fail(std::string("Cannot demux: ") + diag::describe(std::move(opened).unwrapErr()));
+    }
+
+    std::unique_ptr<SegmentedDemuxer> streaming = std::move(opened).unwrap();
+    segmented_ = streaming.get();
+    demuxer_ = std::move(streaming);
+
+    // Tracks come out of the initialization segments, so there is nothing to report
+    // until those have been fetched and handed over.
+    if (!primeSegmented()) {
+      prefetcher_.reset();
+      segmented_ = nullptr;
+      demuxer_.reset();
+      return fail("Cannot read initialization segments of " + path);
+    }
+    return true;
+  }
+
+  // HLS is one document deeper than DASH: a master playlist names media playlists
+  // that have to be fetched before the stream can be described at all.
+  static auto openPlaylists(const std::vector<uint8_t>& document, const std::string& url)
+      -> Result<std::unique_ptr<SegmentedDemuxer>, OMError> {
+    auto playlists = createHlsPlaylists(StreamOptions {});
+    if (const OMError err = playlists->add(document, url); err != OM_SUCCESS) return Err(err);
+
+    const FetchFn load = fileFetch();
+    for (const std::string& next : playlists->needed()) {
+      auto bytes = load(SegmentRequest {next, 0, -1});
+      if (bytes.isErr()) return Err(std::move(bytes).unwrapErr());
+      const std::vector<uint8_t> fetched = std::move(bytes).unwrap();
+      if (const OMError err = playlists->add(fetched, next); err != OM_SUCCESS) return Err(err);
+    }
+    return playlists->open();
+  }
+
+  auto primeSegmented() -> bool {
+    const auto deadline = SteadyClock::now() + std::chrono::seconds(10);
+    while (!segmented_->isReady()) {
+      prefetcher_->request(segmented_->upcomingSegments(PREFETCH_DEPTH));
+      prefetcher_->deliver(*segmented_);
+      if (segmented_->isReady()) break;
+      if (SteadyClock::now() > deadline) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+  }
+
+  /** The least any track being decoded has buffered, which is what the loader has to
+   * keep ahead of -- a full video buffer is no help once the audio has run dry. */
+  auto bufferedAheadNs() const -> int64_t {
+    int64_t least = INT64_MAX;
+    for (const Stream* stream : {&audio_, &video_}) {
+      if (!*stream) continue;
+      least = std::min(least, segmented_->bufferedDurationNs(stream->index));
+    }
+    return least == INT64_MAX ? 0 : least;
   }
 
   auto openStream(const std::vector<Track>& tracks, int index) -> Stream {
@@ -368,9 +466,22 @@ private:
 
   void demuxLoop(std::stop_token stop) {
     while (!stop.stop_requested()) {
+      if (segmented_ != nullptr) {
+        prefetcher_->deliver(*segmented_);
+        if (bufferedAheadNs() < TARGET_BUFFER_NS) {
+          prefetcher_->request(segmented_->upcomingSegments(PREFETCH_DEPTH));
+        }
+      }
+
       auto result = demuxer_->readPacket();
       if (result.isErr()) {
         const OMError err = std::move(result).unwrapErr();
+        // Not the end of anything: the segment it needs has not arrived yet. Wait on
+        // the loader rather than spin, then ask again.
+        if (err == OM_IO_NOT_ENOUGH_DATA && segmented_ != nullptr) {
+          prefetcher_->waitForArrival(stop, std::chrono::milliseconds(20));
+          continue;
+        }
         if (err != OM_FORMAT_END_OF_FILE && err != OM_IO_END_OF_STREAM)
           SDL_Log("[Demux] Read failed: %s (%d)", diag::describe(err), int(err));
         if (audio_) audio_packets_.push(Packet {}, stop);
@@ -439,6 +550,7 @@ private:
       if (*stream) stream->decoder->flush();
 
     frame_order_.reset();
+    if (prefetcher_) prefetcher_->reset();
     const auto started = SteadyClock::now();
     const OMError err = demuxer_->seek(-1, int64_t(target * 1e6));
     const double elapsed_ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - started).count();
@@ -469,6 +581,11 @@ private:
   diag::FrameOrderReporter frame_order_;
 
   std::unique_ptr<Demuxer> demuxer_;
+  // The same object as demuxer_ when the source is segmented, and null otherwise.
+  // Non-owning: it is there to be asked what to fetch next, which a plain Demuxer
+  // has no notion of.
+  SegmentedDemuxer* segmented_ = nullptr;
+  std::optional<media::SegmentPrefetcher> prefetcher_;
   Stream audio_;
   Stream video_;
   double duration_ = 0.0;

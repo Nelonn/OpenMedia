@@ -3,8 +3,15 @@
 namespace openmedia {
 
 auto RandomRead::read(size_t pos, void* dst, size_t n) -> bool {
-  if (!input_ || pos + n > stream_size_) return false;
+  const size_t total = size();
+  if (n > total || pos > total - n) return false;
   if (n == 0) return true;
+
+  if (!memory_.empty()) {
+    memcpy(dst, memory_.data() + pos, n);
+    return true;
+  }
+  if (!input_) return false;
 
   uint8_t* out = static_cast<uint8_t*>(dst);
 

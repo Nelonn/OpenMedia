@@ -7,6 +7,7 @@ add_executable(OpenMediaExample WIN32
         hw_device.hpp
         main.cpp
         media_player.hpp
+        segment_prefetcher.hpp
         ring_buffer.hpp
         ui.hpp
         video_renderer.hpp
