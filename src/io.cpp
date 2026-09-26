@@ -1,12 +1,8 @@
 #include <algorithm>
-#include <codecvt>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
-#include <future>
-#include <mutex>
 #include <openmedia/io.hpp>
-#include <thread>
+#include <vector>
 
 #if defined(_WIN32) && !defined(__MINGW32__)
 #define NOMINMAX
@@ -30,12 +26,13 @@ static auto utf8_to_wstring(const std::string& str) -> std::wstring {
 class FileInputStream final : public InputStream {
 private:
   std::ifstream file_stream_;
+  std::string path_;
   int64_t size_;
   bool is_open_;
 
 public:
   explicit FileInputStream(const std::string& filename)
-      : size_(0), is_open_(false) {
+      : path_(filename), size_(0), is_open_(false) {
 #if defined(_WIN32) && !defined(__MINGW32__)
     file_stream_.open(utf8_to_wstring(filename), std::ios::in | std::ios::binary);
 #else
@@ -111,6 +108,8 @@ public:
   auto size() const -> int64_t override {
     return size_;
   }
+
+  auto sourcePath() const -> std::string override { return path_; }
 };
 
 class MemoryInputStream final : public InputStream {

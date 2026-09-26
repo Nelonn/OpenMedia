@@ -62,6 +62,12 @@ public:
    */
   virtual auto size() const -> int64_t = 0;
 
+  /**
+   * Where these bytes came from, when that is known: the local path for a file
+   * stream, and empty for a stream with no origin to name, such as one over memory.
+   */
+  virtual auto sourcePath() const -> std::string { return {}; }
+
   static auto createFileStream(const std::string& path) noexcept -> std::unique_ptr<InputStream>;
 
   static auto createMemoryStream(std::span<const uint8_t> data) noexcept -> std::unique_ptr<InputStream>;
