@@ -140,11 +140,12 @@ enabled_if = "OPENMEDIA_XEVE"
 
 [dependencies.tiff]
 git = "https://github.com/libsdl-org/libtiff"
-commit = "f324415f50cb5c90f7712e9dfe69831f5d2ea88d"
+commit = "dd0ed2c6198fb8fe736ec0329d24a50cfbb2f2ae"
 strategy = "cmake-install"
 import_name = "TIFF"
-cmake_options = { tiff-tools = "OFF", tiff-tests = "OFF", tiff-contrib = "OFF", tiff-docs = "OFF", tiff-install = "ON" }
+cmake_options = { tiff-tools = "OFF", tiff-tests = "OFF", tiff-contrib = "OFF", tiff-docs = "OFF", tiff-install = "ON", libdeflate = "OFF", jbig = "OFF", lzma = "OFF", zstd = "OFF" }
 enabled_if = "OPENMEDIA_TIFF || OPENMEDIA_DNG"
+dependencies = [ "webp" ]
 
 [dependencies.sdl3]
 git = "https://github.com/libsdl-org/SDL"
