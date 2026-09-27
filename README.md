@@ -81,18 +81,18 @@ OpenMedia provides interfaces for hardware-accelerated decoding and encoding:
 
 **Status:** ✅ Implemented | 🔧 Planned
 
-| API              |            Status            | Platform      | 
-|------------------|:----------------------------:|---------------|
-| VideoToolbox     |             Done             | macOS         |
-| VA-API           |        Only H264 High        | Linux         |
-| AMF              |             Done             | Windows       |
-| Vulkan Video     | Mostly decoding and Unstable | Windows/Linux |
-| DirectX 11 Video |             Done             | Windows       |
-| DirectX 12 Video |             Done             | Windows       |
-| CUDA/NVDEC       |             TBD              | Windows/Linux |
-| NVENC            |             TBD              | Windows/Linux |
-| Intel® Media SDK |              🔧              | Windows       |
-| MediaCodec       |           Untested           | Android       |
+| API              |         Status          | Platform      | 
+|------------------|:-----------------------:|---------------|
+| VideoToolbox     |          Done           | macOS         |
+| VA-API           |          Done           | Linux         |
+| AMF              |          Done           | Windows       |
+| Vulkan Video     | Unstable (at least AMD) | Windows/Linux |
+| DirectX 11 Video |          Done           | Windows       |
+| DirectX 12 Video |          Done           | Windows       |
+| CUDA/NVDEC       |           TBD           | Windows/Linux |
+| NVENC            |           TBD           | Windows/Linux |
+| Intel® Media SDK |           🔧            | Windows       |
+| MediaCodec       |        Untested         | Android       |
 
 ---
 
