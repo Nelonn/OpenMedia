@@ -98,7 +98,7 @@ enabled_if = "OPENMEDIA_GIF"
 
 [dependencies.png]
 git = "https://github.com/Nelonn/libpng"
-commit = "dd47360484d97fd1e4925eddc8102f084f5c2ce9"
+commit = "6e528c2c499820716443787eaf41d1200b4f4d87"
 strategy = "cmake-install"
 import_name = "PNG"
 enabled_if = "OPENMEDIA_PNG"
