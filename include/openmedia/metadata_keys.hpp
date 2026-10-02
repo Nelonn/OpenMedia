@@ -104,6 +104,19 @@ constexpr Key ANIMATION_BACKGROUND_COLOR = "animation.background_color";
 constexpr Key ENCRYPTED = "encryption.encrypted";
 // string - Four-character protection scheme, e.g. "cenc", "cbcs"
 constexpr Key ENCRYPTION_SCHEME = "encryption.scheme";
+// binary - 16-byte default key id (KID) naming the key the track's samples are
+// encrypted with. A stream that rotates keys names the others per packet, in
+// Packet::encryption, and only the first one here
+constexpr Key ENCRYPTION_KEY_ID = "encryption.key_id";
+// binary - Every protection system header in the container, concatenated and
+// complete with their box headers: the initialization data a DRM system is
+// handed to ask for a licence, which is also EME's "cenc" init data type.
+// Container-level, since one header serves every track it names
+constexpr Key ENCRYPTION_INIT_DATA = "encryption.init_data";
+// binary - The Widevine protection system headers alone, in the same shape as
+// ENCRYPTION_INIT_DATA, for a caller that drives a Widevine CDM and would
+// otherwise have to pick them out by system id itself
+constexpr Key ENCRYPTION_WIDEVINE_PSSH = "encryption.widevine_pssh";
 
 constexpr Key FILENAME = "filename";
 constexpr Key MIMETYPE = "mimetype";

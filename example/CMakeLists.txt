@@ -13,6 +13,11 @@ add_executable(OpenMediaExample WIN32
         video_renderer.hpp
 )
 target_link_libraries(OpenMediaExample PRIVATE SDL3::SDL3 OpenMedia::OpenMedia libyuv::libyuv)
+
+# A console tool rather than part of the player: what it reports is text about one
+# file, and it needs neither a window nor a decoder.
+add_executable(OpenMediaCencProbe cenc_probe.cpp)
+target_link_libraries(OpenMediaCencProbe PRIVATE OpenMedia::OpenMedia)
 if (WIN32 OR LINUX)
     #target_link_libraries(OpenMediaExample PRIVATE Vulkan::Headers)
     target_link_libraries(OpenMediaExample PRIVATE VulkanHeaders::VulkanHeaders)

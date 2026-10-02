@@ -35,6 +35,7 @@ target_sources(OpenMedia PRIVATE
         include/openmedia/codec_extra.hpp
         include/openmedia/codec_registry.hpp
         include/openmedia/dictionary.hpp
+        include/openmedia/encryption.hpp
         include/openmedia/error.h
         include/openmedia/format_api.hpp
         include/openmedia/format_defs.h

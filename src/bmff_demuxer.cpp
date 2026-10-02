@@ -6,6 +6,7 @@
 #include <cstring>
 #include <optional>
 #include <openmedia/audio.hpp>
+#include <openmedia/encryption.hpp>
 #include <openmedia/format_api.hpp>
 #include <openmedia/io.hpp>
 #include <openmedia/packet.hpp>
@@ -158,6 +159,41 @@ static auto isVvcVariant(uint32_t fmt) -> bool {
 static auto isEncryptedEntry(uint32_t fmt) -> bool {
   return fmt == ATOM('e', 'n', 'c', 'v') || fmt == ATOM('e', 'n', 'c', 'a') ||
          fmt == ATOM('e', 'n', 'c', 's');
+}
+
+// --- Common encryption, ISO/IEC 23001-7 ------------------------------------
+
+// Widevine's DRM system id, as it appears in a `pssh` box. Singled out because
+// a caller driving a Widevine CDM would otherwise have to walk the headers of
+// every system the content was packaged for to find the one it can use.
+static constexpr uint8_t WIDEVINE_SYSTEM_ID[16] = {
+    0xED, 0xEF, 0x8B, 0xA9, 0x79, 0xD6, 0x4A, 0xCE,
+    0xA3, 0xC8, 0x27, 0xDC, 0xD5, 0x1D, 0x21, 0xED};
+
+// Annex-B start codes are written four bytes wide, matching AnnexBFilter, and that
+// width is also what a protected sample's subsample map has to be shifted by.
+static constexpr uint32_t START_CODE_SIZE = 4;
+
+// SampleEncryptionBox flag: every record carries a subsample map.
+static constexpr uint32_t SENC_SUBSAMPLES = 0x000002;
+
+// A 'seig' group description index above this names one in the enclosing `traf`
+// rather than in `stbl`, counting from one past it (ISO/IEC 14496-12 section
+// 8.9.2.3).
+static constexpr uint32_t FRAGMENT_GROUP_BASE = 0x10000;
+
+static auto encryptionSchemeOf(uint32_t scheme_type) -> OMEncryptionScheme {
+  switch (scheme_type) {
+    case ATOM('c', 'e', 'n', 'c'): return OM_ENCRYPTION_CENC;
+    case ATOM('c', 'b', 'c', '1'): return OM_ENCRYPTION_CBC1;
+    case ATOM('c', 'e', 'n', 's'): return OM_ENCRYPTION_CENS;
+    case ATOM('c', 'b', 'c', 's'): return OM_ENCRYPTION_CBCS;
+    // PIFF predates common encryption and is AES-CTR over whole ranges, which is
+    // `cenc` by another name. Files written to it that carry a standard `tenc`
+    // and `senc` are then readable as they stand.
+    case ATOM('p', 'i', 'f', 'f'): return OM_ENCRYPTION_CENC;
+    default: return OM_ENCRYPTION_NONE;
+  }
 }
 
 static auto isMp4aVariant(uint32_t fmt) -> bool {
@@ -554,6 +590,80 @@ struct TREXEntry {
   uint32_t default_sample_flags = 0;
 };
 
+// Everything about a sample's protection except the sample's own initialization
+// vector. A `tenc` box states one of these for the whole track, and a 'seig'
+// sample group may state others for a stream that rotates its keys mid-flight.
+struct CencKey {
+  bool is_protected = false;
+  // Width of the per-sample initialization vector. 0 means there is none and
+  // `constant_iv` stands in for it, which is how `cbcs` is normally packaged.
+  uint8_t iv_size = 0;
+  uint8_t constant_iv_size = 0;
+  uint8_t crypt_byte_block = 0;
+  uint8_t skip_byte_block = 0;
+  uint8_t key_id[16] = {};
+  uint8_t constant_iv[16] = {};
+
+  auto operator==(const CencKey&) const -> bool = default;
+};
+
+// One sample's protection, in the form the demuxer keeps: a key and a subsample
+// map referred to by index rather than carried. A whole-file sample table runs
+// to hundreds of thousands of samples, and only the ones actually read need the
+// public SampleEncryption built for them.
+struct CencSample {
+  uint32_t key_index = 0;
+  uint32_t subsample_first = 0;
+  uint32_t subsample_count = 0;
+  uint8_t iv[16] = {};
+  uint8_t iv_size = 0;
+  // A sample can be in the clear inside a protected track -- a stream's clear
+  // lead is packaged that way -- and then there is nothing to decrypt.
+  bool is_protected = true;
+};
+
+// A track's protection, assembled from the boxes of however many scopes the
+// container has: the sample entry's `sinf` for the keys, and each `traf` or the
+// `stbl` for the per-sample records.
+struct TrackCrypto {
+  OMEncryptionScheme scheme = OM_ENCRYPTION_NONE;
+  // [0] is the `tenc` default; the rest are the keys 'seig' groups named. Empty
+  // for a track common encryption does not apply to, which costs it nothing.
+  std::vector<CencKey> keys;
+  std::vector<CencSample> samples;
+  // Flat, addressed by CencSample: one allocation for a whole fragment's maps
+  // instead of one per sample.
+  std::vector<SubsampleEntry> subsamples;
+};
+
+// What one `traf`, or one `stbl`, contributes to the above. Held until the box it
+// sits in has been read out, because `senc`, `saiz`/`saio` and the 'seig' sample
+// groups may arrive in any order -- and in a `traf`, after the `trun`s that the
+// samples themselves come from.
+struct CryptoScope {
+  // The SampleEncryptionBox body as it stands. Reading it needs the width of each
+  // sample's initialization vector, which is the key's and so is not settled
+  // until the 'seig' groups in this same scope have been seen.
+  std::vector<uint8_t> senc;
+  // `saiz`: the length of each sample's auxiliary record, which is the fallback
+  // for a container that states the same information outside a `senc`.
+  std::vector<uint8_t> aux_sizes;
+  uint32_t aux_default_size = 0;
+  uint32_t aux_sample_count = 0;
+  // `saio`: where those records are. Only the first offset is used; the records
+  // are stored back to back from there.
+  std::vector<uint64_t> aux_offsets;
+  // 'seig' group descriptions, in the box's order, so index 0 is its first.
+  std::vector<CencKey> group_keys;
+  // 'seig' SampleToGroup runs: {sample_count, group_description_index}.
+  std::vector<std::pair<uint32_t, uint32_t>> group_runs;
+
+  auto hasAuxInfo() const -> bool {
+    return !aux_offsets.empty() && aux_sample_count != 0 &&
+           (aux_default_size != 0 || !aux_sizes.empty());
+  }
+};
+
 // Entry counts in the sample tables are 32-bit fields straight out of the
 // file, so a handful of corrupt bytes can ask for tens of gigabytes. The box
 // body is already bounded by its own header: refuse to reserve more entries
@@ -590,6 +700,11 @@ struct Sample {
   uint32_t duration = 0;
   int32_t stream_index = 0;
   bool is_keyframe = false;
+  // The sample's entry in TrackCrypto::samples, or -1 for a sample that needs no
+  // key. While the enclosing `traf` or `stbl` is still being read it holds the
+  // sample's number within that scope instead, which is how the auxiliary
+  // records address it; applyCryptoScope() turns the one into the other.
+  int32_t crypto = -1;
 };
 
 struct BMFFTrack {
@@ -606,6 +721,21 @@ struct BMFFTrack {
   Track track = {};
   std::unique_ptr<BitStreamFilter> bsf;
 
+  // Width of the NAL unit length prefixes the samples are framed with, from the
+  // decoder configuration record; 0 for a track framed some other way. Reframing
+  // a protected sample needs it, because the subsample map has to be moved onto
+  // the new framing and only this says where the prefixes are.
+  uint8_t nal_length_size = 0;
+
+  TrackCrypto crypto;
+  // The `stbl`'s own scope, for a file that is not fragmented and states its
+  // auxiliary records there.
+  CryptoScope stbl_crypto;
+  // Whether each `stsd` entry is a protected one, by 1-based description index.
+  // A stream with a clear lead describes it with a second, unprotected entry and
+  // points the clear fragments at that one.
+  std::vector<uint8_t> protected_entries;
+
   std::vector<uint32_t> sample_sizes;
   std::vector<int64_t> chunk_offsets;
   std::vector<uint32_t> sync_samples;
@@ -616,6 +746,22 @@ struct BMFFTrack {
   std::vector<CTTSEntry> ctts_entries;
   std::vector<ELSTEntry> elst_entries;
   std::vector<Sample> samples;
+
+  // A track common encryption applies to: `tenc` settled a default key for it.
+  // Whether a given sample is really protected is decided per sample -- a clear
+  // lead and a 'seig' override both say otherwise -- so this only means that the
+  // samples have to be carried through the crypto path to find out.
+  auto hasCrypto() const -> bool { return !crypto.keys.empty(); }
+
+  // Whether samples written against this sample description carry ciphertext.
+  // Nothing said leaves the `tenc` default standing, since a file that describes
+  // only protected samples need not repeat itself.
+  auto entryIsProtected(uint32_t description_index) const -> bool {
+    if (description_index >= 1 && description_index <= protected_entries.size()) {
+      return protected_entries[description_index - 1] != 0;
+    }
+    return hasCrypto();
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1050,7 @@ inline auto parseAvcc(std::span<const uint8_t> body,
       ? OM_PROFILE_H264_CONSTRAINED_BASELINE
       : static_cast<OMProfile>(config->profile_idc);
   track.track.extradata = config->annexb_extradata;
+  track.nal_length_size = config->nal_length_size;
   track.bsf = std::make_unique<AnnexBFilter>(
       config->nal_length_size, std::move(config->annexb_extradata));
 
@@ -919,6 +1066,7 @@ inline auto parseHvcc(std::span<const uint8_t> body,
     track.track.format.profile = static_cast<OMProfile>(config->profile_idc);
   }
   track.track.extradata = config->annexb_extradata;
+  track.nal_length_size = config->nal_length_size;
   track.bsf = std::make_unique<AnnexBFilter>(
       config->nal_length_size, std::move(config->annexb_extradata));
 
@@ -964,6 +1112,7 @@ inline auto parseVvcc(std::span<const uint8_t> body,
     track.track.format.profile = static_cast<OMProfile>(config->profile_idc);
   }
   track.track.extradata = config->annexb_extradata;
+  track.nal_length_size = config->nal_length_size;
   track.bsf = std::make_unique<AnnexBFilter>(
       config->nal_length_size, std::move(config->annexb_extradata));
 
@@ -1391,6 +1540,331 @@ inline void parseTrex(std::span<const uint8_t> body, std::vector<TREXEntry>& tre
 }
 
 // ---------------------------------------------------------------------------
+// Common encryption, ISO/IEC 23001-7
+// ---------------------------------------------------------------------------
+
+// The protection defaults, which a TrackEncryptionBox and a 'seig' sample group
+// description carry in exactly the same shape (sections 8.2.2 and 6). In a
+// version 0 `tenc` the crypt/skip byte is a reserved zero, which reads as "no
+// pattern" -- the right answer for the two schemes that have none.
+inline auto parseCencKey(ByteReader& r, CencKey& key) -> bool {
+  r.skip(1); // reserved
+  const uint8_t pattern = r.u8();
+  key.crypt_byte_block = pattern >> 4u;
+  key.skip_byte_block = pattern & 0x0Fu;
+  key.is_protected = r.u8() != 0;
+  key.iv_size = r.u8();
+
+  const auto kid = r.bytes(sizeof(key.key_id));
+  if (kid.size() != sizeof(key.key_id)) return false;
+  memcpy(key.key_id, kid.data(), kid.size());
+
+  if (key.is_protected && key.iv_size == 0) {
+    const uint8_t declared = r.u8();
+    const auto iv = r.bytes(declared <= sizeof(key.constant_iv) ? declared : 0);
+    if (iv.empty()) return false;
+    memcpy(key.constant_iv, iv.data(), iv.size());
+    key.constant_iv_size = static_cast<uint8_t>(iv.size());
+  }
+
+  // 8 and 16 are the only per-sample widths common encryption defines, and the
+  // width is what the auxiliary records are read against: a third value would
+  // make every one of them come out at the wrong offset.
+  return r.ok() && (key.iv_size == 0 || key.iv_size == 8 || key.iv_size == 16);
+}
+
+// TrackEncryptionBox: which key the track's samples are encrypted with, and how.
+// A `schm` names the scheme but not the key, so this box is what makes a track
+// decryptable rather than merely known to be encrypted.
+inline void parseTenc(std::span<const uint8_t> body, BMFFTrack& track) {
+  ByteReader r(body);
+  r.skip(4); // version + flags
+
+  CencKey key;
+  if (!parseCencKey(r, key)) return;
+
+  if (track.crypto.keys.empty()) {
+    track.crypto.keys.push_back(key);
+  } else {
+    track.crypto.keys[0] = key;
+  }
+
+  if (key.is_protected) {
+    track.track.metadata.setBool(ENCRYPTED, true);
+    track.track.metadata.setBinary(ENCRYPTION_KEY_ID, key.key_id);
+  }
+}
+
+// SampleGroupDescriptionBox, ISO/IEC 14496-12 section 8.9.3. Only 'seig' is read:
+// its entries are track encryption defaults in all but name, and a stream that
+// rotates keys points at them from `sbgp` instead of carrying a new `tenc`.
+inline void parseSgpd(std::span<const uint8_t> body, CryptoScope& scope) {
+  ByteReader r(body);
+  const uint8_t version = r.u8();
+  r.skip(3); // flags
+
+  const auto grouping_bytes = r.bytes(4);
+  if (grouping_bytes.size() != 4 ||
+      load_u32(grouping_bytes.data()) != ATOM('s', 'e', 'i', 'g')) {
+    return;
+  }
+
+  uint32_t default_length = 0;
+  if (version == 1) default_length = r.u32be();
+  if (version >= 2) r.skip(4); // default_sample_description_index
+
+  // The shortest a 'seig' entry can be: reserved, pattern, isProtected, IV size
+  // and the key id.
+  constexpr size_t MIN_ENTRY_SIZE = 4 + 16;
+  const uint32_t count = clampEntryCount(r, r.u32be(), MIN_ENTRY_SIZE);
+
+  for (uint32_t i = 0; i < count && r.ok(); ++i) {
+    // A version 1 box states each entry's length, either once up front or per
+    // entry, so that a reader can step over a group description it does not
+    // understand; version 0 states none, and a 'seig' entry is then exactly as
+    // long as reading it makes it.
+    uint32_t length = default_length;
+    if (version == 1 && default_length == 0) length = r.u32be();
+    if (length > r.remaining()) break;
+
+    CencKey key;
+    ByteReader entry = (length != 0) ? r.sub(length) : r;
+    const bool read = parseCencKey(entry, key);
+    if (length == 0) r.skip(entry.tell());
+    if (!read) break;
+
+    scope.group_keys.push_back(key);
+  }
+}
+
+// The 'seig' arm of SampleToGroupBox: which of the above each run of samples is
+// protected with. Kept as runs, since one run routinely covers a whole fragment.
+inline void parseSeigGroups(std::span<const uint8_t> body, CryptoScope& scope) {
+  ByteReader r(body);
+  const uint8_t version = r.u8();
+  r.skip(3);               // flags
+  r.skip(4);               // grouping_type, already read by the caller
+  if (version == 1) r.skip(4); // grouping_type_parameter
+
+  const uint32_t count = clampEntryCount(r, r.u32be(), 8);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t sample_count = r.u32be();
+    const uint32_t group_description_index = r.u32be();
+    if (!r.ok()) break;
+    scope.group_runs.emplace_back(sample_count, group_description_index);
+  }
+}
+
+// SampleAuxiliaryInformationSizesBox, ISO/IEC 14496-12 section 8.7.8. Only the
+// auxiliary information common encryption defines is of interest, and a box that
+// names a different type is describing something else entirely.
+inline void parseSaiz(std::span<const uint8_t> body, CryptoScope& scope) {
+  ByteReader r(body);
+  r.skip(1); // version
+  const uint32_t flags = r.u24be();
+
+  if (flags & 0x000001u) {
+    const auto type_bytes = r.bytes(4);
+    if (type_bytes.size() != 4) return;
+    if (encryptionSchemeOf(load_u32(type_bytes.data())) == OM_ENCRYPTION_NONE) return;
+    r.skip(4); // aux_info_type_parameter
+  }
+
+  const uint32_t default_size = r.u8();
+  const uint32_t sample_count = r.u32be();
+  if (!r.ok()) return;
+
+  scope.aux_default_size = default_size;
+  scope.aux_sizes.clear();
+  if (default_size == 0) {
+    const uint32_t count = clampEntryCount(r, sample_count, 1);
+    scope.aux_sizes.resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      scope.aux_sizes[i] = r.u8();
+    }
+    scope.aux_sample_count = count;
+    return;
+  }
+  scope.aux_sample_count = sample_count;
+}
+
+// SampleAuxiliaryInformationOffsetsBox, the companion to the above.
+inline void parseSaio(std::span<const uint8_t> body, CryptoScope& scope) {
+  ByteReader r(body);
+  const uint8_t version = r.u8();
+  const uint32_t flags = r.u24be();
+
+  if (flags & 0x000001u) {
+    const auto type_bytes = r.bytes(4);
+    if (type_bytes.size() != 4) return;
+    if (encryptionSchemeOf(load_u32(type_bytes.data())) == OM_ENCRYPTION_NONE) return;
+    r.skip(4); // aux_info_type_parameter
+  }
+
+  const size_t width = (version == 1) ? 8 : 4;
+  const uint32_t count = clampEntryCount(r, r.u32be(), width);
+  scope.aux_offsets.clear();
+  scope.aux_offsets.reserve(count);
+  for (uint32_t i = 0; i < count && r.ok(); ++i) {
+    scope.aux_offsets.push_back((version == 1) ? r.u64be() : r.u32be());
+  }
+}
+
+// One CencSampleAuxiliaryDataFormat record, ISO/IEC 23001-7 section 7.1: the
+// sample's initialization vector, then its clear/protected split when it has one.
+// The record carries no width of its own, which is why the key has to be known
+// before it can be read at all.
+inline auto readCencAuxRecord(ByteReader& r, const CencKey& key, bool has_subsamples,
+                              CencSample& record,
+                              std::vector<SubsampleEntry>& subsamples) -> bool {
+  if (key.iv_size != 0) {
+    const auto iv = r.bytes(key.iv_size);
+    if (iv.size() != key.iv_size) return false;
+    memcpy(record.iv, iv.data(), iv.size());
+    record.iv_size = key.iv_size;
+  } else {
+    // A constant IV is stated once, in the key, and every sample shares it.
+    memcpy(record.iv, key.constant_iv, key.constant_iv_size);
+    record.iv_size = key.constant_iv_size;
+  }
+  record.is_protected = key.is_protected;
+
+  if (!has_subsamples) return r.ok();
+
+  const uint16_t count = r.u16be();
+  if (!r.ok()) return false;
+
+  record.subsample_first = static_cast<uint32_t>(subsamples.size());
+  for (uint16_t i = 0; i < count; ++i) {
+    const uint16_t clear = r.u16be();
+    const uint32_t enciphered = r.u32be();
+    if (!r.ok()) {
+      // A half-read map describes the sample wrongly, which is worse for a
+      // decryptor than being told the sample has no map at all.
+      subsamples.resize(record.subsample_first);
+      return false;
+    }
+    subsamples.push_back({clear, enciphered});
+  }
+  record.subsample_count = count;
+  return true;
+}
+
+// Which key each sample of a scope is protected with, as the two record readers
+// need it: `senc` and the `saiz`/`saio` records both have to know a sample's key
+// before they can read the sample's own initialization vector, because the key is
+// what states its width. A sample no run named falls back to the `tenc` default,
+// which is always the first key.
+struct SampleKeys {
+  const std::vector<CencKey>& keys;
+  const std::vector<uint32_t>& by_sample;
+
+  auto indexOf(size_t sample) const -> uint32_t {
+    return sample < by_sample.size() ? by_sample[sample] : 0u;
+  }
+
+  auto at(size_t sample) const -> const CencKey& {
+    const uint32_t index = indexOf(sample);
+    return keys[index < keys.size() ? index : 0u];
+  }
+};
+
+// Keys repeat: a stream that rotates them names the same handful over and over,
+// and one 'seig' run names a key for thousands of samples at a time.
+inline auto internKey(TrackCrypto& crypto, const CencKey& key) -> uint32_t {
+  for (size_t i = 0; i < crypto.keys.size(); ++i) {
+    if (crypto.keys[i] == key) return static_cast<uint32_t>(i);
+  }
+  crypto.keys.push_back(key);
+  return static_cast<uint32_t>(crypto.keys.size() - 1);
+}
+
+// True once the map describes `size` bytes exactly. A map that stops short leaves
+// the rest of the sample in the clear, and saying so explicitly is what makes it
+// an exact description; one that overruns describes something other than this
+// sample, and a map that cannot be trusted cannot be reframed either.
+inline auto normalizeSubsampleMap(std::vector<SubsampleEntry>& subsamples,
+                                  size_t size) -> bool {
+  if (subsamples.empty()) return false; // whole-sample encryption, not a short map
+
+  uint64_t total = 0;
+  for (const SubsampleEntry& entry : subsamples) {
+    total += static_cast<uint64_t>(entry.clear_bytes) + entry.protected_bytes;
+  }
+  if (total > size) return false;
+  if (total < size) {
+    subsamples.push_back({static_cast<uint32_t>(size - total), 0});
+  }
+  return true;
+}
+
+// Where each NAL unit's length prefix sits, when the sample really is a tiling of
+// `length_size`-prefixed NAL units. Empty when it is not -- which is what a
+// sample encrypted end to end looks like, since then even its length fields are
+// ciphertext, and so is the one signal that it must not be reframed.
+inline auto lengthPrefixedNalStarts(std::span<const uint8_t> sample,
+                                    uint8_t length_size) -> std::vector<uint32_t> {
+  std::vector<uint32_t> starts;
+  if (length_size == 0 || length_size > 4) return starts;
+
+  size_t offset = 0;
+  while (offset + length_size <= sample.size()) {
+    uint64_t nal_size = 0;
+    for (uint8_t i = 0; i < length_size; ++i) {
+      nal_size = (nal_size << 8u) | sample[offset + i];
+    }
+    if (nal_size == 0 || offset + length_size + nal_size > sample.size()) return {};
+    starts.push_back(static_cast<uint32_t>(offset));
+    offset += length_size + static_cast<size_t>(nal_size);
+  }
+  if (offset != sample.size()) return {};
+  return starts;
+}
+
+// Moves a subsample map from the container's length-prefixed framing onto the
+// Annex-B framing the packet goes out in. Replacing an N-byte length prefix with
+// a 4-byte start code only ever lengthens a clear run, and prepending parameter
+// sets only ever adds clear bytes in front, so the map survives both -- but only
+// as long as every prefix really is in a clear run, which is what the false
+// return reports. False leaves the map untouched.
+inline auto shiftSubsamplesForStartCodes(std::vector<SubsampleEntry>& subsamples,
+                                         std::span<const uint32_t> nal_starts,
+                                         uint8_t length_size,
+                                         size_t prefix_size) -> bool {
+  // Which subsample each NAL unit's length prefix falls in, walked once to check
+  // and once to apply: half an adjustment would leave the map describing neither
+  // framing.
+  std::vector<size_t> owners;
+  owners.reserve(nal_starts.size());
+
+  size_t index = 0;
+  uint64_t base = 0; // first byte of subsamples[index], in the stored sample
+  for (const uint32_t start : nal_starts) {
+    while (index < subsamples.size() &&
+           start >= base + subsamples[index].clear_bytes + subsamples[index].protected_bytes) {
+      base += static_cast<uint64_t>(subsamples[index].clear_bytes) +
+              subsamples[index].protected_bytes;
+      ++index;
+    }
+    if (index >= subsamples.size()) return false;
+    // The whole prefix has to be clear: it is about to be overwritten, and a
+    // decryptor told to decipher it would be working on bytes that are no longer
+    // the ciphertext the packager produced.
+    if (start + length_size > base + subsamples[index].clear_bytes) return false;
+    owners.push_back(index);
+  }
+
+  const uint32_t grown = START_CODE_SIZE - length_size;
+  for (const size_t owner : owners) {
+    subsamples[owner].clear_bytes += grown;
+  }
+  if (prefix_size != 0) {
+    subsamples.front().clear_bytes += static_cast<uint32_t>(prefix_size);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Sample-table construction - functional style
 //
 // Iterator state for STTS / CTTS tables is managed with a small helper
@@ -1496,6 +1970,11 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
   size_t sample_idx = 0;
   int64_t current_dts = 0;
 
+  // A protected track's samples carry their sample number until the `senc` or
+  // `saiz`/`saio` records are matched to them; applyCryptoScope() resets the ones
+  // that turn out to need no key.
+  const bool crypto = track.hasCrypto();
+
   for (size_t ci = 0; ci < num_chunks; ++ci) {
     const uint32_t samples_in_chunk = samples_per_chunk_table[ci];
     if (samples_in_chunk == 0) continue;
@@ -1519,7 +1998,8 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
                           is_rap[sample_idx];
       const uint32_t sz = track.sample_sizes[sample_idx];
       if (sampleFitsInStream(offset, sz, stream_size)) {
-        track.samples.push_back({offset, sz, pts, dts, duration, 0, is_key});
+        track.samples.push_back({offset, sz, pts, dts, duration, 0, is_key,
+                                 crypto ? static_cast<int32_t>(sample_idx) : -1});
       }
 
       offset += sz;
@@ -1549,8 +2029,17 @@ class BMFFDemuxer final : public BaseDemuxer {
     uint32_t default_sample_duration = 0;
     uint32_t default_sample_size = 0;
     uint32_t default_sample_flags = 0;
+    uint32_t sample_description_index = 0;
     int64_t decode_time = 0;
     bool has_decode_time = false;
+
+    // The fragment's Common Encryption boxes, and where its samples went: the
+    // auxiliary records number the samples from the start of the fragment and may
+    // follow the `trun`s that produced them, so the two are only matched up once
+    // the whole `traf` has been read.
+    CryptoScope crypto;
+    size_t first_sample = 0;
+    uint32_t sample_count = 0;
   };
 
   SampleEntryKind current_entry_kind_ = SampleEntryKind::None;
@@ -1580,6 +2069,12 @@ class BMFFDemuxer final : public BaseDemuxer {
   std::vector<MetaItem> meta_items_;
   std::vector<Track> attachment_tracks_;
 
+  // Every `pssh` box seen, whole. A stream repeats them in each segment and adds
+  // new ones when it rotates keys, so they accumulate rather than being replaced:
+  // a licence the caller already holds stays valid, and a new header means a new
+  // licence to ask for.
+  std::vector<std::vector<uint8_t>> pssh_boxes_;
+
   // Public track index (the one in `tracks_` and in Sample::stream_index) to
   // its slot in `bmff_tracks_`. The two only coincide while no track is
   // dropped, and timecode or subtitle tracks are dropped all the time.
@@ -1608,6 +2103,8 @@ class BMFFDemuxer final : public BaseDemuxer {
   RandomRead random_;
 
   static constexpr size_t NO_TRACK = static_cast<size_t>(-1);
+  // An auxiliary-information offset that addresses nothing in this stream.
+  static constexpr size_t NOT_IN_STREAM = static_cast<size_t>(-1);
 
   // The track whose boxes are currently being parsed. A raw pointer would not
   // survive `bmff_tracks_` growing, which a nested or malformed `trak` can
@@ -1637,6 +2134,7 @@ public:
     samples_.clear();
     meta_items_.clear();
     attachment_tracks_.clear();
+    pssh_boxes_.clear();
     current_fragment_.reset();
     current_track_slot_ = NO_TRACK;
     current_entry_kind_ = SampleEntryKind::None;
@@ -1672,6 +2170,12 @@ public:
       applyEditList(t, movie_timescale_);
       if (t.samples.empty()) {
         buildSampleTable(t, stream_size);
+        // A `stbl`'s `saio` addresses the file by offset, and a sample cannot be
+        // matched to a record before there are samples, so a non-fragmented
+        // file's protection is only resolved here. A fragmented one resolved each
+        // `traf` as it was read.
+        applyCryptoScope(t, t.stbl_crypto, t.samples, /*entry_protected=*/true,
+                         /*fragment_scope=*/false);
       }
     }
 
@@ -1703,6 +2207,12 @@ public:
     const Sample& sample = samples_[current_sample_index_];
     BMFFTrack* bmff_track = trackForPublicIndex(sample.stream_index);
     if (!bmff_track) return Err(OM_FORMAT_STREAM_NOT_FOUND);
+
+    if (sample.crypto >= 0) {
+      auto packet = readProtectedPacket(sample, *bmff_track);
+      if (packet) ++current_sample_index_;
+      return packet;
+    }
 
     const BitStreamFilter* bsf = bmff_track->bsf.get();
     const auto prefix = (bsf && sample.is_keyframe) ? bsf->keyframePrefix()
@@ -1766,6 +2276,91 @@ public:
     pkt.is_keyframe = sample.is_keyframe;
 
     ++current_sample_index_;
+    return Ok(std::move(pkt));
+  }
+
+  // A protected sample cannot take the path above. Its subsample map addresses the
+  // bytes as the container stores them, so whatever the demuxer does to the
+  // payload on the way out has to be carried into the map as well -- and where it
+  // cannot be, the payload goes out as stored, because a map that no longer
+  // describes the bytes it is handed with is worse than no reframing at all.
+  //
+  // Annex-B conversion is the one thing done here, and it only replaces a NAL
+  // unit's length prefix with a start code of the same width or wider, and
+  // prepends parameter sets. Common encryption leaves those prefixes in the clear,
+  // so every byte either step inserts is clear and the map survives both --
+  // shiftSubsamplesForStartCodes() checks that and says when it does not.
+  auto readProtectedPacket(const Sample& sample, const BMFFTrack& track)
+      -> Result<Packet, OMError> {
+    const auto record_index = static_cast<size_t>(sample.crypto);
+    if (record_index >= track.crypto.samples.size()) return Err(OM_FORMAT_INVALID_PACKET);
+    if (sample.offset < 0) return Err(OM_FORMAT_INVALID_PACKET);
+
+    const auto at = static_cast<size_t>(sample.offset);
+    const std::span<const uint8_t> in_memory = random_.view(at, sample.size);
+
+    std::vector<uint8_t> scratch;
+    std::span<const uint8_t> stored = in_memory;
+    if (stored.empty() && sample.size != 0) {
+      scratch.resize(sample.size);
+      if (!random_.read(at, scratch.data(), scratch.size())) return Err(OM_FORMAT_END_OF_FILE);
+      stored = scratch;
+    }
+
+    auto encryption = std::make_shared<SampleEncryption>(
+        buildSampleEncryption(track, track.crypto.samples[record_index]));
+
+    const BitStreamFilter* bsf = track.bsf.get();
+    const auto prefix = (bsf && sample.is_keyframe) ? bsf->keyframePrefix()
+                                                    : std::span<const uint8_t> {};
+
+    const bool exact = normalizeSubsampleMap(encryption->subsamples, stored.size());
+    const auto nal_starts = exact ? lengthPrefixedNalStarts(stored, track.nal_length_size)
+                                  : std::vector<uint32_t> {};
+    const bool reframe =
+        !nal_starts.empty() &&
+        shiftSubsamplesForStartCodes(encryption->subsamples, nal_starts,
+                                     track.nal_length_size, prefix.size());
+
+    Packet pkt;
+    if (!reframe) {
+      // Nothing is rewritten, so the packet can share the segment's bytes exactly
+      // as the unprotected path does.
+      if (segment_ && !in_memory.empty()) {
+        pkt.buffer = segment_;
+        pkt.bytes = segment_->bytes().subspan(at, sample.size);
+      } else {
+        pkt.allocate(stored.size());
+        memcpy(pkt.bytes.data(), stored.data(), stored.size());
+      }
+    } else {
+      const size_t grown = nal_starts.size() * (START_CODE_SIZE - track.nal_length_size);
+      pkt.allocate(prefix.size() + stored.size() + grown);
+
+      uint8_t* out = pkt.bytes.data();
+      memcpy(out, prefix.data(), prefix.size());
+      out += prefix.size();
+
+      for (const uint32_t start : nal_starts) {
+        size_t nal_size = 0;
+        for (uint8_t i = 0; i < track.nal_length_size; ++i) {
+          nal_size = (nal_size << 8u) | stored[start + i];
+        }
+        memcpy(out, AnnexBBitStreamFilter::START_CODE_LONG, START_CODE_SIZE);
+        out += START_CODE_SIZE;
+        memcpy(out, stored.data() + start + track.nal_length_size, nal_size);
+        out += nal_size;
+      }
+      pkt.bytes = pkt.bytes.first(static_cast<size_t>(out - pkt.bytes.data()));
+    }
+
+    pkt.encryption = std::move(encryption);
+    pkt.stream_index = sample.stream_index;
+    pkt.pts = sample.pts;
+    pkt.dts = sample.dts;
+    pkt.pos = sample.offset;
+    pkt.duration = sample.duration;
+    pkt.is_keyframe = sample.is_keyframe;
     return Ok(std::move(pkt));
   }
 
@@ -1917,6 +2512,11 @@ private:
     // the stream plays.
     for (BMFFTrack& track : bmff_tracks_) {
       track.samples.clear();
+      // The records are addressed by index from the samples that are going. The
+      // keys stay: `tenc` settled them in the initialization segment, and a key a
+      // 'seig' group introduced is as good for the next segment as for this one.
+      track.crypto.samples.clear();
+      track.crypto.subsamples.clear();
     }
     samples_.clear();
     keyframes_.clear();
@@ -2334,6 +2934,7 @@ private:
       fragment.default_sample_duration = trex->default_sample_duration;
       fragment.default_sample_size = trex->default_sample_size;
       fragment.default_sample_flags = trex->default_sample_flags;
+      fragment.sample_description_index = trex->default_sample_description_index;
     }
 
     if (flags & 0x000001u) {
@@ -2348,7 +2949,10 @@ private:
       }
     }
     if (flags & 0x000002u) {
-      r.u32be();
+      // Which `stsd` entry the fragment's samples were written against, and so
+      // whether they are protected at all: a stream's clear lead points at an
+      // unprotected entry while the rest of it points at the `encv`/`enca` one.
+      fragment.sample_description_index = r.u32be();
     }
     if (flags & 0x000008u) {
       fragment.default_sample_duration = r.u32be();
@@ -2413,6 +3017,14 @@ private:
         ? (current_fragment_->decode_time - getEditListStartDts(*track, movie_timescale_))
         : continued_dts;
 
+    // Where this fragment's samples begin, for the crypto records to be matched
+    // against once the whole `traf` has been read. Taken at the first `trun`,
+    // since nothing before it can have added a sample.
+    if (current_fragment_->sample_count == 0) {
+      current_fragment_->first_sample = track->samples.size();
+    }
+    const bool crypto = track->hasCrypto();
+
     // sample_count is a 32-bit field from the file; the loop is bounded by the
     // box body instead, so a corrupt count cannot push millions of zero-sized
     // samples into the track.
@@ -2441,6 +3053,11 @@ private:
 
       if (!r.ok()) break; // the fields above were read past the end of the box
 
+      // Counted whether or not the sample is kept: the auxiliary records are
+      // numbered by what the `trun`s describe, not by what fits in the stream.
+      const auto number = static_cast<int32_t>(current_fragment_->sample_count);
+      ++current_fragment_->sample_count;
+
       if (sampleFitsInStream(sample_offset, size, stream_size)) {
         track->samples.push_back({
             sample_offset,
@@ -2450,6 +3067,7 @@ private:
             duration,
             0,
             is_keyframe,
+            crypto ? number : -1,
         });
       }
 
@@ -2458,6 +3076,324 @@ private:
     }
 
     track->next_fragment_dts = current_dts;
+  }
+
+  // --- Common encryption ------------------------------------------------------
+
+  // Where a per-sample protection box's contents belong: the open `traf`'s scope,
+  // or the current track's `stbl` when a file states them there instead. Null
+  // when neither is open, which is a box somewhere it has no meaning.
+  auto cryptoScope() -> CryptoScope* {
+    if (current_fragment_) return &current_fragment_->crypto;
+    BMFFTrack* track = currentTrack();
+    return track ? &track->stbl_crypto : nullptr;
+  }
+
+  // SampleToGroupBox. Two grouping types matter: 'rap '/'sync' name random access
+  // points for seeking, and 'seig' names the key each run of samples is protected
+  // with. The box appears in `stbl`, numbering the track's samples, and in `traf`,
+  // numbering that fragment's.
+  void parseSampleToGroup(std::span<const uint8_t> body) {
+    if (body.size() < 8) return;
+    const uint32_t grouping_type = load_u32(body.data() + 4);
+
+    if (grouping_type == ATOM('s', 'e', 'i', 'g')) {
+      if (CryptoScope* scope = cryptoScope()) parseSeigGroups(body, *scope);
+      return;
+    }
+    // A traf's groups number its own samples; only stbl's map onto the sample
+    // table that seeking is built from.
+    if (current_fragment_) return;
+    if (BMFFTrack* track = currentTrack()) parseSbgp(body, *track);
+  }
+
+  // ProtectionSystemSpecificHeaderBox, ISO/IEC 23001-7 section 8.1. Kept whole,
+  // because the box as it stands is the initialization data a DRM system wants:
+  // it is what EME calls "cenc" init data, and what a Widevine CDM is handed to
+  // generate a licence request.
+  void collectPssh(size_t box_start, size_t box_end) {
+    // A header carries a key id list and a system-specific blob; a few kilobytes
+    // is already generous, and anything beyond that is not a header worth
+    // believing.
+    constexpr size_t MAX_PSSH_SIZE = 64u * 1024;
+    // Box header, version and flags, the system id, and a length.
+    constexpr size_t MIN_PSSH_SIZE = 8 + 4 + 16 + 4;
+
+    if (box_end <= box_start) return;
+    const size_t length = box_end - box_start;
+    if (length < MIN_PSSH_SIZE || length > MAX_PSSH_SIZE) return;
+
+    std::vector<uint8_t> storage;
+    const std::span<const uint8_t> box = readBoxBody(box_start, length, storage);
+    if (fatal_ || box.size() != length) return;
+
+    // The same header is repeated in every segment of a stream, and key rotation
+    // adds new ones, so the collection grows but never twice over the same bytes.
+    for (const auto& existing : pssh_boxes_) {
+      if (existing.size() == box.size() &&
+          std::equal(existing.begin(), existing.end(), box.begin())) {
+        return;
+      }
+    }
+    pssh_boxes_.emplace_back(box.begin(), box.end());
+    publishPssh();
+  }
+
+  void publishPssh() {
+    std::vector<uint8_t> all;
+    std::vector<uint8_t> widevine;
+
+    for (const auto& box : pssh_boxes_) {
+      all.insert(all.end(), box.begin(), box.end());
+
+      // A 64-bit size pushes everything after the box header along by eight
+      // bytes; the system id follows the version and flags either way.
+      const size_t header = (load_u32_be(box.data()) == 1) ? 16 : 8;
+      if (box.size() < header + 4 + sizeof(WIDEVINE_SYSTEM_ID)) continue;
+      if (std::equal(std::begin(WIDEVINE_SYSTEM_ID), std::end(WIDEVINE_SYSTEM_ID),
+                     box.begin() + static_cast<ptrdiff_t>(header) + 4)) {
+        widevine.insert(widevine.end(), box.begin(), box.end());
+      }
+    }
+
+    metadata_.setBinary(ENCRYPTION_INIT_DATA, all);
+    if (!widevine.empty()) metadata_.setBinary(ENCRYPTION_WIDEVINE_PSSH, widevine);
+  }
+
+  // Matches the `traf` just read to the protection boxes it carried. The samples
+  // are whatever its `trun`s appended to the track.
+  void applyFragmentEncryption() {
+    if (!current_fragment_) return;
+    BMFFTrack* track = findTrackById(current_fragment_->track_id);
+    if (!track || !track->hasCrypto()) return;
+
+    const size_t first = std::min(current_fragment_->first_sample, track->samples.size());
+    applyCryptoScope(*track, current_fragment_->crypto,
+                     std::span(track->samples).subspan(first),
+                     track->entryIsProtected(current_fragment_->sample_description_index),
+                     /*fragment_scope=*/true);
+  }
+
+  // Turns one scope's protection boxes into per-sample records.
+  //
+  // On entry each of `samples` carries its number within the scope in
+  // Sample::crypto; on exit it carries the index of its record in the track's
+  // list, or -1 for a sample that needs no key. The boxes can arrive in any
+  // order, and in a `traf` after the `trun`s, so none of this could be done while
+  // they were being read.
+  void applyCryptoScope(BMFFTrack& track, const CryptoScope& scope,
+                        std::span<Sample> samples, bool entry_protected,
+                        bool fragment_scope) {
+    const auto clearAll = [&] {
+      for (Sample& sample : samples) sample.crypto = -1;
+    };
+
+    if (!track.hasCrypto() || !entry_protected) {
+      clearAll();
+      return;
+    }
+
+    // By value: interning a 'seig' key may grow the list this came out of.
+    const CencKey fallback = track.crypto.keys.front();
+
+    // Group description indices above 0x10000 name a description in the enclosing
+    // `traf`, counting from 0x10001; the rest name one in `stbl`, counting from 1
+    // (ISO/IEC 14496-12 section 8.9.2.3). Index 0 means no group, which leaves the
+    // `tenc` default standing.
+    const auto& track_groups = track.stbl_crypto.group_keys;
+    const auto resolveGroup = [&](uint32_t group) -> const CencKey* {
+      if (group == 0) return &fallback;
+      if (group > FRAGMENT_GROUP_BASE) {
+        const size_t index = group - FRAGMENT_GROUP_BASE - 1u;
+        return (fragment_scope && index < scope.group_keys.size()) ? &scope.group_keys[index]
+                                                                  : nullptr;
+      }
+      const auto& list = fragment_scope ? track_groups : scope.group_keys;
+      const size_t index = group - 1u;
+      return index < list.size() ? &list[index] : nullptr;
+    };
+
+    // One key index per sample of the scope, expanded from the runs: the runs are
+    // few and the samples many, and every record below needs its key to be able
+    // to read its own initialization vector.
+    //
+    // A run's sample count comes straight out of the file, so the expansion is
+    // bounded by how many records the scope could describe at all -- a `senc`
+    // record is never shorter than two bytes, and `saiz` cannot name more samples
+    // than the stream has bytes.
+    const size_t limit = std::max(
+        samples.size(), scope.senc.empty()
+                            ? std::min<size_t>(scope.aux_sample_count, random_.size())
+                            : scope.senc.size() / 2u);
+
+    std::vector<uint32_t> sample_keys;
+    for (const auto& [count, group] : scope.group_runs) {
+      if (sample_keys.size() >= limit) break;
+      const CencKey* key = resolveGroup(group);
+      // A run naming a description that is not there says nothing about these
+      // samples; the `tenc` default is the only other thing it could mean.
+      const uint32_t index = key ? internKey(track.crypto, *key) : 0u;
+      sample_keys.insert(sample_keys.end(), std::min<size_t>(count, limit - sample_keys.size()),
+                         index);
+    }
+    const SampleKeys keys {track.crypto.keys, sample_keys};
+
+    std::vector<CencSample> records;
+    std::vector<SubsampleEntry> subsamples;
+    if (!scope.senc.empty()) {
+      readSenc(scope, keys, records, subsamples);
+    } else if (scope.hasAuxInfo()) {
+      readAuxInfo(scope, keys, records, subsamples);
+    }
+
+    if (records.empty()) {
+      // Nothing per-sample. The samples are then protected end to end with the
+      // key's constant initialization vector, which is how `cbcs` audio is
+      // usually packaged; without any vector at all there is nothing a decryptor
+      // could do with them, so they go out as the clear samples they look like.
+      CencSample whole;
+      memcpy(whole.iv, fallback.constant_iv, fallback.constant_iv_size);
+      whole.iv_size = fallback.constant_iv_size;
+      whole.is_protected = fallback.is_protected && whole.iv_size != 0;
+      if (!whole.is_protected) {
+        clearAll();
+        return;
+      }
+      const auto index = static_cast<int32_t>(track.crypto.samples.size());
+      track.crypto.samples.push_back(whole);
+      for (Sample& sample : samples) {
+        if (sample.crypto >= 0) sample.crypto = index;
+      }
+      return;
+    }
+
+    const auto first_record = static_cast<uint32_t>(track.crypto.samples.size());
+    const auto first_subsample = static_cast<uint32_t>(track.crypto.subsamples.size());
+    track.crypto.subsamples.insert(track.crypto.subsamples.end(), subsamples.begin(),
+                                   subsamples.end());
+    for (CencSample& record : records) {
+      record.subsample_first += first_subsample;
+    }
+    track.crypto.samples.insert(track.crypto.samples.end(), records.begin(), records.end());
+
+    for (Sample& sample : samples) {
+      const auto number = static_cast<size_t>(sample.crypto);
+      const bool described = sample.crypto >= 0 && number < records.size() &&
+                             track.crypto.samples[first_record + number].is_protected;
+      sample.crypto = described ? static_cast<int32_t>(first_record + number) : -1;
+    }
+  }
+
+  // SampleEncryptionBox, ISO/IEC 23001-7 section 7.2: an initialization vector per
+  // sample and, when the flags say so, each sample's clear/protected split.
+  static void readSenc(const CryptoScope& scope, const SampleKeys& keys,
+                       std::vector<CencSample>& records,
+                       std::vector<SubsampleEntry>& subsamples) {
+    ByteReader r(scope.senc);
+    r.skip(1); // version
+    const uint32_t flags = r.u24be();
+    const uint32_t sample_count = r.u32be();
+    const bool has_subsamples = (flags & SENC_SUBSAMPLES) != 0;
+
+    // A record is at least an initialization vector or a subsample count, so the
+    // box body caps how many of them the count can describe.
+    const uint32_t count = clampEntryCount(r, sample_count, 2);
+    records.reserve(count);
+
+    for (uint32_t i = 0; i < count; ++i) {
+      CencSample record;
+      record.key_index = keys.indexOf(i);
+      if (!readCencAuxRecord(r, keys.at(i), has_subsamples, record, subsamples)) break;
+      records.push_back(record);
+    }
+  }
+
+  // The same records, where a container states them outside a `senc`: `saiz` gives
+  // each one's length and `saio` where they are. The length is also the only thing
+  // that says whether a record carries a subsample map -- one no longer than the
+  // initialization vector cannot, and an empty one means the sample is in the
+  // clear, which is how a clear lead is marked.
+  void readAuxInfo(const CryptoScope& scope, const SampleKeys& keys,
+                   std::vector<CencSample>& records,
+                   std::vector<SubsampleEntry>& subsamples) {
+    const auto sizeOf = [&](uint32_t sample) -> uint32_t {
+      if (scope.aux_default_size != 0) return scope.aux_default_size;
+      return sample < scope.aux_sizes.size() ? scope.aux_sizes[sample] : 0u;
+    };
+
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < scope.aux_sample_count; ++i) total += sizeOf(i);
+    if (total == 0 || total > random_.size()) return;
+
+    const size_t at = auxInfoOffset(scope.aux_offsets.front(), static_cast<size_t>(total));
+    if (at == NOT_IN_STREAM) return;
+
+    std::vector<uint8_t> storage;
+    const std::span<const uint8_t> aux = readBoxBody(at, static_cast<size_t>(total), storage);
+    if (fatal_ || aux.empty()) return;
+
+    ByteReader r(aux);
+    records.reserve(scope.aux_sample_count);
+    for (uint32_t i = 0; i < scope.aux_sample_count; ++i) {
+      const uint32_t size = sizeOf(i);
+      CencSample record;
+      record.key_index = keys.indexOf(i);
+
+      const CencKey& key = keys.at(i);
+      // Bounded to its own length so that a malformed record cannot read into the
+      // next sample's.
+      ByteReader entry = r.sub(size);
+      if (size == 0) {
+        record.is_protected = false;
+      } else if (!readCencAuxRecord(entry, key, size > key.iv_size, record, subsamples)) {
+        break;
+      }
+      records.push_back(record);
+    }
+  }
+
+  // `saio` gives the position of the auxiliary records in the file. Read a segment
+  // on its own and a file offset addresses nothing here, exactly as with a `tfhd`
+  // base data offset, so the enclosing `moof` is the fallback.
+  //
+  // Only the first offset is used. A box with one offset per chunk or per `trun`
+  // is read the same way, which is right wherever the records are stored back to
+  // back -- and they are, in everything that writes more than one offset.
+  auto auxInfoOffset(uint64_t offset, size_t length) const -> size_t {
+    const size_t stream_size = random_.size();
+    if (offset <= stream_size && length <= stream_size - offset) {
+      return static_cast<size_t>(offset);
+    }
+    const uint64_t from_moof = current_moof_offset_ + offset;
+    if (from_moof <= stream_size && length <= stream_size - from_moof) {
+      return static_cast<size_t>(from_moof);
+    }
+    return NOT_IN_STREAM;
+  }
+
+  // The public form of one sample's protection, built only for the packets that
+  // are read: the flat form above is what the sample table keeps.
+  static auto buildSampleEncryption(const BMFFTrack& track,
+                                    const CencSample& record) -> SampleEncryption {
+    const auto& keys = track.crypto.keys;
+    const CencKey& key = keys[record.key_index < keys.size() ? record.key_index : 0];
+
+    SampleEncryption out;
+    out.scheme = track.crypto.scheme;
+    memcpy(out.key_id, key.key_id, sizeof(out.key_id));
+    memcpy(out.iv, record.iv, sizeof(out.iv));
+    out.iv_size = record.iv_size;
+    out.crypt_byte_block = key.crypt_byte_block;
+    out.skip_byte_block = key.skip_byte_block;
+
+    const auto& all = track.crypto.subsamples;
+    const size_t first = record.subsample_first;
+    if (record.subsample_count != 0 && first <= all.size() &&
+        record.subsample_count <= all.size() - first) {
+      out.subsamples.assign(all.begin() + static_cast<ptrdiff_t>(first),
+                            all.begin() + static_cast<ptrdiff_t>(first + record.subsample_count));
+    }
+    return out;
   }
 
   void handleBox(uint32_t type, size_t box_start, size_t pos, uint64_t size) {
@@ -2495,6 +3431,7 @@ private:
         current_fragment_.emplace();
         current_fragment_->base_data_offset = current_moof_offset_;
         parseBoxes(pos, pos + size);
+        applyFragmentEncryption();
         current_fragment_ = saved_fragment;
         return;
       }
@@ -2549,6 +3486,13 @@ private:
     // there is nothing to parse and nothing to remember about the box itself.
     if (type == ATOM('m', 'd', 'a', 't')) return;
 
+    // A protection system header is handed to a DRM system whole, box header and
+    // all, so this one is taken as it stands rather than by its body.
+    if (type == ATOM('p', 's', 's', 'h')) {
+      collectPssh(box_start, pos + static_cast<size_t>(size));
+      return;
+    }
+
     // --- Leaf boxes: take the payload, then dispatch ---
     std::vector<uint8_t> body_storage;
     const std::span<const uint8_t> body = readBoxBody(pos, size, body_storage);
@@ -2576,6 +3520,28 @@ private:
 
     if (type == ATOM('t', 'r', 'u', 'n')) {
       parseTrun(body);
+      return;
+    }
+
+    // Common encryption's per-sample boxes. A `traf` is their usual home, and no
+    // `trak` is open while one is being read, so they are taken before the
+    // per-track dispatch below rather than within it.
+    if (type == ATOM('s', 'e', 'n', 'c') || type == ATOM('s', 'a', 'i', 'z') ||
+        type == ATOM('s', 'a', 'i', 'o') || type == ATOM('s', 'g', 'p', 'd')) {
+      if (CryptoScope* scope = cryptoScope()) {
+        switch (type) {
+          // Read later, against the keys this same scope may still redefine.
+          case ATOM('s', 'e', 'n', 'c'): scope->senc.assign(body.begin(), body.end()); break;
+          case ATOM('s', 'a', 'i', 'z'): parseSaiz(body, *scope); break;
+          case ATOM('s', 'a', 'i', 'o'): parseSaio(body, *scope); break;
+          default: parseSgpd(body, *scope); break;
+        }
+      }
+      return;
+    }
+
+    if (type == ATOM('s', 'b', 'g', 'p')) {
+      parseSampleToGroup(body);
       return;
     }
 
@@ -2609,11 +3575,6 @@ private:
       case ATOM('s', 't', 't', 's'): parseStts(body, track); break;
       case ATOM('c', 't', 't', 's'): parseCtts(body, track); break;
       case ATOM('s', 't', 's', 's'): parseStss(body, track); break;
-      case ATOM('s', 'b', 'g', 'p'):
-        // A traf's sbgp numbers the fragment's own samples; only stbl's maps
-        // onto the sample table built here.
-        if (!current_fragment_) parseSbgp(body, track);
-        break;
 
       // Video metadata
       case ATOM('b', 't', 'r', 't'): parseBtrt(body, track); break;
@@ -2665,17 +3626,20 @@ private:
 
       case ATOM('d', 'f', 'L', 'a'): parseDfla(body, track); break;
 
-      // Protection scheme info: the samples are encrypted, and this demuxer
-      // does not decrypt. Flag it so the caller can say so instead of handing
-      // a decoder ciphertext.
+      // Protection scheme info: which cipher the samples were encrypted with.
+      // Decrypting them is the caller's, since only it can hold a key -- what
+      // this demuxer owes it is the scheme, the key id and, per sample, the
+      // initialization vector and the parts of the payload the cipher covers.
       case ATOM('s', 'c', 'h', 'm'):
         if (body.size() >= 8) {
           track.track.metadata.setBool(ENCRYPTED, true);
+          track.crypto.scheme = encryptionSchemeOf(load_u32(body.data() + 4));
           char scheme[5] = {static_cast<char>(body[4]), static_cast<char>(body[5]),
                             static_cast<char>(body[6]), static_cast<char>(body[7]), 0};
           track.track.metadata.setString(ENCRYPTION_SCHEME, std::string_view(scheme));
         }
         break;
+      case ATOM('t', 'e', 'n', 'c'): parseTenc(body, track); break;
       // The original, now-protected sample format. Without it a `encv`/`enca`
       // entry says nothing about what is inside.
       case ATOM('f', 'r', 'm', 'a'):
@@ -2725,6 +3689,7 @@ private:
         std::min<uint64_t>(load_u32_be(count_buf), (size - 8) / 8));
 
     size_t entry_pos = pos + 8;
+    bool described = false;
     for (uint32_t i = 0; i < count && !fatal_; ++i) {
       if (entry_pos + 8 > stsd_end) return;
 
@@ -2741,7 +3706,17 @@ private:
       // sits in, leaves no way to find the next one.
       if (entry_size < 8 || entry_size > stsd_end - entry_pos) return;
 
-      if (parseSampleEntry(fmt, entry_pos, entry_pos + entry_size, st)) return;
+      // Which descriptions are protected is noted for all of them, not only the
+      // one that describes the track: a fragment pointing at an unprotected entry
+      // carries plaintext however the rest of the track is packaged, and that is
+      // how a stream's clear lead is written.
+      if (BMFFTrack* track = currentTrack()) {
+        track->protected_entries.push_back(isEncryptedEntry(fmt) ? 1u : 0u);
+      }
+
+      if (!described && parseSampleEntry(fmt, entry_pos, entry_pos + entry_size, st)) {
+        described = true;
+      }
 
       entry_pos += entry_size;
     }
