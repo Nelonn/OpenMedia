@@ -83,16 +83,20 @@ public:
     end_of_stream_sent_ = false;
     auto result = decode(packet);
     if (result.isErr()) return result.unwrapErr();
-    for (auto& frame : result.unwrap()) pending_frames_.push_back(std::move(frame));
+    for (auto& frame : result.unwrap()) {
+      pending_frames_.push_back(std::move(frame));
+    }
     return OM_SUCCESS;
   }
 
   virtual auto sendEndOfStream() -> OMError {
     if (!pending_frames_.empty()) return OM_CODEC_NEED_MORE_DATA;
-    end_of_stream_sent_ = true;
     auto result = decode(Packet {});
     if (result.isErr()) return result.unwrapErr();
-    for (auto& frame : result.unwrap()) pending_frames_.push_back(std::move(frame));
+    for (auto& frame : result.unwrap()) {
+      pending_frames_.push_back(std::move(frame));
+    }
+    end_of_stream_sent_ = true;
     return OM_SUCCESS;
   }
 
@@ -239,6 +243,10 @@ public:
   virtual auto getInfo() -> EncodingInfo = 0;
 
   virtual auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> = 0;
+
+  virtual auto finish() -> Result<std::vector<Packet>, OMError> {
+    return Err(OM_COMMON_NOT_IMPLEMENTED);
+  }
 
   virtual auto updateBitrate(const RateControlParams& rc) -> OMError = 0;
 };
