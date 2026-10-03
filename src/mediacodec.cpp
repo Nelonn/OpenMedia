@@ -20,6 +20,10 @@ constexpr int32_t YUV420_SEMI_PLANAR = 21;
 constexpr int32_t PCM16_BIT = 2;
 constexpr int32_t PCM_FLOAT = 4;
 
+// The NDK symbols were exported later than the corresponding MediaCodec keys.
+constexpr const char* PCM_ENCODING_KEY = "pcm-encoding";
+constexpr const char* VIDEO_BITRATE_KEY = "video-bitrate";
+
 auto codecIdToMime(OMCodecId id) -> const char* {
   switch (id) {
     case OM_CODEC_H264: return "video/avc";
@@ -119,7 +123,7 @@ class MediaCodecDecoder final : public Decoder {
           rate <= 0 || channels <= 0) {
         result = OM_CODEC_DECODE_FAILED;
       } else {
-        AMediaFormat_getInt32(output, AMEDIAFORMAT_KEY_PCM_ENCODING, &pcm);
+        AMediaFormat_getInt32(output, PCM_ENCODING_KEY, &pcm);
         if (pcm != PCM16_BIT && pcm != PCM_FLOAT) {
           result = OM_CODEC_NOT_SUPPORTED;
         } else {
@@ -466,7 +470,7 @@ public:
         return OM_CODEC_INVALID_PARAMS;
       AMediaFormat_setInt32(format_, AMEDIAFORMAT_KEY_SAMPLE_RATE, static_cast<int32_t>(audio.sample_rate));
       AMediaFormat_setInt32(format_, AMEDIAFORMAT_KEY_CHANNEL_COUNT, static_cast<int32_t>(audio.channels));
-      AMediaFormat_setInt32(format_, AMEDIAFORMAT_KEY_PCM_ENCODING, PCM16_BIT);
+      AMediaFormat_setInt32(format_, PCM_ENCODING_KEY, PCM16_BIT);
     }
     OMError bitrate_status = updateBitrate(options.rate_control);
     if (bitrate_status != OM_SUCCESS) return bitrate_status;
@@ -608,7 +612,7 @@ public:
     if (type_ != OM_MEDIA_VIDEO) return OM_COMMON_NOT_SUPPORTED;
     AMediaFormat* params = AMediaFormat_new();
     if (!params) return OM_COMMON_OUT_OF_MEMORY;
-    AMediaFormat_setInt32(params, AMEDIACODEC_KEY_VIDEO_BITRATE,
+    AMediaFormat_setInt32(params, VIDEO_BITRATE_KEY,
                           static_cast<int32_t>(bitrate));
     media_status_t status = AMediaCodec_setParameters(codec_, params);
     AMediaFormat_delete(params);
