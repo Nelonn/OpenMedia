@@ -138,7 +138,7 @@ public:
   auto isValid() const -> bool override { return true; }
 
   auto skip(size_t bytes) -> bool override {
-    return seek(bytes, Whence::BEG);
+    return seek(static_cast<int64_t>(bytes), Whence::CUR);
   }
 
   auto canSeek() const -> bool override {
@@ -149,7 +149,7 @@ public:
     int64_t new_pos = 0;
     switch (whence) {
       case Whence::BEG:
-        new_pos = static_cast<size_t>(pos);
+        new_pos = pos;
         break;
       case Whence::CUR:
         new_pos = static_cast<int64_t>(pos_) + pos;
