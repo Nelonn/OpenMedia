@@ -223,8 +223,11 @@ inline void reportTracks(const std::vector<openmedia::Track>& tracks) {
     if (track.format.type == OM_MEDIA_ATTACHMENT) continue;
     const std::string language = track.metadata.getString(LANGUAGE, "-");
     const std::string title = track.metadata.getString(TITLE, "-");
-    SDL_Log("[Track] #%zu %s codec=%d lang=%s title=%s%s", i, mediaTypeName(track.format.type),
-            int(track.format.codec_id), language.c_str(), title.c_str(),
+    const double duration = track.duration > 0 && track.time_base.den != 0
+                                ? double(track.duration) * track.time_base.num / track.time_base.den
+                                : 0.0;
+    SDL_Log("[Track] #%zu %s codec=%d dur=%.3fs lang=%s title=%s%s", i, mediaTypeName(track.format.type),
+            int(track.format.codec_id), duration, language.c_str(), title.c_str(),
             (track.disposition & OM_DISPOSITION_DEFAULT) ? " (default)" : "");
   }
 }

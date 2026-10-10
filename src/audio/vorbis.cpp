@@ -240,9 +240,6 @@ class VorbisDecoder final : public Decoder {
   int64_t anchored_at_ = -1;
   int header_packets_ = 0;
   bool initialized_ = false;
-  // Ogg timestamps are granule positions: they count samples and mark the end
-  // of a packet. Every other container gives a start time in its own base.
-  bool pts_in_samples_ = false;
 
 public:
   VorbisDecoder() {
@@ -302,10 +299,9 @@ public:
     }
     if (!initialized_) return Ok(std::vector<Frame> {});
 
-    ogg_packet op = makeOggPacket(packet.bytes,
-                                  pts_in_samples_ ? packet.pts : -1,
-                                  packet_count_++,
-                                  false);
+    // A granule position would let libvorbis trim the final short packet, but a
+    // Packet carries a start time instead, so there is none to hand over.
+    ogg_packet op = makeOggPacket(packet.bytes, -1, packet_count_++, false);
     if (vorbis_synthesis(&vb_, &op) != 0) return Ok(std::vector<Frame> {});
     if (vorbis_synthesis_blockin(&vd_, &vb_) != 0) return Ok(std::vector<Frame> {});
 
@@ -365,7 +361,6 @@ private:
     output_format_.sample_rate = static_cast<uint32_t>(vi_.rate);
     output_format_.channels = static_cast<uint32_t>(vi_.channels);
     output_format_.planar = false;
-    pts_in_samples_ = time_base_.num == 1 && time_base_.den == vi_.rate;
     return OM_SUCCESS;
   }
 
@@ -383,13 +378,7 @@ private:
 
     anchored_at_ = packet_pts;
     anchor_samples_ = 0;
-    if (!pts_in_samples_) {
-      anchor_pts_ = packet_pts;
-      return;
-    }
-    // A granule position marks the last sample the packet completed, so the
-    // samples still pending have to be counted back off it.
-    anchor_pts_ = std::max<int64_t>(packet_pts - vorbis_synthesis_pcmout(&vd_, nullptr), 0);
+    anchor_pts_ = packet_pts;
   }
 
   auto takePts(int64_t samples) -> int64_t {
@@ -399,7 +388,7 @@ private:
   }
 
   auto samplesToTimeBase(int64_t samples) const -> int64_t {
-    if (pts_in_samples_ || time_base_.num <= 0 || time_base_.den <= 0 || vi_.rate <= 0) {
+    if (time_base_.num <= 0 || time_base_.den <= 0 || vi_.rate <= 0) {
       return samples;
     }
     return samples * time_base_.den / (static_cast<int64_t>(vi_.rate) * time_base_.num);
