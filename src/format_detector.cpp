@@ -101,6 +101,16 @@ static auto skipId3v2(std::span<const uint8_t> data) -> size_t {
   return tag_size;
 }
 
+static auto isMpegAudioFrame(std::span<const uint8_t> data) -> bool {
+  if (data.size() < 3) return false;
+  if (data[0] != 0xFF || (data[1] & 0xE0) != 0xE0) return false;
+  const uint8_t version = (data[1] >> 3) & 0x03;       // 01 is reserved
+  const uint8_t layer = (data[1] >> 1) & 0x03;         // 00 is reserved, and is what ADTS has here
+  const uint8_t bitrate_index = (data[2] >> 4) & 0x0F; // 1111 is invalid
+  const uint8_t rate_index = (data[2] >> 2) & 0x03;    // 11 is reserved
+  return version != 0x01 && layer != 0x00 && bitrate_index != 0x0F && rate_index != 0x03;
+}
+
 void FormatDetector::addStandardAudio() {
   addDetector([](std::span<const uint8_t> data) -> DetectedFormat {
     const uint32_t v0 = load_u32(data.data());
@@ -114,7 +124,7 @@ void FormatDetector::addStandardAudio() {
       }
       return DetectedFormat::fromContainer(OM_CONTAINER_MP3);
     }
-    if ((v0 & 0xFFFE) == 0xFFFA) return DetectedFormat::fromContainer(OM_CONTAINER_MP3);
+    if (isMpegAudioFrame(data)) return DetectedFormat::fromContainer(OM_CONTAINER_MP3);
     if (data.size() >= 8 && load_u32(data.data() + 4) == magic_u32('f', 't', 'y', 'p')) {
       uint32_t v8 = data.size() >= 12 ? load_u32(data.data() + 8) : 0;
       if (v8 == magic_u32('M', '4', 'A', ' ')) return DetectedFormat::fromContainer(OM_CONTAINER_M4A);
