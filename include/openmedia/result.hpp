@@ -19,207 +19,190 @@ struct ErrTag {
 };
 
 template<class T>
-auto Ok(T&& value) -> OkTag<T&&> {
+constexpr auto Ok(T&& value) noexcept -> OkTag<T&&> {
   return {std::forward<T>(value)};
 }
 
 template<class E>
-auto Err(E&& error) -> ErrTag<E&&> {
+constexpr auto Err(E&& error) noexcept -> ErrTag<E&&> {
   return {std::forward<E>(error)};
 }
 
 template<class T, class E>
+class Result;
+
+template<class R>
+struct is_result : std::false_type {};
+
+template<class T, class E>
+struct is_result<Result<T, E>> : std::true_type {};
+
+template<class T, class E>
 class Result {
   template<class K>
-  struct StorageType {
-    using type = K;
-  };
-
-  template<class K>
-  struct StorageType<K&> {
-    using type = std::reference_wrapper<std::remove_reference_t<K>>;
-  };
-
-  template<class K>
-  using storage_t = typename StorageType<K>::type;
+  using storage_t = std::conditional_t<std::is_reference_v<K>,
+                                       std::reference_wrapper<std::remove_reference_t<K>>,
+                                       K>;
 
   using ok_storage_t = storage_t<T>;
   using err_storage_t = storage_t<E>;
 
   std::variant<ok_storage_t, err_storage_t> storage_;
 
-  template<class U>
-  static auto wrapValue(U&& value) -> ok_storage_t {
-    if constexpr (std::is_reference_v<T>) {
-      return std::ref(value);
-    } else {
-      return ok_storage_t(std::forward<U>(value));
-    }
+  template<class K, class U>
+  static constexpr void checkNoDangling() {
+    static_assert(!std::is_reference_v<K> || std::is_lvalue_reference_v<U>,
+                  "Result<T&, ...> cannot bind to a temporary");
   }
 
-  template<class U>
-  static auto wrapError(U&& error) -> err_storage_t {
-    if constexpr (std::is_reference_v<E>) {
-      return std::ref(error);
-    } else {
-      return err_storage_t(std::forward<U>(error));
-    }
-  }
+  template<class K>
+  static constexpr auto unref(K& v) noexcept -> K& { return v; }
+  template<class K>
+  static constexpr auto unref(std::reference_wrapper<K>& v) noexcept -> K& { return v.get(); }
+  template<class K>
+  static constexpr auto unref(const std::reference_wrapper<K>& v) noexcept -> K& { return v.get(); }
 
-  explicit Result(std::in_place_index_t<0>, ok_storage_t v)
-      : storage_(std::in_place_index<0>, std::move(v)) {}
+  constexpr auto& okSlot() noexcept { return *std::get_if<0>(&storage_); }
+  constexpr auto& okSlot() const noexcept { return *std::get_if<0>(&storage_); }
+  constexpr auto& errSlot() noexcept { return *std::get_if<1>(&storage_); }
+  constexpr auto& errSlot() const noexcept { return *std::get_if<1>(&storage_); }
 
-  explicit Result(std::in_place_index_t<1>, err_storage_t e)
-      : storage_(std::in_place_index<1>, std::move(e)) {}
+  template<std::size_t I, class U>
+  constexpr Result(std::in_place_index_t<I> idx, U&& v) : storage_(idx, std::forward<U>(v)) {}
 
 public:
   using ok_type = T;
   using err_type = E;
 
   Result() = delete;
-  Result(const Result&) = default;
-  Result(Result&&) noexcept = default;
-  auto operator=(const Result&) -> Result& = default;
-  auto operator=(Result&&) noexcept -> Result& = default;
 
-  static auto makeOk(T value) -> Result {
-    return Result(std::in_place_index<0>, wrapValue(std::forward<T>(value)));
+  template<class U = T>
+  static constexpr auto makeOk(U&& value) -> Result {
+    checkNoDangling<T, U&&>();
+    return Result(std::in_place_index<0>, std::forward<U>(value));
   }
 
-  static auto makeErr(E error) -> Result {
-    return Result(std::in_place_index<1>, wrapError(std::forward<E>(error)));
+  template<class U = E>
+  static constexpr auto makeErr(U&& error) -> Result {
+    checkNoDangling<E, U&&>();
+    return Result(std::in_place_index<1>, std::forward<U>(error));
   }
 
-  template<class U>
-  Result(OkTag<U> tag)
-      : storage_(std::in_place_index<0>, wrapValue(std::forward<U>(tag.value))) {}
+  template<class U, std::enable_if_t<std::is_constructible_v<ok_storage_t, U&&>, int> = 0>
+  constexpr Result(OkTag<U> tag) : storage_(std::in_place_index<0>, std::forward<U>(tag.value)) {
+    checkNoDangling<T, U>();
+  }
 
-  template<class U>
-  Result(ErrTag<U> tag)
-      : storage_(std::in_place_index<1>, wrapError(std::forward<U>(tag.value))) {}
+  template<class U, std::enable_if_t<std::is_constructible_v<err_storage_t, U&&>, int> = 0>
+  constexpr Result(ErrTag<U> tag) : storage_(std::in_place_index<1>, std::forward<U>(tag.value)) {
+    checkNoDangling<E, U>();
+  }
 
-  auto isOk() const noexcept -> bool { return storage_.index() == 0; }
-  auto isErr() const noexcept -> bool { return storage_.index() == 1; }
+  constexpr auto isOk() const noexcept -> bool { return storage_.index() == 0; }
+  constexpr auto isErr() const noexcept -> bool { return storage_.index() == 1; }
 
-  explicit operator bool() const noexcept { return isOk(); }
+  constexpr explicit operator bool() const noexcept { return isOk(); }
 
-  auto unwrap() & -> T& {
+  constexpr auto unwrap() & noexcept -> T& {
+    assert(isOk() && "Result::unwrap() called on Err");
+    return unref(okSlot());
+  }
+
+  constexpr auto unwrap() const& noexcept -> const T& {
+    assert(isOk() && "Result::unwrap() called on Err");
+    return unref(okSlot());
+  }
+
+  constexpr auto unwrap() && -> T {
     assert(isOk() && "Result::unwrap() called on Err");
     if constexpr (std::is_reference_v<T>) {
-      return std::get<0>(storage_).get();
+      return unref(okSlot());
     } else {
-      return std::get<0>(storage_);
+      return std::move(okSlot());
     }
   }
 
-  auto unwrap() const& -> const T& {
-    assert(isOk() && "Result::unwrap() called on Err");
-    if constexpr (std::is_reference_v<T>) {
-      return std::get<0>(storage_).get();
-    } else {
-      return std::get<0>(storage_);
-    }
+  constexpr auto unwrapErr() & noexcept -> E& {
+    assert(isErr() && "Result::unwrapErr() called on Ok");
+    return unref(errSlot());
   }
 
-  auto unwrap() && -> T {
-    assert(isOk() && "Result::unwrap() called on Err");
-    if constexpr (std::is_reference_v<T>) {
-      return std::get<0>(storage_).get();
-    } else {
-      return std::move(std::get<0>(storage_));
-    }
+  constexpr auto unwrapErr() const& noexcept -> const E& {
+    assert(isErr() && "Result::unwrapErr() called on Ok");
+    return unref(errSlot());
   }
 
-  auto unwrapErr() & -> E& {
+  constexpr auto unwrapErr() && -> E {
     assert(isErr() && "Result::unwrapErr() called on Ok");
     if constexpr (std::is_reference_v<E>) {
-      return std::get<1>(storage_).get();
+      return unref(errSlot());
     } else {
-      return std::get<1>(storage_);
-    }
-  }
-
-  auto unwrapErr() const& -> const E& {
-    assert(isErr() && "Result::unwrapErr() called on Ok");
-    if constexpr (std::is_reference_v<E>) {
-      return std::get<1>(storage_).get();
-    } else {
-      return std::get<1>(storage_);
-    }
-  }
-
-  auto unwrapErr() && -> E {
-    assert(isErr() && "Result::unwrapErr() called on Ok");
-    if constexpr (std::is_reference_v<E>) {
-      return std::get<1>(storage_).get();
-    } else {
-      return std::move(std::get<1>(storage_));
+      return std::move(errSlot());
     }
   }
 
   template<class U>
-  auto unwrapOr(U&& fallback) const& -> T {
-    return isOk() ? unwrap() : static_cast<T>(std::forward<U>(fallback));
+  constexpr auto unwrapOr(U&& fallback) const& -> T {
+    if (isOk()) return unwrap();
+    return static_cast<T>(std::forward<U>(fallback));
   }
 
   template<class U>
-  auto unwrapOr(U&& fallback) && -> T {
-    return isOk() ? std::move(*this).unwrap() : static_cast<T>(std::forward<U>(fallback));
+  constexpr auto unwrapOr(U&& fallback) && -> T {
+    if (isOk()) return std::move(*this).unwrap();
+    return static_cast<T>(std::forward<U>(fallback));
   }
 
   template<class F>
-  auto map(F&& fn) & {
-    using U = std::invoke_result_t<F, T&>;
-    using ResultU = Result<U, E>;
-    if (isOk()) return ResultU::makeOk(std::invoke(std::forward<F>(fn), unwrap()));
-    return ResultU::makeErr(unwrapErr());
+  constexpr auto unwrapOrElse(F&& fn) const& -> T {
+    if (isOk()) return unwrap();
+    return std::invoke(std::forward<F>(fn), unwrapErr());
   }
 
   template<class F>
-  auto map(F&& fn) const& {
-    using U = std::invoke_result_t<F, const T&>;
-    using ResultU = Result<U, E>;
-    if (isOk()) return ResultU::makeOk(std::invoke(std::forward<F>(fn), unwrap()));
-    return ResultU::makeErr(unwrapErr());
+  constexpr auto unwrapOrElse(F&& fn) && -> T {
+    if (isOk()) return std::move(*this).unwrap();
+    return std::invoke(std::forward<F>(fn), std::move(*this).unwrapErr());
   }
 
-  template<class F>
-  auto map(F&& fn) && {
-    using U = std::invoke_result_t<F, T>;
-    using ResultU = Result<U, E>;
-    if (isOk()) return ResultU::makeOk(std::invoke(std::forward<F>(fn), std::move(*this).unwrap()));
-    return ResultU::makeErr(std::move(*this).unwrapErr());
+private:
+  template<class Self, class F>
+  static constexpr auto mapImpl(Self&& self, F&& fn) {
+    using U = std::invoke_result_t<F, decltype(std::forward<Self>(self).unwrap())>;
+    using R = Result<U, E>;
+    if (self.isOk()) return R::makeOk(std::invoke(std::forward<F>(fn), std::forward<Self>(self).unwrap()));
+    return R::makeErr(std::forward<Self>(self).unwrapErr());
   }
 
-  template<class F>
-  auto mapErr(F&& fn) & {
-    using G = std::invoke_result_t<F, E&>;
-    using ResultG = Result<T, G>;
-    if (isErr()) return ResultG::makeErr(std::invoke(std::forward<F>(fn), unwrapErr()));
-    return ResultG::makeOk(unwrap());
+  template<class Self, class F>
+  static constexpr auto mapErrImpl(Self&& self, F&& fn) {
+    using G = std::invoke_result_t<F, decltype(std::forward<Self>(self).unwrapErr())>;
+    using R = Result<T, G>;
+    if (self.isErr()) return R::makeErr(std::invoke(std::forward<F>(fn), std::forward<Self>(self).unwrapErr()));
+    return R::makeOk(std::forward<Self>(self).unwrap());
   }
 
-  template<class F>
-  auto mapErr(F&& fn) && {
-    using G = std::invoke_result_t<F, E>;
-    using ResultG = Result<T, G>;
-    if (isErr()) return ResultG::makeErr(std::invoke(std::forward<F>(fn), std::move(*this).unwrapErr()));
-    return ResultG::makeOk(std::move(*this).unwrap());
+  template<class Self, class F>
+  static constexpr auto andThenImpl(Self&& self, F&& fn) {
+    using R = std::invoke_result_t<F, decltype(std::forward<Self>(self).unwrap())>;
+    static_assert(is_result<std::remove_cv_t<std::remove_reference_t<R>>>::value,
+                  "andThen: callback must return a Result");
+    if (self.isOk()) return std::invoke(std::forward<F>(fn), std::forward<Self>(self).unwrap());
+    return R::makeErr(std::forward<Self>(self).unwrapErr());
   }
 
-  template<class F>
-  auto andThen(F&& fn) & {
-    using Ret = std::invoke_result_t<F, T&>;
-    if (isOk()) return std::invoke(std::forward<F>(fn), unwrap());
-    return Ret::makeErr(unwrapErr());
-  }
+public:
+  template<class F> constexpr auto map(F&& fn) & { return mapImpl(*this, std::forward<F>(fn)); }
+  template<class F> constexpr auto map(F&& fn) const& { return mapImpl(*this, std::forward<F>(fn)); }
+  template<class F> constexpr auto map(F&& fn) && { return mapImpl(std::move(*this), std::forward<F>(fn)); }
 
-  template<class F>
-  auto andThen(F&& fn) && {
-    using Ret = std::invoke_result_t<F, T>;
-    if (isOk()) return std::invoke(std::forward<F>(fn), std::move(*this).unwrap());
-    return Ret::makeErr(std::move(*this).unwrapErr());
-  }
+  template<class F> constexpr auto mapErr(F&& fn) & { return mapErrImpl(*this, std::forward<F>(fn)); }
+  template<class F> constexpr auto mapErr(F&& fn) const& { return mapErrImpl(*this, std::forward<F>(fn)); }
+  template<class F> constexpr auto mapErr(F&& fn) && { return mapErrImpl(std::move(*this), std::forward<F>(fn)); }
+
+  template<class F> constexpr auto andThen(F&& fn) & { return andThenImpl(*this, std::forward<F>(fn)); }
+  template<class F> constexpr auto andThen(F&& fn) const& { return andThenImpl(*this, std::forward<F>(fn)); }
+  template<class F> constexpr auto andThen(F&& fn) && { return andThenImpl(std::move(*this), std::forward<F>(fn)); }
 };
 
 template<class T, class E>
