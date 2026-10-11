@@ -10,6 +10,8 @@
 
 namespace openmedia {
 
+static void png_warning_handler(png_structp png, png_const_charp message) {}
+
 struct PNGReadStruct {
   const uint8_t* data = nullptr;
   size_t size = 0;
@@ -57,7 +59,7 @@ class PNGDecoder final : public Decoder {
 
 public:
   PNGDecoder() {
-    png_ptr_ = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_ptr_ = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, png_warning_handler);
     if (png_ptr_) {
       info_ptr_ = png_create_info_struct(png_ptr_);
     }
@@ -180,7 +182,7 @@ public:
       png_destroy_read_struct(&png_ptr_, nullptr, nullptr);
     }
 
-    png_ptr_ = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_ptr_ = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, png_warning_handler);
     if (png_ptr_) {
       info_ptr_ = png_create_info_struct(png_ptr_);
     }
