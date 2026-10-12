@@ -112,6 +112,12 @@ struct Resolution {
 // `#EXT-X-STREAM-INF`, one rendition of the whole presentation.
 struct Variant {
   std::string url; // resolved; the media playlist to fetch next
+  // Where the same rendition is published besides `url`, in the order the playlist
+  // listed them. A master playlist that repeats a variant with the attributes
+  // unchanged is not offering another quality, it is offering another place to get
+  // that one from when the first cannot be reached -- RFC 8216 6.3.1. Those entries
+  // are collapsed into the first of them and end up here.
+  std::vector<std::string> backup_urls;
   uint32_t bandwidth = 0;
   uint32_t average_bandwidth = 0;
   std::string codecs;

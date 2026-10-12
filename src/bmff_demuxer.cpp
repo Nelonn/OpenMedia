@@ -4343,7 +4343,7 @@ private:
 // caller needs. Wrapping rather than inheriting keeps `Demuxer` and this out of
 // each other's way: one is opened on a stream and seeks within it, the other is
 // handed segments and has no stream at all.
-class FragmentReader final : public FragmentedMP4Reader {
+class FragmentReader final : public SegmentReader {
   BMFFDemuxer demuxer_;
 
 public:
@@ -4372,7 +4372,7 @@ public:
 
 } // namespace
 
-auto createFragmentedMP4Reader() -> std::unique_ptr<FragmentedMP4Reader> {
+auto createFragmentedMP4Reader() -> std::unique_ptr<SegmentReader> {
   return std::make_unique<FragmentReader>();
 }
 

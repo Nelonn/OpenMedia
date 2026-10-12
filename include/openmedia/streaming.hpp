@@ -176,6 +176,21 @@ OPENMEDIA_ABI auto openDashManifest(std::span<const uint8_t> mpd_xml,
 // HLS
 // ---------------------------------------------------------------------------
 
+/** One rendition a master playlist offers, as the playlist describes it. */
+struct OPENMEDIA_ABI HlsVariant {
+  std::string url; // the media playlist this rendition's segments are listed in
+  // The same rendition published elsewhere, for when `url` cannot be reached. A
+  // master playlist repeating a variant with its attributes unchanged is naming
+  // another address for it rather than another quality (RFC 8216 6.3.1), and such
+  // entries are reported here rather than as variants of their own.
+  std::vector<std::string> backup_urls;
+  std::string codecs;
+  uint32_t bandwidth = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool chosen = false; // what StreamOptions picked, and what needed() asks for
+};
+
 /**
  * HLS, built from playlists the caller has already fetched.
  *
@@ -210,6 +225,18 @@ public:
    * hand becomes something selectRepresentation() can move to.
    */
   virtual auto needed() const -> std::vector<std::string> = 0;
+
+  /** The ladder the master playlist offers, best first, one entry per rendition
+   * however many times the playlist listed it. Empty for a stream published as a
+   * single media playlist, which is its own only rendition.
+   *
+   * What it is for: needed() asks for one rung, since reading a presentation means
+   * reading one. Fetching further rungs and add()ing them is what makes
+   * selectRepresentation() able to move between them later -- and if the chosen
+   * rung cannot be fetched, add()ing one of its backup_urls instead is enough for
+   * open() to succeed.
+   */
+  virtual auto variants() const -> std::vector<HlsVariant> = 0;
 
   virtual auto open() -> Result<std::unique_ptr<SegmentedDemuxer>, OMError> = 0;
 };

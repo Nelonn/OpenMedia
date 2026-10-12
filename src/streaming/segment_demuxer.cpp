@@ -4,6 +4,7 @@
 #include <bmff_fragment.hpp>
 #include <cctype>
 #include <map>
+#include <mpegts.hpp>
 #include <openmedia/io.hpp>
 #include <openmedia/metadata_keys.hpp>
 #include <optional>
@@ -67,7 +68,7 @@ class SegmentDemuxer final : public SegmentedDemuxer {
   struct Stream {
     const SegmentTrack* track = nullptr;
     size_t alternative = 0;
-    std::unique_ptr<FragmentedMP4Reader> reader;
+    std::unique_ptr<SegmentReader> reader;
 
     // Reader track index to the index this demuxer publishes it under. One
     // alternative carries one track in all but pathological cases, but nothing in
@@ -131,12 +132,17 @@ public:
       stream.track = track;
       stream.alternative = chooseAlternative(*track);
 
-      // Without an initialization segment the media is either a plain MP4
-      // addressed by byte range or an MPEG-TS stream. Both want a different reader
-      // than one fed whole fragmented-MP4 segments.
-      if (!track->alternatives[stream.alternative]->initSegment()) continue;
-
-      stream.reader = createFragmentedMP4Reader();
+      // An initialization section settles the matter: those segments are
+      // fragmented MP4. Without one they are MPEG-TS -- which is how HLS was
+      // published for a decade and how most of the web still serves it -- or else
+      // fragmented MP4 whose every segment carries a header of its own, and only
+      // the bytes say which. The one put here stands in until the first segment
+      // settles it, so that a stream always has a reader to answer for it: before
+      // then an unprimed reader says it needs a segment and holds no packet, which
+      // is exactly the truth of the matter.
+      stream.reader = track->alternatives[stream.alternative]->initSegment()
+                          ? createFragmentedMP4Reader()
+                          : createMpegTsReader();
       if (!stream.reader) return OM_COMMON_OUT_OF_MEMORY;
       streams_.push_back(std::move(stream));
     }
@@ -258,6 +264,9 @@ public:
           return OM_COMMON_OVERFLOW;
         }
         stream.hold(ordinal, std::move(bytes));
+        // These may be the bytes a stream with no initialization section was
+        // waiting on to describe itself.
+        if (stream.needs_init) settleInitsIfComplete();
         return OM_SUCCESS;
       }
     }
@@ -312,11 +321,20 @@ public:
     const size_t chosen = static_cast<size_t>(found - alternatives.begin());
     if (chosen == stream->alternative) return OM_SUCCESS;
 
-    // Where the switch lands: the segment after the one being read. Whatever is
-    // buffered belongs to the old alternative and is dropped, since its bytes
-    // decode against the old initialization segment.
-    const int64_t resume_ns = scaleToNs(currentMediaTime(*stream), stream->index().timescale());
+    // Where the switch lands: the segment after the ones already read, named by the
+    // time it starts at, since the two alternatives number their segments
+    // independently. `read_ordinal` is the segment the old alternative had not
+    // reached -- whether its reader is part-way through the one before it or has run
+    // dry exactly on the boundary -- and that instant is the one the two have in
+    // common. Resuming from the time being read instead would land back inside a
+    // segment already delivered and hand out its packets a second time, timestamps
+    // and all.
+    const auto boundary = stream->index().segmentAt(stream->read_ordinal);
+    const int64_t resume_ns =
+        boundary ? scaleToNs(boundary->time, stream->index().timescale()) : -1;
 
+    // Whatever is buffered belongs to the old alternative and is dropped, since its
+    // bytes decode against the old initialization segment.
     stream->alternative = chosen;
     stream->dropHeld();
     stream->init_inbox.reset();
@@ -325,7 +343,13 @@ public:
     stream->reader->flushSegments();
 
     const SegmentIndex& index = stream->index();
-    stream->read_ordinal = index.ordinalForTime(nsToScale(resume_ns, index.timescale()));
+    if (resume_ns >= 0) {
+      stream->read_ordinal = index.ordinalForTime(nsToScale(resume_ns, index.timescale()));
+    } else {
+      // The old alternative had been read to its end, so the new one starts there
+      // too: a switch is not a reason to play anything over again.
+      stream->read_ordinal = index.segmentCount().value_or(0);
+    }
     ready_ = false;
     return OM_SUCCESS;
   }
@@ -507,14 +531,6 @@ private:
     return nullptr;
   }
 
-  // In the stream's own timescale.
-  auto currentMediaTime(const Stream& stream) const -> int64_t {
-    const int64_t dts = stream.reader->nextDecodeTimeNs();
-    if (dts != INT64_MAX) return nsToScale(dts, stream.index().timescale());
-    const auto segment = stream.index().segmentAt(stream.read_ordinal);
-    return segment ? segment->time : 0;
-  }
-
   auto pendingStartNs(const Stream& stream) const -> int64_t {
     if (stream.needs_init) return INT64_MIN; // nothing can be read before this
     const auto segment = stream.index().segmentAt(stream.read_ordinal);
@@ -537,16 +553,65 @@ private:
   auto ensureInit(Stream& stream) -> OMError {
     if (!stream.needs_init) return OM_SUCCESS;
 
-    const auto request = stream.index().initSegment();
-    if (!request) return OM_FORMAT_NOT_SUPPORTED;
+    if (const auto request = stream.index().initSegment()) {
+      auto bytes = obtain(*request, stream.init_inbox);
+      if (bytes.isErr()) return std::move(bytes).unwrapErr();
 
-    auto bytes = obtain(*request, stream.init_inbox);
-    if (bytes.isErr()) return std::move(bytes).unwrapErr();
+      const OMError error = stream.reader->openInit(std::move(bytes).unwrap());
+      if (error != OM_SUCCESS) return error;
+      stream.needs_init = false;
+      return OM_SUCCESS;
+    }
+    return primeFromFirstSegment(stream);
+  }
 
-    const OMError error = stream.reader->openInit(std::move(bytes).unwrap());
-    if (error != OM_SUCCESS) return error;
-    stream.needs_init = false;
-    return OM_SUCCESS;
+  // A stream the manifest gave no initialization section for is settled by its own
+  // first media segment: the headers are in there, repeated, and the samples beside
+  // them are read as media like any others. Nothing is spent on being a header,
+  // which is the whole point of the shape.
+  auto primeFromFirstSegment(Stream& stream) -> OMError {
+    for (int attempt = 0; attempt < MAX_EMPTY_SEGMENTS; ++attempt) {
+      const SegmentIndex& index = stream.index();
+      const auto segment = index.segmentAt(stream.read_ordinal);
+      if (!segment) return OM_FORMAT_NO_STREAMS;
+
+      std::optional<std::vector<uint8_t>> held = stream.take(stream.read_ordinal);
+      auto fetched = obtain(segment->request, held);
+      if (fetched.isErr()) {
+        // Put it back, so a fetch that failed or declined leaves the stream able to
+        // try the very same segment again.
+        if (held) stream.hold(stream.read_ordinal, std::move(*held));
+        return std::move(fetched).unwrapErr();
+      }
+      std::vector<uint8_t> bytes = std::move(fetched).unwrap();
+
+      // A reader of its own every time, the way openInit() gives the fragmented-MP4
+      // path a clean slate: priming also happens after a quality switch, and the
+      // rendition switched to may be laid out nothing like the one before it --
+      // another program, other stream identifiers.
+      const bool transport_stream = looksLikeMpegTs(bytes);
+      stream.reader = transport_stream ? createMpegTsReader() : createFragmentedMP4Reader();
+      if (!stream.reader) return OM_COMMON_OUT_OF_MEMORY;
+      // Self-contained fragmented MP4 has to read its own header before the samples
+      // sitting behind it in the same bytes, so that one segment is handed over
+      // twice -- the only copy any of this makes.
+      const OMError opened =
+          transport_stream ? stream.reader->openInit({}) : stream.reader->openInit(bytes);
+      if (opened != OM_SUCCESS) return opened;
+
+      stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()));
+      const OMError pushed = stream.reader->pushSegment(std::move(bytes));
+      ++stream.read_ordinal;
+      if (pushed != OM_SUCCESS && pushed != OM_FORMAT_NO_STREAMS) return pushed;
+
+      // Priming is a property of the stream rather than of one segment: a segment
+      // that described no track leaves it unprimed, and the next one is tried.
+      if (!stream.reader->tracks().empty()) {
+        stream.needs_init = false;
+        return OM_SUCCESS;
+      }
+    }
+    return OM_FORMAT_CORRUPTED;
   }
 
   // In stream order, so a track index does not depend on which initialization
@@ -570,6 +635,14 @@ private:
         track.index = static_cast<int32_t>(tracks_.size());
         track.time_base = {1, static_cast<int32_t>(media_timescale)};
         if (track.bitrate == 0) track.bitrate = index.bandwidth();
+        // A video track whose own header never stated its size -- which happens
+        // when the parameter sets are in the segments rather than in a header this
+        // reader parses. The manifest's own figure is then all there is, and a
+        // caller sizing a window before the first frame is decoded needs it.
+        if (track.format.type == OM_MEDIA_VIDEO && track.format.video.width == 0) {
+          track.format.video.width = index.width();
+          track.format.video.height = index.height();
+        }
         // Where this track sits in the presentation, converted into the unit the
         // timestamps are in.
         track.start_time = rescaleTime(index.presentationTimeOffset(), index.timescale(),
@@ -589,7 +662,11 @@ private:
 
   void settleInitsIfComplete() {
     for (const Stream& stream : streams_) {
-      if (stream.needs_init && !stream.init_inbox) return;
+      if (!stream.needs_init || stream.init_inbox) continue;
+      // A stream with no initialization section is primed by its first media
+      // segment, which arrives through the same door as every other one.
+      if (stream.index().initSegment()) return;
+      if (!stream.inbox.contains(stream.read_ordinal)) return;
     }
     settleInits();
   }
@@ -628,6 +705,7 @@ private:
         return std::move(bytes).unwrapErr();
       }
 
+      stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()));
       const OMError error = stream.reader->pushSegment(std::move(bytes).unwrap());
       ++stream.read_ordinal;
       if (error == OM_SUCCESS) return OM_SUCCESS;

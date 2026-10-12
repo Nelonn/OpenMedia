@@ -153,6 +153,20 @@ auto keyMethodOf(std::string_view text) -> KeyMethod {
   return KeyMethod::Unsupported;
 }
 
+// Whether two `#EXT-X-STREAM-INF` entries describe the same rendition, which is
+// decided by every attribute that says anything about it: a playlist that repeats
+// one of its variants with nothing changed is naming another place to fetch that
+// same rendition from, not another quality.
+auto isSameRendition(const Variant& a, const Variant& b) -> bool {
+  return a.iframes_only == b.iframes_only && a.bandwidth == b.bandwidth &&
+         a.average_bandwidth == b.average_bandwidth && a.codecs == b.codecs &&
+         a.resolution.width == b.resolution.width && a.resolution.height == b.resolution.height &&
+         a.framerate == b.framerate && a.video_range == b.video_range &&
+         a.audio_group == b.audio_group && a.video_group == b.video_group &&
+         a.subtitle_group == b.subtitle_group &&
+         a.closed_captions_group == b.closed_captions_group;
+}
+
 auto renditionTypeOf(std::string_view text) -> RenditionType {
   if (text == "AUDIO") return RenditionType::Audio;
   if (text == "VIDEO") return RenditionType::Video;
@@ -388,6 +402,27 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
   }
 
   if (playlist.variants.empty()) return Err(OM_FORMAT_NO_STREAMS);
+
+  // Failover entries folded into the rendition they duplicate, in the order the
+  // playlist gave them. Left as they are they would read as a ladder of identical
+  // rungs -- and a master playlist from a CDN with several origins repeats itself
+  // dozens of times over, so what is actually a seven-rung ladder arrives as
+  // eighty-five variants that are seven renditions and seventy-eight spare
+  // addresses for them.
+  std::vector<Variant> renditions;
+  renditions.reserve(playlist.variants.size());
+  for (Variant& variant : playlist.variants) {
+    const auto same = std::find_if(renditions.begin(), renditions.end(),
+                                   [&](const Variant& kept) {
+                                     return isSameRendition(kept, variant);
+                                   });
+    if (same == renditions.end()) {
+      renditions.push_back(std::move(variant));
+    } else {
+      same->backup_urls.push_back(std::move(variant.url));
+    }
+  }
+  playlist.variants = std::move(renditions);
 
   // Highest bandwidth first, so picking under a cap is a scan from the front and
   // picking the best of all is the first entry -- the same order parseManifest()

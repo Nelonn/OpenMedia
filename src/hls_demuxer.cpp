@@ -58,7 +58,9 @@ public:
     // parameter sets the segments after it decode against. A reader holds one
     // initialization segment at a time, so the run addressed here stops where the
     // header changes rather than handing over segments that would decode as noise.
-    const std::string& init = segments.empty() ? std::string() : segments.front().init_url;
+    // An MPEG-TS playlist names no initialization segment at all, and every segment
+    // carries its own headers, so the run is the whole playlist.
+    const std::string init = segments.empty() ? std::string() : segments.front().init_url;
     while (usable_ < segments.size() && segments[usable_].init_url == init) ++usable_;
 
     starts_.reserve(usable_ + 1);
@@ -112,7 +114,7 @@ public:
   auto isLive() const -> bool { return playlist_->isLive(); }
   auto totalDurationNs() const -> int64_t { return starts_.back() * INT64_C(1'000'000); }
   auto isEncrypted() const -> bool { return playlist_->isEncrypted(); }
-  auto hasInit() const -> bool { return initSegment().has_value(); }
+  auto isEmpty() const -> bool { return usable_ == 0; }
 };
 
 auto mediaTypeOf(hls::RenditionType type) -> OMMediaType {
@@ -186,6 +188,20 @@ public:
       if (!media_.contains(url)) wanted.push_back(url);
     }
     return wanted;
+  }
+
+  auto variants() const -> std::vector<HlsVariant> override {
+    std::vector<HlsVariant> ladder;
+    if (!master_) return ladder;
+
+    const hls::Variant* chosen = chosenVariant();
+    for (const hls::Variant& variant : master_->variants) {
+      if (variant.iframes_only) continue; // not something to play straight through
+      ladder.push_back(HlsVariant {variant.url, variant.backup_urls, variant.codecs,
+                                   variant.bandwidth, variant.resolution.width,
+                                   variant.resolution.height, &variant == chosen});
+    }
+    return ladder;
   }
 
   auto open() -> Result<std::unique_ptr<SegmentedDemuxer>, OMError> override {
@@ -264,9 +280,21 @@ private:
     return chosen;
   }
 
+  // Where a variant's segments are listed: the first of the addresses it is
+  // published at that is actually in hand. A caller that could not reach the first
+  // may well have fetched one of the backups instead, and a rendition fetched from
+  // a backup is the same rendition.
+  auto playlistUrlOf(const hls::Variant& variant) const -> const std::string& {
+    if (media_.contains(variant.url)) return variant.url;
+    for (const std::string& backup : variant.backup_urls) {
+      if (media_.contains(backup)) return backup;
+    }
+    return variant.url;
+  }
+
   auto requiredUrls() const -> std::vector<std::string> {
     std::vector<std::string> urls;
-    if (const hls::Variant* variant = chosenVariant()) urls.push_back(variant->url);
+    if (const hls::Variant* variant = chosenVariant()) urls.push_back(playlistUrlOf(*variant));
     for (const hls::Rendition* rendition : chosenRenditions()) urls.push_back(rendition->url);
     return urls;
   }
@@ -285,7 +313,7 @@ private:
     IndexDescription description;
     description.id = url;
     auto index = makeIndex(url, std::move(description));
-    if (!index || !index->hasInit()) return source;
+    if (!index || index->isEmpty()) return source;
 
     source.duration_ns = index->totalDurationNs();
     source.live = index->isLive();
@@ -312,17 +340,20 @@ private:
     size_t chosen_at = 0;
     for (const hls::Variant& variant : master_->variants) {
       if (variant.iframes_only) continue;
-      if (!media_.contains(variant.url)) continue;
+      if (!media_.contains(playlistUrlOf(variant))) continue;
 
       IndexDescription description;
+      // Named by where the playlist publishes it first, whichever of its addresses
+      // the playlist was actually fetched from: that is the name selectRepresentation()
+      // is given, and it has to mean the same rendition every time.
       description.id = variant.url;
       description.codecs = variant.codecs;
       description.bandwidth = variant.bandwidth;
       description.width = variant.resolution.width;
       description.height = variant.resolution.height;
 
-      auto index = makeIndex(variant.url, std::move(description));
-      if (!index || !index->hasInit()) continue;
+      auto index = makeIndex(playlistUrlOf(variant), std::move(description));
+      if (!index || index->isEmpty()) continue;
       if (&variant == chosen) chosen_at = variants.alternatives.size();
       if (variants.alternatives.empty()) {
         source.duration_ns = index->totalDurationNs();
@@ -344,7 +375,7 @@ private:
       IndexDescription description;
       description.id = rendition->url;
       auto index = makeIndex(rendition->url, std::move(description));
-      if (!index || !index->hasInit()) continue;
+      if (!index || index->isEmpty()) continue;
 
       SegmentTrack track;
       track.type = mediaTypeOf(rendition->type);
@@ -415,6 +446,24 @@ auto createHlsPlaylists(const StreamOptions& options) -> std::unique_ptr<HlsPlay
   return std::make_unique<HlsPlaylistsImpl>(options);
 }
 
+namespace {
+
+// Every address `url` can be fetched from: itself, followed by the backups of the
+// variant it names, if it names one. A rendition's own playlist has no backups, and
+// neither has anything that is not a variant at all.
+auto addressesOf(const HlsPlaylists& playlists, const std::string& url)
+    -> std::vector<std::string> {
+  std::vector<std::string> addresses {url};
+  for (const HlsVariant& variant : playlists.variants()) {
+    if (variant.url != url) continue;
+    addresses.insert(addresses.end(), variant.backup_urls.begin(), variant.backup_urls.end());
+    break;
+  }
+  return addresses;
+}
+
+} // namespace
+
 auto openHlsPlaylist(std::span<const uint8_t> document, std::string_view url,
                      const StreamOptions& options)
     -> Result<std::unique_ptr<SegmentedDemuxer>, OMError> {
@@ -432,12 +481,21 @@ auto openHlsPlaylist(std::span<const uint8_t> document, std::string_view url,
   if (!wanted.empty()) {
     if (!options.fetch) return Err(OM_IO_NOT_ENOUGH_DATA);
     for (const std::string& next : wanted) {
-      auto bytes = options.fetch(SegmentRequest {next, 0, -1});
-      if (bytes.isErr()) return Err(std::move(bytes).unwrapErr());
-      const std::vector<uint8_t> fetched = std::move(bytes).unwrap();
-      if (const OMError error = playlists->add(fetched, next); error != OM_SUCCESS) {
-        return Err(error);
+      OMError error = OM_SUCCESS;
+      // The addresses to try, in order: the one asked for, and then the other
+      // places the same rendition is published, which is what a master playlist
+      // lists failover variants for in the first place.
+      for (const std::string& address : addressesOf(*playlists, next)) {
+        auto bytes = options.fetch(SegmentRequest {address, 0, -1});
+        if (bytes.isErr()) {
+          error = std::move(bytes).unwrapErr();
+          continue;
+        }
+        const std::vector<uint8_t> fetched = std::move(bytes).unwrap();
+        error = playlists->add(fetched, address);
+        if (error == OM_SUCCESS) break;
       }
+      if (error != OM_SUCCESS) return Err(error);
     }
   }
   return playlists->open();

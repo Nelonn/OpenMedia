@@ -71,6 +71,7 @@ target_sources(OpenMedia PRIVATE
         src/bitstream_filter.hpp
         src/bmff_demuxer.cpp
         src/bmff_fragment.hpp
+        src/segment_reader.hpp
         src/buffer.cpp
         src/codec_defs.cpp
         src/codec_registry.cpp
@@ -302,6 +303,8 @@ if (OPENMEDIA_STREAMING)
             src/hls_demuxer.cpp
             src/hls/m3u8.cpp
             src/hls/m3u8.hpp
+            src/mpegts.cpp
+            src/mpegts.hpp
             src/streaming/segment_demuxer.cpp
             src/streaming/segment_demuxer.hpp
             src/streaming/segment_index.hpp
