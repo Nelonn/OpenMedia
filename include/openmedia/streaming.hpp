@@ -256,4 +256,32 @@ OPENMEDIA_ABI auto openHlsPlaylist(std::span<const uint8_t> document, std::strin
                                    const StreamOptions& options = {})
     -> Result<std::unique_ptr<SegmentedDemuxer>, OMError>;
 
+/**
+ * One `#EXT-X-KEY` as a media playlist declared it.
+ *
+ * openmedia reports what the tag said and nothing else: a `skd://` URI and a
+ * base64 Widevine PSSH are both just a URI here, because what a URI means is the
+ * DRM's business and not a container's. A caller that knows its service reads the
+ * format and interprets the URI -- fetching an AES key, starting a licence, or
+ * handing it to a wrapper that holds the key this process never sees.
+ */
+struct OPENMEDIA_ABI HlsKey {
+  std::string method;     // METHOD=, e.g. "SAMPLE-AES", "AES-128"
+  std::string uri;        // URI=, resolved against the playlist's own URL
+  std::string key_format; // KEYFORMAT=; "identity" when the tag did not say
+  std::string iv;         // IV=, as written; empty when it is per-segment or derived
+};
+
+/**
+ * The distinct `#EXT-X-KEY` tags a media playlist carries, in the order they first
+ * appear.
+ *
+ * Empty for a playlist that is not encrypted, and for a document that is not a
+ * media playlist at all -- there is nothing to key either way. openmedia parses the
+ * playlist as it already does; this only surfaces what it found, so a service whose
+ * keys come from a licence rather than an HTTP fetch has somewhere to read them
+ * from.
+ */
+OPENMEDIA_ABI auto hlsPlaylistKeys(std::span<const uint8_t> document) -> std::vector<HlsKey>;
+
 } // namespace openmedia

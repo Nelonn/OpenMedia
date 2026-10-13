@@ -501,6 +501,42 @@ auto openHlsPlaylist(std::span<const uint8_t> document, std::string_view url,
   return playlists->open();
 }
 
+auto hlsPlaylistKeys(std::span<const uint8_t> document) -> std::vector<HlsKey> {
+  std::vector<HlsKey> keys;
+  if (document.empty()) return keys;
+
+  // Parsed as it always is, and only a media playlist has keys: a master names no
+  // segments and so carries none, which reads here as an empty list rather than an
+  // error -- there is simply nothing to key.
+  auto parsed = hls::parseMedia(document, {});
+  if (parsed.isErr()) return keys;
+
+  for (const hls::MediaSegment& segment : parsed.unwrap().segments) {
+    const hls::Key& key = segment.key;
+    if (!key.isEncrypted()) continue;
+
+    HlsKey out;
+    switch (key.method) {
+      case hls::KeyMethod::Aes128: out.method = "AES-128"; break;
+      case hls::KeyMethod::SampleAes: out.method = "SAMPLE-AES"; break;
+      case hls::KeyMethod::SampleAesCtr: out.method = "SAMPLE-AES-CTR"; break;
+      default: out.method = "UNSUPPORTED"; break;
+    }
+    out.uri = key.uri;
+    // The spec's default when the tag does not name one: an ordinary key fetched
+    // over HTTP. Naming it keeps the caller from having to.
+    out.key_format = key.format.empty() ? std::string("identity") : key.format;
+    out.iv = key.iv;
+
+    const bool seen = std::any_of(keys.begin(), keys.end(), [&](const HlsKey& existing) {
+      return existing.method == out.method && existing.uri == out.uri &&
+             existing.key_format == out.key_format;
+    });
+    if (!seen) keys.push_back(std::move(out));
+  }
+  return keys;
+}
+
 const FormatDescriptor FORMAT_HLS = {
     .container_id = OM_CONTAINER_HLS,
     .name = "hls",
