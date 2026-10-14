@@ -35,11 +35,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      #- name: Run gitdeps
-      #  uses: Nelonn/gitdeps@v0.2.3
-      #  with:
-      #    gitdeps_ver: 0.2.3
-      #    gitdeps_args: -e examples
+      - name: Install UniDeps (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          ARCH=$(echo "${{ runner.arch }}" | tr '[:upper:]' '[:lower:]')
+          EXT=$([ "$OS" = "linux" ] && echo "tar.gz" || echo "zip")
+          URL="https://github.com/Nelonn/unideps/releases/download/nightly/unideps-${OS}-${ARCH}.${EXT}"
+          TEMP_DIR=$(mktemp -d)
+          DEST_DIR="$HOME/.local/bin"
+          mkdir -p "$DEST_DIR"
+          curl -sSfL "$URL" -o "$TEMP_DIR/archive.${EXT}"
+          if [ "$EXT" = "tar.gz" ]; then
+            tar -xzf "$TEMP_DIR/archive.${EXT}" -C "$TEMP_DIR"
+          else
+            unzip -q "$TEMP_DIR/archive.${EXT}" -d "$TEMP_DIR"
+          fi
+          find "$TEMP_DIR" -type f -name unideps -exec mv {} "$DEST_DIR/unideps" \;
+          chmod +x "$DEST_DIR/unideps"
+          rm -rf "$TEMP_DIR"
+          echo "$DEST_DIR" >> $GITHUB_PATH
+
+      - name: Install UniDeps (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $arch = "${{ runner.arch }}".ToLower()
+          $url = "https://github.com/Nelonn/unideps/releases/download/nightly/unideps-windows-$arch.zip"
+          $destDir = "$env:USERPROFILE\.local\bin"
+          $tempDir = Join-Path $env:RUNNER_TEMP ([System.IO.Path]::GetRandomFileName())
+          New-Item -ItemType Directory -Force -Path $destDir, $tempDir | Out-Null
+          $zipPath = Join-Path $tempDir "unideps.zip"
+          curl.exe -sSfL $url -o $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
+          $exe = Get-ChildItem -Path $tempDir -Filter "unideps.exe" -Recurse | Select-Object -First 1
+          Move-Item -Path $exe.FullName -Destination (Join-Path $destDir "unideps.exe") -Force
+          Remove-Item -Recurse -Force $tempDir
+          "$destDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
