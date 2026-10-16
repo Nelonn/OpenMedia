@@ -308,8 +308,12 @@ private:
 
     // No StreamOptions::fetch: the demuxer never fetches and never blocks, it only
     // says what it wants next. Here the bytes come off the local disk, and a
-    // networked player changes exactly one thing -- fileFetch() for an HTTP client.
-    prefetcher_.emplace(fileFetch());
+    // networked player changes exactly one thing -- these two for an HTTP client.
+    //
+    // The second one is what lets a 4K stream play: the segment being read is
+    // handed over in pieces as it downloads, so its first picture costs its first
+    // few hundred kilobytes rather than all twelve megabytes of it.
+    prefetcher_.emplace(fileFetch(), fileStreamFetch());
 
     auto opened = (kind == OM_CONTAINER_DASH) ? openDashManifest(document, path, StreamOptions {})
                                               : openPlaylists(document, path);

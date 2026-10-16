@@ -68,6 +68,27 @@ using FetchFn = std::function<Result<std::vector<uint8_t>, OMError>(const Segmen
  */
 OPENMEDIA_ABI auto fileFetch() -> FetchFn;
 
+/**
+ * Optionally, a way for a streaming demuxer to read a segment while it is still
+ * arriving instead of once it is whole.
+ *
+ * Returns a stream over the bytes of one segment. The demuxer reads it in pieces,
+ * parses each piece as it comes and hands out the packets that piece completed, so
+ * a segment starts producing frames after its first few kilobytes rather than
+ * after its last -- which at 4K, where one segment is tens of megabytes, is the
+ * difference between playing and not. That is the whole of what this buys over
+ * `fetch`, and it is preferred over `fetch` when both are set.
+ *
+ * read() may block, and may return fewer bytes than asked for without that meaning
+ * the end: isEOF() is what says the segment is over. Neither seek() nor size() is
+ * ever called, so a stream over a socket needs to implement neither.
+ */
+using StreamFetchFn =
+    std::function<Result<std::unique_ptr<InputStream>, OMError>(const SegmentRequest&)>;
+
+/** The streaming counterpart of fileFetch(), over the same URLs and paths. */
+OPENMEDIA_ABI auto fileStreamFetch() -> StreamFetchFn;
+
 /** What a streaming demuxer picks when the manifest or playlist offers a choice. */
 struct OPENMEDIA_ABI StreamOptions {
   // Preferred audio/subtitle language as an ISO-639 code. Empty reads every track
@@ -87,6 +108,9 @@ struct OPENMEDIA_ABI StreamOptions {
   size_t max_buffered_bytes = 64u << 20;
   // Called on a buffer miss instead of reporting OM_IO_NOT_ENOUGH_DATA.
   FetchFn fetch;
+  // The same, reading each segment as it arrives rather than waiting for the whole
+  // of it. Used in preference to `fetch` when both are set.
+  StreamFetchFn stream_fetch;
 };
 
 /** One alternative as offered for a track, for reporting and for switching. */
@@ -141,6 +165,38 @@ public:
    */
   virtual auto appendSegment(const SegmentRequest& request, std::vector<uint8_t> bytes)
       -> OMError = 0;
+
+  /** Hands over one piece of a segment, for a caller that has not got all of it.
+   *
+   * The same segments appendSegment() delivers whole, delivered as they download:
+   * pieces of one request in order, `last` set on the final piece, and an empty
+   * final piece allowed. What it buys is that the segment is parsed as it arrives
+   * and readPacket() starts returning its packets long before the download ends --
+   * at 4K, where one segment runs to tens of megabytes, the difference between
+   * playing and waiting. `bytes` is copied, so the caller may reuse its buffer the
+   * moment this returns.
+   *
+   * Only the segment a track is reading right now is parsed piece by piece; pieces
+   * of a segment further ahead accumulate until that track reaches them, which is
+   * no worse than appendSegment() and no better. Prefetching therefore still goes
+   * through appendSegment(), and this is for the segment being played.
+   *
+   * A segment that stops short -- `last` set on a download that failed half way --
+   * is read as far as it got and then left behind, the same as a segment carrying
+   * nothing for the track. A request must be delivered one way or the other: mixing
+   * appendSegment() and appendSegmentChunk() for one request is a programming error
+   * and reports OM_COMMON_INVALID_ARGUMENT.
+   *
+   * seek() and selectRepresentation() abandon whatever was part-delivered, so a
+   * download still running across one of those is to be given up rather than
+   * carried on: its remaining pieces would be read as the start of a fresh
+   * delivery of the same request, which is a segment with its head missing.
+   *
+   * OM_COMMON_OVERFLOW means the same as in appendSegment() and means it about this
+   * piece: the track is full, the piece was not taken, offer it again later.
+   */
+  virtual auto appendSegmentChunk(const SegmentRequest& request,
+                                  std::span<const uint8_t> bytes, bool last) -> OMError = 0;
 
   /** Media held for a track and not yet read out, in nanoseconds. What a
    * downloader throttles on: keep fetching while this is below the target. -1 for

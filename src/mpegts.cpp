@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <numeric>
 #include <openmedia/codec_defs.h>
 #include <openmedia/log.hpp>
@@ -168,6 +169,15 @@ struct ElementaryStream {
   // Where the next audio frame falls when its PES packet carries no timestamp of
   // its own, which is allowed as long as one came before it.
   int64_t audio_cursor = -1;
+
+  // Packets parsed out of this stream but not readable yet. Two things are waited
+  // for here: a video frame lasts until the frame after it, so it cannot go until
+  // its successor has arrived, and no stream's packet can go before the other
+  // streams have one to compare it against -- otherwise a segment read as it
+  // arrives would hand out video ahead of the audio belonging in front of it.
+  std::deque<Packet> staged;
+  size_t timed = 0;       // leading entries of `staged` whose duration is settled
+  int64_t video_step = 0; // the last frame interval seen, for the frame ending a segment
 };
 
 class MpegTsReader final : public SegmentReader {
@@ -179,9 +189,13 @@ class MpegTsReader final : public SegmentReader {
   SectionAssembler pmt_;
   std::vector<ElementaryStream> streams_;
 
-  // Packets of the segment in hand, in decode order, and how far they have been read.
-  std::vector<Packet> packets_;
-  size_t cursor_ = 0;
+  // Packets ready to be read, in decode order. A segment that arrives in pieces
+  // adds to this as it goes, so it is drained from the front rather than indexed.
+  std::deque<Packet> packets_;
+  // How many this segment has handed over. A segment read as it arrived has had its
+  // packets taken already, so an empty queue at the end of one says nothing about
+  // whether there was anything in it.
+  size_t released_ = 0;
 
   // The playlist's timeline against the stream's own clock. A transport stream
   // starts counting wherever the encoder's clock stood, so the two differ by an
@@ -190,8 +204,18 @@ class MpegTsReader final : public SegmentReader {
   int64_t base_ = 0;
   bool have_base_ = false;
   // Where the previous segment ended, on the wire's clock, for telling drift from
-  // a discontinuity.
+  // a discontinuity, and the same figure being accumulated for the segment in hand.
   int64_t previous_end_raw_ = 0;
+  int64_t segment_end_raw_ = 0;
+  // Whether this segment's packets have been anchored onto the playlist's timeline.
+  // Settling that needs the segment's earliest decode time, which is not the first
+  // one parsed.
+  bool base_settled_ = false;
+
+  // A segment arriving in pieces: whether one is open, and the tail of the last
+  // piece that did not add up to a whole transport packet.
+  bool segment_open_ = false;
+  std::vector<uint8_t> carry_;
 
   RbspBuffer rbsp_;
 
@@ -205,15 +229,25 @@ public:
   auto tracks() const -> const std::vector<Track>& override { return tracks_; }
   auto metadata() const -> const Dictionary& override { return metadata_; }
 
+  auto tracksDescribed() const -> bool override {
+    if (tracks_.empty()) return false;
+    // A program map names a PID and its stream type and nothing else. What a
+    // decoder needs -- the parameter sets, the picture size, the
+    // AudioSpecificConfig -- is in the elementary stream itself, so a track is
+    // described only once a frame of it has been read.
+    for (const ElementaryStream& stream : streams_) {
+      if (stream.track >= 0 && !stream.described) return false;
+    }
+    return true;
+  }
+
   void expectSegmentStart(int64_t start_ns) override { expected_start_ns_ = start_ns; }
 
   auto pushSegment(std::vector<uint8_t> segment) -> OMError override {
     if (segment.empty()) return OM_COMMON_INVALID_ARGUMENT;
     if (!looksLikeMpegTs(segment)) return OM_FORMAT_INVALID_HEADER;
 
-    packets_.clear();
-    cursor_ = 0;
-
+    startSegment();
     const std::span<const uint8_t> bytes(segment);
     size_t at = 0;
     while (at + TS_PACKET_SIZE <= bytes.size()) {
@@ -227,55 +261,68 @@ public:
       handlePacket(bytes.subspan(at, TS_PACKET_SIZE));
       at += TS_PACKET_SIZE;
     }
-    // Every segment of a playlist is entered on its own, so a PES packet still open
-    // at the end of one is complete as far as this segment is concerned.
-    for (ElementaryStream& stream : streams_) emitPes(stream);
+    return finishSegment();
+  }
 
-    // No track means no program map was ever seen; no packet means nothing of the
-    // program this reader carries was in these bytes. Either way there is nothing
-    // here to read, and the caller reads on to the next segment.
-    if (tracks_.empty() || packets_.empty()) return OM_FORMAT_NO_STREAMS;
+  // --- A segment that is still arriving ---------------------------------------
 
-    fillVideoDurations();
-    std::stable_sort(packets_.begin(), packets_.end(),
-                     [](const Packet& a, const Packet& b) { return a.dts < b.dts; });
-    rebaseOntoPlaylist();
+  auto beginSegment() -> OMError override {
+    startSegment();
+    segment_open_ = true;
     return OM_SUCCESS;
   }
 
-  auto needsSegment() const -> bool override { return cursor_ >= packets_.size(); }
+  auto feedSegment(std::span<const uint8_t> bytes) -> OMError override {
+    if (!segment_open_) return OM_COMMON_NOT_INITIALIZED;
+    carry_.insert(carry_.end(), bytes.begin(), bytes.end());
+    consumeWholePackets(/*final=*/false);
+    releaseStaged(/*final=*/false);
+    return OM_SUCCESS;
+  }
+
+  auto endSegment() -> OMError override {
+    if (!segment_open_) return OM_COMMON_NOT_INITIALIZED;
+    consumeWholePackets(/*final=*/true);
+    segment_open_ = false;
+    carry_.clear();
+    return finishSegment();
+  }
+
+  auto segmentOpen() const -> bool override { return segment_open_; }
+
+  auto needsSegment() const -> bool override { return packets_.empty(); }
 
   auto readPacket() -> Result<Packet, OMError> override {
-    if (needsSegment()) return Err(OM_IO_NOT_ENOUGH_DATA);
-    return Ok(std::move(packets_[cursor_++]));
+    if (packets_.empty()) return Err(OM_IO_NOT_ENOUGH_DATA);
+    Packet packet = std::move(packets_.front());
+    packets_.pop_front();
+    return Ok(std::move(packet));
   }
 
   auto nextDecodeTimeNs() const -> int64_t override {
-    if (needsSegment()) return INT64_MAX;
-    return scaleToNs(packets_[cursor_].dts, TS_TIMESCALE);
+    if (packets_.empty()) return INT64_MAX;
+    return scaleToNs(packets_.front().dts, TS_TIMESCALE);
   }
 
   auto remainingDurationNs() const -> int64_t override {
-    if (needsSegment()) return 0;
+    if (packets_.empty()) return 0;
     const Packet& last = packets_.back();
     const int64_t end = scaleToNs(last.dts + last.duration, TS_TIMESCALE);
-    const int64_t start = scaleToNs(packets_[cursor_].dts, TS_TIMESCALE);
+    const int64_t start = scaleToNs(packets_.front().dts, TS_TIMESCALE);
     return end > start ? end - start : 0;
   }
 
   auto timescaleOf(int32_t) const -> uint32_t override { return TS_TIMESCALE; }
 
   void flushSegments() override {
-    packets_.clear();
-    cursor_ = 0;
+    startSegment();
+    segment_open_ = false;
+    carry_.clear();
     // Whatever was half-assembled belonged to a position this reader is no longer
     // at, and the clock at the new position is whatever the next segment says it
     // is -- read against expectSegmentStart(), which the caller sets from the
     // playlist.
     for (ElementaryStream& stream : streams_) {
-      stream.pes.clear();
-      stream.collecting = false;
-      stream.declared = 0;
       stream.continuity = -1;
       stream.previous_raw = -1;
       stream.wraps = 0;
@@ -294,6 +341,63 @@ private:
       if (next >= bytes.size() || bytes[next] == TS_SYNC_BYTE) return at;
     }
     return bytes.size();
+  }
+
+  // Everything that is true of a segment rather than of the stream: the packets it
+  // produced, the staging each of its tracks is in the middle of, and where the
+  // playlist says it sits. What survives a segment -- the program tables, the track
+  // list, the wrap count, the clock offset -- is not touched here.
+  void startSegment() {
+    packets_.clear();
+    released_ = 0;
+    base_settled_ = false;
+    carry_.clear();
+    for (ElementaryStream& stream : streams_) {
+      stream.staged.clear();
+      stream.timed = 0;
+      stream.video_step = 0;
+      // A PES packet is entirely inside one segment: anything half-assembled when
+      // the next one starts was cut off by the end of the last.
+      stream.pes.clear();
+      stream.collecting = false;
+      stream.declared = 0;
+    }
+  }
+
+  auto finishSegment() -> OMError {
+    // Every segment of a playlist is entered on its own, so a PES packet still open
+    // at the end of one is complete as far as this segment is concerned.
+    for (ElementaryStream& stream : streams_) emitPes(stream);
+    releaseStaged(/*final=*/true);
+    previous_end_raw_ = segment_end_raw_;
+
+    // No track means no program map was ever seen; no packet means nothing of the
+    // program this reader carries was in these bytes. Either way there was nothing
+    // here to read, and the caller reads on to the next segment.
+    if (tracks_.empty() || released_ == 0) return OM_FORMAT_NO_STREAMS;
+    return OM_SUCCESS;
+  }
+
+  // Reads every whole transport packet out of `carry_` and keeps the rest for the
+  // piece that follows it.
+  void consumeWholePackets(bool final) {
+    const std::span<const uint8_t> bytes(carry_);
+    size_t at = 0;
+    while (at + TS_PACKET_SIZE <= bytes.size()) {
+      if (bytes[at] != TS_SYNC_BYTE) {
+        const size_t sync = findSync(bytes, at);
+        // findSync confirms a boundary by the sync byte one packet further on, and
+        // past the end of what has arrived it has to take the candidate on trust.
+        // Mid-segment there is no need to: the bytes that would confirm it are
+        // coming, so the candidate is kept and looked at again then.
+        at = sync;
+        if (!final && sync + 2 * TS_PACKET_SIZE > bytes.size()) break;
+        continue;
+      }
+      handlePacket(bytes.subspan(at, TS_PACKET_SIZE));
+      at += TS_PACKET_SIZE;
+    }
+    carry_.erase(carry_.begin(), carry_.begin() + static_cast<ptrdiff_t>(std::min(at, carry_.size())));
   }
 
   auto streamOf(uint16_t pid) -> ElementaryStream* {
@@ -511,7 +615,7 @@ private:
     packet.pts = pts >= 0 ? pts : dts;
     packet.dts = dts;
     packet.is_keyframe = keyframe;
-    packets_.push_back(std::move(packet));
+    stream.staged.push_back(std::move(packet));
   }
 
   // Fills in what only the bitstream knows -- parameter sets, picture size -- and
@@ -652,7 +756,7 @@ private:
       packet.dts = frame_pts;
       packet.duration = duration;
       packet.is_keyframe = true; // every AAC frame is decodable on its own
-      packets_.push_back(std::move(packet));
+      stream.staged.push_back(std::move(packet));
 
       frame_pts += duration;
       at += frame_length;
@@ -689,69 +793,122 @@ private:
   // --- Timing ---------------------------------------------------------------
 
   // A video frame's duration is the step to the frame that follows it in decode
-  // order, which is knowable only once the segment has been read whole.
-  void fillVideoDurations() {
-    for (const ElementaryStream& stream : streams_) {
-      if (stream.type != OM_MEDIA_VIDEO || stream.track < 0) continue;
+  // order, so one frame of lookahead is staged before the frame in front of it can
+  // be handed over. `timed` counts how many of the leading staged frames have had
+  // theirs settled, which is every one of them once the segment ends.
+  void assignDurations(ElementaryStream& stream, bool final) {
+    if (stream.type != OM_MEDIA_VIDEO) {
+      // An ADTS frame's duration comes from its own sample count, settled where it
+      // was parsed.
+      stream.timed = stream.staged.size();
+      return;
+    }
+    for (size_t i = stream.timed; i + 1 < stream.staged.size(); ++i) {
+      stream.video_step = stream.staged[i + 1].dts - stream.staged[i].dts;
+      stream.staged[i].duration = stream.video_step;
+    }
+    stream.timed = stream.staged.empty() ? 0 : stream.staged.size() - 1;
 
-      std::vector<Packet*> frames;
-      for (Packet& packet : packets_) {
-        if (packet.stream_index == stream.track) frames.push_back(&packet);
-      }
-      std::stable_sort(frames.begin(), frames.end(),
-                       [](const Packet* a, const Packet* b) { return a->dts < b->dts; });
-
-      int64_t step = 0;
-      for (size_t i = 0; i + 1 < frames.size(); ++i) {
-        step = frames[i + 1]->dts - frames[i]->dts;
-        frames[i]->duration = step;
-      }
+    if (final && !stream.staged.empty()) {
       // The last frame of a segment is followed by the first of the next one, which
       // is not in hand; it lasts as long as its predecessor did.
-      if (!frames.empty()) frames.back()->duration = step;
+      stream.staged.back().duration = stream.video_step;
+      stream.timed = stream.staged.size();
+    }
 
-      if (step > 0) {
-        Track& track = tracks_[static_cast<size_t>(stream.track)];
-        if (track.format.video.framerate.num == 0) {
-          track.format.video.framerate = reduced(TS_TIMESCALE, step);
-        }
+    if (stream.video_step > 0 && stream.track >= 0) {
+      Track& track = tracks_[static_cast<size_t>(stream.track)];
+      if (track.format.video.framerate.num == 0) {
+        track.format.video.framerate = reduced(TS_TIMESCALE, stream.video_step);
       }
     }
+  }
+
+  // Whether a packet from every track is staged, which is what it takes to know
+  // which of them comes first. A segment carrying nothing at all of one of its
+  // tracks never gets there, and is read out in one go when it ends -- no worse
+  // than reading it whole, which is what there was before.
+  auto everyTrackStaged() const -> bool {
+    for (const ElementaryStream& stream : streams_) {
+      if (stream.track >= 0 && stream.staged.empty()) return false;
+    }
+    return true;
   }
 
   // Moves the segment's timestamps onto the playlist's timeline, so that the
   // nth second of the presentation is the nth second of a packet's timestamp
   // whatever clock the encoder was running.
-  void rebaseOntoPlaylist() {
-    const int64_t first_raw = packets_.front().dts;
-    int64_t last_end = first_raw;
-    for (const Packet& packet : packets_) {
-      last_end = std::max(last_end, packet.dts + packet.duration);
-    }
+  void settleBase(int64_t first_raw) {
+    base_settled_ = true;
+    segment_end_raw_ = first_raw;
 
     const bool continues = have_base_ &&
                            std::abs(first_raw - previous_end_raw_) <= DISCONTINUITY_TICKS;
-    if (!continues) {
-      // Either this is the first segment read, or the clock jumped -- a declared
-      // discontinuity, a wrap, or a seek into a stream whose clock this reader has
-      // not followed. The playlist says where the segment belongs; the stream only
-      // says how its own samples are spaced.
-      //
-      // The anchor is the earliest decode time rather than the earliest
-      // presentation time, so that no timestamp comes out negative and each
-      // segment's packets fall inside the span the playlist gave it -- which is
-      // what everything upstream reasons in. A stream with B-frames decodes its
-      // opening frames before it shows them, so its first picture appears that much
-      // after the start; the error is a reorder delay, the same at every point of
-      // the stream, and it does not accumulate.
-      base_ = first_raw - nsToScale(expected_start_ns_, TS_TIMESCALE);
-      have_base_ = true;
-    }
-    previous_end_raw_ = last_end;
+    if (continues) return;
 
-    for (Packet& packet : packets_) {
+    // Either this is the first segment read, or the clock jumped -- a declared
+    // discontinuity, a wrap, or a seek into a stream whose clock this reader has
+    // not followed. The playlist says where the segment belongs; the stream only
+    // says how its own samples are spaced.
+    //
+    // The anchor is the earliest decode time rather than the earliest presentation
+    // time, so that no timestamp comes out negative and each segment's packets fall
+    // inside the span the playlist gave it -- which is what everything upstream
+    // reasons in. A stream with B-frames decodes its opening frames before it shows
+    // them, so its first picture appears that much after the start; the error is a
+    // reorder delay, the same at every point of the stream, and it does not
+    // accumulate.
+    base_ = first_raw - nsToScale(expected_start_ns_, TS_TIMESCALE);
+    have_base_ = true;
+  }
+
+  // Hands over every staged packet whose turn has come: earliest decode time first,
+  // and only while the order is beyond doubt. Reading a segment whole settles that
+  // with a sort; reading one as it arrives settles it by waiting -- a packet goes
+  // only once every track has one to be compared against, so nothing is handed out
+  // ahead of a packet that belongs in front of it and has not been parsed yet.
+  void releaseStaged(bool final) {
+    for (ElementaryStream& stream : streams_) assignDurations(stream, final);
+
+    if (!base_settled_) {
+      // The anchor is the segment's earliest decode time, and which track that
+      // belongs to is not knowable until each has spoken.
+      if (!final && !everyTrackStaged()) return;
+      int64_t first_raw = INT64_MAX;
+      for (const ElementaryStream& stream : streams_) {
+        if (stream.track < 0 || stream.staged.empty()) continue;
+        first_raw = std::min(first_raw, stream.staged.front().dts);
+      }
+      if (first_raw == INT64_MAX) return; // nothing timed has been parsed yet
+      settleBase(first_raw);
+    }
+
+    for (;;) {
+      ElementaryStream* earliest = nullptr;
+      bool comparable = true;
+      for (ElementaryStream& stream : streams_) {
+        if (stream.track < 0) continue;
+        if (stream.staged.empty()) {
+          // Nothing to compare against, so nothing can be said to come first --
+          // unless the segment has ended, in which case nothing more is coming.
+          if (!final) comparable = false;
+          continue;
+        }
+        if (!earliest || stream.staged.front().dts < earliest->staged.front().dts) {
+          earliest = &stream;
+        }
+      }
+      if (!comparable || !earliest || earliest->timed == 0) break;
+
+      Packet packet = std::move(earliest->staged.front());
+      earliest->staged.pop_front();
+      --earliest->timed;
+
+      segment_end_raw_ = std::max(segment_end_raw_, packet.dts + packet.duration);
       packet.pts -= base_;
       packet.dts -= base_;
+      packets_.push_back(std::move(packet));
+      ++released_;
     }
   }
 };

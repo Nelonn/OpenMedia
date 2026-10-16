@@ -1,8 +1,10 @@
 #include <streaming/segment_demuxer.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bmff_fragment.hpp>
 #include <cctype>
+#include <cstddef>
 #include <map>
 #include <mpegts.hpp>
 #include <openmedia/io.hpp>
@@ -26,6 +28,11 @@ constexpr uint64_t RECOGNITION_WINDOW = 64;
 // than played, but a run of them means something is wrong with the addressing
 // rather than with one segment, and looping over thousands would just hide it.
 constexpr int MAX_EMPTY_SEGMENTS = 8;
+
+// How much of a segment is read at a time from a StreamOptions::stream_fetch. Small
+// enough that the first picture of a 4K segment does not wait on megabytes it does
+// not need, large enough that reading one is not a syscall per transport packet.
+constexpr size_t PULL_CHUNK = 64u << 10;
 
 auto percentDecode(std::string_view text) -> std::string {
   auto hex = [](char c) -> int {
@@ -79,25 +86,52 @@ class SegmentDemuxer final : public SegmentedDemuxer {
     bool finished = false;
     uint64_t read_ordinal = 0; // the media segment the reader is on
 
+    // The reader is part-way through `read_ordinal` and waiting for the rest of it.
+    // Its bytes are no longer held here: they went straight into the reader, which
+    // is what reading a segment as it arrives means.
+    bool streaming = false;
+    // Where the segment being streamed is read from, when StreamOptions supplied
+    // somewhere to read it from rather than the caller pushing its pieces in.
+    std::unique_ptr<InputStream> pulling;
+    // The decode time last handed out, which is where whatever this stream is
+    // missing must come at or after.
+    int64_t last_read_ns = INT64_MIN;
+
     std::optional<std::vector<uint8_t>> init_inbox;
-    std::map<uint64_t, std::vector<uint8_t>> inbox;
+    bool init_complete = false;
+
+    // A segment handed over, whole or in pieces. Half a segment is still worth
+    // holding: once this track reaches it, the reader is given what there is and
+    // reads it while the rest arrives.
+    struct Held {
+      std::vector<uint8_t> bytes;
+      bool complete = true;
+    };
+    std::map<uint64_t, Held> inbox;
     size_t buffered_bytes = 0;
 
-    void hold(uint64_t ordinal, std::vector<uint8_t> bytes) {
+    void hold(uint64_t ordinal, std::vector<uint8_t> bytes, bool complete) {
       buffered_bytes += bytes.size();
       if (const auto previous = inbox.find(ordinal); previous != inbox.end()) {
-        buffered_bytes -= previous->second.size();
+        buffered_bytes -= previous->second.bytes.size();
       }
-      inbox.insert_or_assign(ordinal, std::move(bytes));
+      inbox.insert_or_assign(ordinal, Held {std::move(bytes), complete});
     }
 
-    auto take(uint64_t ordinal) -> std::optional<std::vector<uint8_t>> {
+    void appendHeld(uint64_t ordinal, std::span<const uint8_t> more, bool last) {
+      Held& held = inbox[ordinal];
+      held.bytes.insert(held.bytes.end(), more.begin(), more.end());
+      held.complete = last;
+      buffered_bytes += more.size();
+    }
+
+    auto takeHeld(uint64_t ordinal) -> std::optional<Held> {
       const auto found = inbox.find(ordinal);
       if (found == inbox.end()) return std::nullopt;
-      std::vector<uint8_t> bytes = std::move(found->second);
-      buffered_bytes -= bytes.size();
+      Held held = std::move(found->second);
+      buffered_bytes -= held.bytes.size();
       inbox.erase(found);
-      return bytes;
+      return held;
     }
 
     void dropHeld() {
@@ -152,7 +186,7 @@ public:
     // With a fetch function the caller has said it is content to block, so the
     // tracks can be settled here and `tracks()` is populated on return, the way
     // every other demuxer behaves.
-    if (options_.fetch) {
+    if (options_.fetch || options_.stream_fetch) {
       for (Stream& stream : streams_) {
         const OMError error = ensureInit(stream);
         if (error != OM_SUCCESS) return error;
@@ -210,6 +244,9 @@ public:
       for (size_t taken = 0; taken < max_count; ++ordinal) {
         if (bound && ordinal >= *bound) break;
         if (stream.inbox.contains(ordinal)) continue; // already in hand
+        // Being read as it arrives: the caller is downloading it already, and
+        // asking for it again would have it downloaded twice.
+        if (stream.streaming && ordinal == stream.read_ordinal) continue;
         const auto segment = index.segmentAt(ordinal);
         if (!segment) break;
 
@@ -241,7 +278,9 @@ public:
     for (Stream& stream : streams_) {
       if (const auto init = stream.index().initSegment(); init && *init == request) {
         if (!stream.needs_init) return OM_SUCCESS; // already parsed; nothing to do
+        if (stream.init_inbox && !stream.init_complete) return OM_COMMON_INVALID_ARGUMENT;
         stream.init_inbox = std::move(bytes);
+        stream.init_complete = true;
         settleInitsIfComplete();
         return OM_SUCCESS;
       }
@@ -256,6 +295,10 @@ public:
         const auto segment = index.segmentAt(ordinal);
         if (!segment) break;
         if (!(segment->request == request)) continue;
+        // One request is delivered one way or the other. Taking the whole of a
+        // segment whose pieces are already going in would leave the pieces that
+        // follow with nowhere to go and the segment read twice over.
+        if (isPartlyDelivered(stream, ordinal)) return OM_COMMON_INVALID_ARGUMENT;
         // Full is not the same as unwanted: the caller is told to keep these bytes
         // and offer them again, rather than have them silently dropped and then
         // wait forever for a segment it believes it already delivered.
@@ -263,7 +306,7 @@ public:
             stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
           return OM_COMMON_OVERFLOW;
         }
-        stream.hold(ordinal, std::move(bytes));
+        stream.hold(ordinal, std::move(bytes), /*complete=*/true);
         // These may be the bytes a stream with no initialization section was
         // waiting on to describe itself.
         if (stream.needs_init) settleInitsIfComplete();
@@ -277,13 +320,73 @@ public:
     return OM_SUCCESS;
   }
 
+  auto appendSegmentChunk(const SegmentRequest& request, std::span<const uint8_t> bytes,
+                          bool last) -> OMError override {
+    for (Stream& stream : streams_) {
+      if (const auto init = stream.index().initSegment(); init && *init == request) {
+        if (!stream.needs_init) return OM_SUCCESS;
+        if (stream.init_complete) return OM_COMMON_INVALID_ARGUMENT;
+        if (!stream.init_inbox) stream.init_inbox.emplace();
+        stream.init_inbox->insert(stream.init_inbox->end(), bytes.begin(), bytes.end());
+        // There is nothing to gain from reading half an initialization segment:
+        // it is where the track list comes from, and half a track list is not one.
+        if (!last) return OM_SUCCESS;
+        stream.init_complete = true;
+        settleInitsIfComplete();
+        return OM_SUCCESS;
+      }
+    }
+
+    for (Stream& stream : streams_) {
+      const SegmentIndex& index = stream.index();
+      const auto bound = index.segmentCount();
+      for (uint64_t ordinal = stream.read_ordinal;
+           ordinal < stream.read_ordinal + RECOGNITION_WINDOW; ++ordinal) {
+        if (bound && ordinal >= *bound) break;
+        const auto segment = index.segmentAt(ordinal);
+        if (!segment) break;
+        if (!(segment->request == request)) continue;
+
+        // The segment being read right now: its pieces go straight through to the
+        // reader, which parses each one on arrival. This is the whole point of the
+        // call -- packets out of a segment that is still downloading.
+        if (stream.streaming && ordinal == stream.read_ordinal) {
+          if (const OMError fed = stream.reader->feedSegment(bytes); fed != OM_SUCCESS) {
+            return fed;
+          }
+          // These may be the bytes a stream with no initialization section was
+          // waiting on to describe itself.
+          if (stream.needs_init) settleInitsIfComplete();
+          if (last) return closeStreamed(stream);
+          return OM_SUCCESS;
+        }
+
+        if (const auto held = stream.inbox.find(ordinal);
+            held != stream.inbox.end() && held->second.complete) {
+          return OM_COMMON_INVALID_ARGUMENT; // delivered whole already
+        }
+        // Not reached yet. The pieces accumulate, and when this track does reach
+        // the segment the reader is given however much of it has turned up and
+        // reads on from there as the rest arrives.
+        if (options_.max_buffered_bytes != 0 &&
+            stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
+          return OM_COMMON_OVERFLOW;
+        }
+        stream.appendHeld(ordinal, bytes, last);
+        if (stream.needs_init) settleInitsIfComplete();
+        return OM_SUCCESS;
+      }
+    }
+    return OM_SUCCESS;
+  }
+
   auto bufferedDurationNs(int32_t track_index) const -> int64_t override {
     const Stream* stream = streamOfTrack(track_index);
     if (!stream) return -1;
 
     int64_t total = stream->reader->remainingDurationNs();
     const SegmentIndex& index = stream->index();
-    for (const auto& [ordinal, bytes] : stream->inbox) {
+    for (const auto& [ordinal, held] : stream->inbox) {
       if (ordinal < stream->read_ordinal) continue;
       const auto segment = index.segmentAt(ordinal);
       if (!segment) continue;
@@ -338,8 +441,12 @@ public:
     stream->alternative = chosen;
     stream->dropHeld();
     stream->init_inbox.reset();
+    stream->init_complete = false;
     stream->needs_init = true;
     stream->finished = false;
+    stream->streaming = false;
+    stream->pulling.reset();
+    stream->last_read_ns = INT64_MIN;
     stream->reader->flushSegments();
 
     const SegmentIndex& index = stream->index();
@@ -395,6 +502,10 @@ public:
     if (starved != OM_SUCCESS && starved_at <= earliest_dts) return Err(starved);
     if (!earliest || earliest_dts == INT64_MAX) return Err(OM_FORMAT_END_OF_FILE);
 
+    // What this stream is still missing comes at or after this, which is what makes
+    // a stream part-way through a segment hold up only the streams behind it.
+    earliest->last_read_ns = earliest_dts;
+
     auto packet = earliest->reader->readPacket();
     if (packet.isErr()) return packet;
 
@@ -436,6 +547,11 @@ public:
       stream.reader->flushSegments();
       stream.dropHeld();
       stream.finished = false;
+      // Whatever was half-read belonged to where the reader was, not to where it is
+      // going; the pieces still coming for it will match nothing and be dropped.
+      stream.streaming = false;
+      stream.pulling.reset();
+      stream.last_read_ns = INT64_MIN;
       stream.read_ordinal = index.ordinalForTime(nsToScale(target_ns, index.timescale()));
     }
 
@@ -533,9 +649,21 @@ private:
 
   auto pendingStartNs(const Stream& stream) const -> int64_t {
     if (stream.needs_init) return INT64_MIN; // nothing can be read before this
+    // Part-way through a segment, what is missing comes after what has already been
+    // read out of it -- not at the segment's start, which was handed over long
+    // since and would stall every other track for the length of a whole segment.
+    if (stream.streaming && stream.last_read_ns != INT64_MIN) return stream.last_read_ns;
     const auto segment = stream.index().segmentAt(stream.read_ordinal);
     if (!segment) return INT64_MAX;
     return scaleToNs(segment->time, stream.index().timescale());
+  }
+
+  // Whether this ordinal's pieces are going in one at a time, so that the whole of
+  // it must not also be offered.
+  static auto isPartlyDelivered(const Stream& stream, uint64_t ordinal) -> bool {
+    if (stream.streaming && ordinal == stream.read_ordinal) return true;
+    const auto held = stream.inbox.find(ordinal);
+    return held != stream.inbox.end() && !held->second.complete;
   }
 
   // What was handed in, or else a fetch.
@@ -546,19 +674,82 @@ private:
       held.reset();
       return Ok(std::move(bytes));
     }
-    if (!options_.fetch) return Err(OM_IO_NOT_ENOUGH_DATA);
-    return options_.fetch(request);
+    if (options_.fetch) return options_.fetch(request);
+    // An initialization segment, and the first segment of a stream that has none,
+    // are wanted whole however they are read: the track list comes out of them, and
+    // half a track list is not one. A stream_fetch can supply that much.
+    if (options_.stream_fetch) {
+      auto input = options_.stream_fetch(request);
+      if (input.isErr()) return Err(std::move(input).unwrapErr());
+      const std::unique_ptr<InputStream> source = std::move(input).unwrap();
+      if (!source || !source->isValid()) return Err(OM_IO_OPEN_FAILED);
+      std::vector<uint8_t> bytes = readAll(*source);
+      if (bytes.empty()) return Err(OM_IO_NOT_ENOUGH_DATA);
+      return Ok(std::move(bytes));
+    }
+    return Err(OM_IO_NOT_ENOUGH_DATA);
+  }
+
+  // --- Reading a segment as it arrives ----------------------------------------
+
+  // Puts the reader at the start of a segment and gives it however much of it is in
+  // hand. From here on the reader is mid-segment: it holds packets as the rest of
+  // the bytes turn up, and read_ordinal does not move until the segment ends.
+  auto openStreamed(Stream& stream, const Segment& segment, std::span<const uint8_t> arrived)
+      -> OMError {
+    const SegmentIndex& index = stream.index();
+    stream.reader->expectSegmentStart(scaleToNs(segment.time, index.timescale()));
+    if (const OMError opened = stream.reader->beginSegment(); opened != OM_SUCCESS) {
+      return opened;
+    }
+    stream.streaming = true;
+    if (arrived.empty()) return OM_SUCCESS;
+    const OMError fed = stream.reader->feedSegment(arrived);
+    // Left mid-segment with no way to go on, the stream would wait for the rest of
+    // a segment nothing is going to finish.
+    if (fed != OM_SUCCESS) closeStreamed(stream);
+    return fed;
+  }
+
+  auto closeStreamed(Stream& stream) -> OMError {
+    const OMError error = stream.reader->endSegment();
+    stream.streaming = false;
+    stream.pulling.reset();
+    ++stream.read_ordinal;
+    // A segment with nothing in it for this track -- which includes a download that
+    // stopped before anything readable arrived -- is skipped, not failed.
+    return error == OM_FORMAT_NO_STREAMS ? OM_SUCCESS : error;
+  }
+
+  // Reads from the segment's own stream until the reader holds a packet, or until
+  // the segment runs out. What makes StreamOptions::stream_fetch worth having: the
+  // first picture costs the first chunk of the segment rather than all of it.
+  auto pumpStreamed(Stream& stream) -> OMError {
+    std::array<uint8_t, PULL_CHUNK> chunk;
+    while (stream.reader->needsSegment()) {
+      const size_t read = stream.pulling->read(chunk);
+      if (read == 0) return closeStreamed(stream);
+      const OMError fed = stream.reader->feedSegment(std::span(chunk).first(read));
+      if (fed != OM_SUCCESS) {
+        closeStreamed(stream);
+        return fed;
+      }
+    }
+    return OM_SUCCESS;
   }
 
   auto ensureInit(Stream& stream) -> OMError {
     if (!stream.needs_init) return OM_SUCCESS;
 
     if (const auto request = stream.index().initSegment()) {
+      // Still arriving in pieces: there is nothing to read out of part of it.
+      if (stream.init_inbox && !stream.init_complete) return OM_IO_NOT_ENOUGH_DATA;
       auto bytes = obtain(*request, stream.init_inbox);
       if (bytes.isErr()) return std::move(bytes).unwrapErr();
 
       const OMError error = stream.reader->openInit(std::move(bytes).unwrap());
       if (error != OM_SUCCESS) return error;
+      stream.init_complete = false;
       stream.needs_init = false;
       return OM_SUCCESS;
     }
@@ -575,12 +766,51 @@ private:
       const auto segment = index.segmentAt(stream.read_ordinal);
       if (!segment) return OM_FORMAT_NO_STREAMS;
 
-      std::optional<std::vector<uint8_t>> held = stream.take(stream.read_ordinal);
+      if (stream.streaming) {
+        // Already being read as it arrives, and has not described its tracks yet.
+        if (!stream.reader->tracksDescribed()) return OM_IO_NOT_ENOUGH_DATA;
+        // Settled out of a segment the reader is now part-way through, so
+        // read_ordinal stays where it is until that segment ends.
+        stream.needs_init = false;
+        return OM_SUCCESS;
+      }
+
+      // A segment that is still arriving can describe the stream before it is
+      // whole, as long as what has arrived says which of the two shapes it is. A
+      // transport stream does: its program tables and parameter sets sit in its
+      // first packets and are repeated throughout, so the track list falls out of
+      // what is already in hand and the rest is read as it comes. Self-contained
+      // fragmented MP4 does not, because openInit() needs the whole `moov` -- so
+      // that one waits for the segment, once, and streams every segment after it.
+      if (const auto partial = stream.inbox.find(stream.read_ordinal);
+          partial != stream.inbox.end() && !partial->second.complete) {
+        if (!looksLikeMpegTs(partial->second.bytes)) return OM_IO_NOT_ENOUGH_DATA;
+        const std::optional<Stream::Held> held = stream.takeHeld(stream.read_ordinal);
+
+        stream.reader = createMpegTsReader();
+        if (!stream.reader) return OM_COMMON_OUT_OF_MEMORY;
+        if (const OMError opened = stream.reader->openInit({}); opened != OM_SUCCESS) {
+          return opened;
+        }
+        if (const OMError error = openStreamed(stream, *segment, held->bytes);
+            error != OM_SUCCESS) {
+          return error;
+        }
+        if (!stream.reader->tracksDescribed()) return OM_IO_NOT_ENOUGH_DATA;
+        // Settled out of a segment the reader is now part-way through, so
+        // read_ordinal stays where it is until that segment ends.
+        stream.needs_init = false;
+        return OM_SUCCESS;
+      }
+
+      std::optional<Stream::Held> inbox_held = stream.takeHeld(stream.read_ordinal);
+      std::optional<std::vector<uint8_t>> held;
+      if (inbox_held) held = std::move(inbox_held->bytes);
       auto fetched = obtain(segment->request, held);
       if (fetched.isErr()) {
         // Put it back, so a fetch that failed or declined leaves the stream able to
         // try the very same segment again.
-        if (held) stream.hold(stream.read_ordinal, std::move(*held));
+        if (held) stream.hold(stream.read_ordinal, std::move(*held), /*complete=*/true);
         return std::move(fetched).unwrapErr();
       }
       std::vector<uint8_t> bytes = std::move(fetched).unwrap();
@@ -662,11 +892,16 @@ private:
 
   void settleInitsIfComplete() {
     for (const Stream& stream : streams_) {
-      if (!stream.needs_init || stream.init_inbox) continue;
+      if (!stream.needs_init) continue;
+      if (stream.index().initSegment()) {
+        // Half an initialization segment describes nothing; the rest is coming.
+        if (!stream.init_complete) return;
+        continue;
+      }
       // A stream with no initialization section is primed by its first media
-      // segment, which arrives through the same door as every other one.
-      if (stream.index().initSegment()) return;
-      if (!stream.inbox.contains(stream.read_ordinal)) return;
+      // segment, which arrives through the same door as every other one -- or is
+      // already being read as that door opens.
+      if (!stream.streaming && !stream.inbox.contains(stream.read_ordinal)) return;
     }
     settleInits();
   }
@@ -683,7 +918,23 @@ private:
   }
 
   auto advance(Stream& stream) -> OMError {
-    for (int attempt = 0; attempt < MAX_EMPTY_SEGMENTS; ++attempt) {
+    // Only a segment that turned out to hold nothing for this track counts against
+    // the bound; opening one costs a turn round the loop and is not a failure.
+    for (int empty = 0; empty < MAX_EMPTY_SEGMENTS;) {
+      // Part-way through a segment: what the reader wants is the rest of that one,
+      // not the next one.
+      if (stream.streaming) {
+        if (!stream.pulling) {
+          // The rest is the caller's to hand over, through appendSegmentChunk().
+          return OM_IO_NOT_ENOUGH_DATA;
+        }
+        const OMError error = pumpStreamed(stream);
+        if (error != OM_SUCCESS) return error;
+        if (!stream.reader->needsSegment()) return OM_SUCCESS;
+        ++empty; // it ended with nothing in it for this track
+        continue;
+      }
+
       const SegmentIndex& index = stream.index();
       if (const auto bound = index.segmentCount(); bound && stream.read_ordinal >= *bound) {
         stream.finished = true;
@@ -695,13 +946,44 @@ private:
         return OM_SUCCESS;
       }
 
-      std::optional<std::vector<uint8_t>> held = stream.take(stream.read_ordinal);
+      // A segment the caller is still downloading is read from where it has got to.
+      if (const auto partial = stream.inbox.find(stream.read_ordinal);
+          partial != stream.inbox.end() && !partial->second.complete) {
+        const std::optional<Stream::Held> held = stream.takeHeld(stream.read_ordinal);
+        const OMError error = openStreamed(stream, *segment, held->bytes);
+        if (error != OM_SUCCESS) return error;
+        if (!stream.reader->needsSegment()) return OM_SUCCESS;
+        return OM_IO_NOT_ENOUGH_DATA; // what has arrived completed no packet yet
+      }
+
+      // Nothing in hand and somewhere to read it from: read it as it comes rather
+      // than waiting for the whole of it, which at 4K is tens of megabytes.
+      if (!stream.inbox.contains(stream.read_ordinal) && options_.stream_fetch) {
+        auto input = options_.stream_fetch(segment->request);
+        if (input.isErr()) return std::move(input).unwrapErr();
+        stream.pulling = std::move(input).unwrap();
+        if (!stream.pulling || !stream.pulling->isValid()) {
+          stream.pulling.reset();
+          return OM_IO_OPEN_FAILED;
+        }
+        const OMError error = openStreamed(stream, *segment, {});
+        if (error != OM_SUCCESS) {
+          stream.streaming = false;
+          stream.pulling.reset();
+          return error;
+        }
+        continue; // read by the branch at the top of the next turn round
+      }
+
+      std::optional<Stream::Held> inbox_held = stream.takeHeld(stream.read_ordinal);
+      std::optional<std::vector<uint8_t>> held;
+      if (inbox_held) held = std::move(inbox_held->bytes);
 
       auto bytes = obtain(segment->request, held);
       if (bytes.isErr()) {
         // Put it back: a fetch that failed or declined must leave the stream able to
         // try the very same segment again.
-        if (held) stream.hold(stream.read_ordinal, std::move(*held));
+        if (held) stream.hold(stream.read_ordinal, std::move(*held), /*complete=*/true);
         return std::move(bytes).unwrapErr();
       }
 
@@ -711,6 +993,7 @@ private:
       if (error == OM_SUCCESS) return OM_SUCCESS;
       if (error != OM_FORMAT_NO_STREAMS) return error;
       // A segment with nothing in it for this track: skip it and read on.
+      ++empty;
     }
     return OM_FORMAT_CORRUPTED;
   }
@@ -724,6 +1007,63 @@ auto createSegmentDemuxer(SegmentSource source, const StreamOptions& options)
   const OMError error = demuxer->start(std::move(source), options);
   if (error != OM_SUCCESS) return Err(error);
   return Ok(std::unique_ptr<SegmentedDemuxer>(std::move(demuxer)));
+}
+
+namespace {
+
+// Reads one byte range of one file and nothing past it, so that a segment given as
+// a range of a larger resource ends where the playlist said it ends rather than at
+// the end of the file.
+class RangeStream final : public InputStream {
+  std::unique_ptr<InputStream> source_;
+  int64_t remaining_;
+
+public:
+  RangeStream(std::unique_ptr<InputStream> source, int64_t length)
+      : source_(std::move(source)), remaining_(length) {}
+
+  auto read(std::span<uint8_t> buffer) -> size_t override {
+    const size_t want = std::min<size_t>(buffer.size(), static_cast<size_t>(
+                                                            std::max<int64_t>(remaining_, 0)));
+    if (want == 0) return 0;
+    const size_t read = source_->read(buffer.first(want));
+    remaining_ -= static_cast<int64_t>(read);
+    return read;
+  }
+
+  auto tell() const -> int64_t override { return source_->tell(); }
+  auto isEOF() const -> bool override { return remaining_ <= 0 || source_->isEOF(); }
+  auto isValid() const -> bool override { return source_ && source_->isValid(); }
+
+  auto skip(size_t bytes) -> bool override {
+    if (static_cast<int64_t>(bytes) > remaining_) return false;
+    if (!source_->skip(bytes)) return false;
+    remaining_ -= static_cast<int64_t>(bytes);
+    return true;
+  }
+
+  // A range is read front to back and nothing in this library asks it to do
+  // otherwise, so there is no position for a seek to be relative to.
+  auto canSeek() const -> bool override { return false; }
+  auto seek(int64_t, Whence) -> bool override { return false; }
+  auto size() const -> int64_t override { return remaining_; }
+};
+
+} // namespace
+
+auto fileStreamFetch() -> StreamFetchFn {
+  return [](const SegmentRequest& request) -> Result<std::unique_ptr<InputStream>, OMError> {
+    const std::string path = urlToLocalPath(request.url);
+    auto input = InputStream::createFileStream(path);
+    if (!input || !input->isValid()) return Err(OM_IO_OPEN_FAILED);
+
+    if (request.offset != 0 && !input->seek(request.offset, Whence::BEG)) {
+      return Err(OM_IO_SEEK_FAILED);
+    }
+    if (request.length < 0) return Ok(std::move(input));
+    return Ok(std::unique_ptr<InputStream>(
+        std::make_unique<RangeStream>(std::move(input), request.length)));
+  };
 }
 
 auto fileFetch() -> FetchFn {

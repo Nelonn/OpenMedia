@@ -2012,11 +2012,20 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
 // The bytes of one segment, owned as a Buffer so that a Packet can share them:
 // Packet::buffer is a shared_ptr<Buffer> already, so a packet whose payload needs no
 // rewriting can point into the segment it came from rather than get a copy of it.
+//
+// A segment handed over in pieces grows through append(), which can move the bytes.
+// Nothing shares them while that is possible -- see readPacket() -- and every offset
+// into the segment is relative to its start, so a move costs only taking the span
+// again.
 class SegmentBuffer final : public Buffer {
   std::vector<uint8_t> storage_;
 
 public:
   explicit SegmentBuffer(std::vector<uint8_t> data) : storage_(std::move(data)) {}
+
+  void append(std::span<const uint8_t> more) {
+    storage_.insert(storage_.end(), more.begin(), more.end());
+  }
 
   auto bytes() -> std::span<uint8_t> override { return storage_; }
   auto view() const -> std::span<const uint8_t> { return storage_; }
@@ -2100,6 +2109,32 @@ class BMFFDemuxer final : public BaseDemuxer {
   // which is what the shared ownership is for.
   std::shared_ptr<SegmentBuffer> segment_;
 
+  // --- A segment that is still arriving ---------------------------------------
+  //
+  // A fragmented segment names its samples in a `moof` and then writes them into
+  // the `mdat` behind it, so the names arrive before the bytes: the samples of a
+  // fragment can be handed out one at a time as its `mdat` fills, instead of once
+  // the whole of it has. These carry that walk from one piece to the next.
+  bool segment_open_ = false;
+  size_t scan_pos_ = 0; // the next top-level box header to look at
+  // A `moof` read whole and not yet parsed. Its samples lie past what has arrived,
+  // and it is the box after it that says how far the segment reaches -- so it waits
+  // for that box's header, which is the next thing on the wire.
+  std::optional<std::pair<size_t, size_t>> pending_moof_;
+  size_t declared_end_ = 0; // how far the boxes seen so far say the segment runs
+
+  // Which of `samples_` have been handed out. Reading a segment whole needs no such
+  // thing -- `current_sample_index_` walks it in decode order and that is that. A
+  // segment read as it arrives cannot be walked that way: a packager is free to put
+  // one track's data at the end of the `mdat`, and ffmpeg's does, so the sample that
+  // comes first in decode order is sometimes the very last one to arrive. Waiting
+  // for it would mean waiting for the whole segment, which is the one thing this is
+  // all for. So each track is read at its own pace -- earliest decode time among the
+  // samples whose bytes are here -- and this says what is left.
+  //
+  // Empty for a segment read whole, which is also what tells the two apart.
+  std::vector<bool> taken_;
+
   RandomRead random_;
 
   static constexpr size_t NO_TRACK = static_cast<size_t>(-1);
@@ -2132,6 +2167,7 @@ public:
     public_to_slot_.clear();
     keyframes_.clear();
     samples_.clear();
+    taken_.clear();
     meta_items_.clear();
     attachment_tracks_.clear();
     pssh_boxes_.clear();
@@ -2142,6 +2178,10 @@ public:
     in_ilst_ = false;
     current_sample_index_ = 0;
     current_moof_offset_ = 0;
+    segment_open_ = false;
+    scan_pos_ = 0;
+    pending_moof_.reset();
+    declared_end_ = 0;
     movie_timescale_ = 0;
     pcm_little_endian_ = false;
     fatal_ = false;
@@ -2201,16 +2241,16 @@ public:
   auto readPacket() -> Result<Packet, OMError> override {
     if (parsing_state_ != ParsingState::READY)
       return Err(OM_COMMON_NOT_INITIALIZED);
-    if (current_sample_index_ >= samples_.size())
-      return Err(OM_FORMAT_END_OF_FILE);
+    const size_t index = nextSampleIndex();
+    if (index >= samples_.size()) return Err(OM_FORMAT_END_OF_FILE);
 
-    const Sample& sample = samples_[current_sample_index_];
+    const Sample& sample = samples_[index];
     BMFFTrack* bmff_track = trackForPublicIndex(sample.stream_index);
     if (!bmff_track) return Err(OM_FORMAT_STREAM_NOT_FOUND);
 
     if (sample.crypto >= 0) {
       auto packet = readProtectedPacket(sample, *bmff_track);
-      if (packet) ++current_sample_index_;
+      if (packet) markRead(index);
       return packet;
     }
 
@@ -2236,7 +2276,11 @@ public:
     // writing into the segment. Nothing in this library does; the one component that
     // rewrites a payload in place is the bitstream filter, which is exactly the case
     // excluded here.
-    if (!bsf && segment_ && sample.offset >= 0) {
+    // While a segment is still arriving this is skipped: appending to it can move
+    // its bytes, and a packet pointing at where they used to be is a dangling one.
+    // The copy below costs one memcpy of an audio packet, which is the only kind
+    // that takes this path and the smallest kind there is.
+    if (!bsf && segment_ && !segment_open_ && sample.offset >= 0) {
       const size_t at = static_cast<size_t>(sample.offset);
       if (!random_.view(at, sample.size).empty()) {
         pkt.buffer = segment_;
@@ -2275,7 +2319,7 @@ public:
     pkt.duration = sample.duration;
     pkt.is_keyframe = sample.is_keyframe;
 
-    ++current_sample_index_;
+    markRead(index);
     return Ok(std::move(pkt));
   }
 
@@ -2441,17 +2485,7 @@ public:
     fatal_ = false;
 
     parseBoxes(0, random_.size());
-
-    // `publishTracks` stamps each sample with its public index, and it ran back
-    // when the tracks were settled; these samples are new and still unstamped.
-    for (const size_t slot : public_to_slot_) {
-      BMFFTrack& track = bmff_tracks_[slot];
-      for (Sample& sample : track.samples) {
-        sample.stream_index = track.index;
-      }
-    }
-
-    mergeSamplesByDecodeTime();
+    stampAndMerge();
     buildKeyframeIndex();
     current_sample_index_ = 0;
 
@@ -2466,20 +2500,94 @@ public:
     return OM_SUCCESS;
   }
 
-  auto needsSegment() const -> bool {
-    return current_sample_index_ >= samples_.size();
+  auto beginSegment() -> OMError {
+    if (!fragment_mode_ || parsing_state_ != ParsingState::READY) {
+      return OM_COMMON_NOT_INITIALIZED;
+    }
+    dropSegment();
+    segment_ = std::make_shared<SegmentBuffer>(std::vector<uint8_t>());
+    random_ = RandomRead(segment_->view());
+    segment_open_ = true;
+    return OM_SUCCESS;
   }
 
+  auto feedSegment(std::span<const uint8_t> bytes) -> OMError {
+    if (!segment_open_) return OM_COMMON_NOT_INITIALIZED;
+    if (!bytes.empty()) {
+      segment_->append(bytes);
+      random_ = RandomRead(segment_->view());
+    }
+    // A box that cannot be read is not reported here: the samples parsed before it
+    // are still good, and whether anything came of the segment at all is what
+    // endSegment() answers.
+    scanTopLevel(/*final=*/false);
+    return OM_SUCCESS;
+  }
+
+  auto endSegment() -> OMError {
+    if (!segment_open_) return OM_COMMON_NOT_INITIALIZED;
+    scanTopLevel(/*final=*/true);
+    if (pending_moof_) {
+      // Nothing followed it, so the segment reaches exactly as far as it reaches.
+      declared_end_ = random_.size();
+      parsePendingMoof();
+    }
+    segment_open_ = false;
+    declared_end_ = 0;
+
+    // A sample whose bytes never arrived -- a download cut short, a `moof` naming
+    // more than the `mdat` held -- is not a sample. One already handed out was
+    // readable by definition, so only what is left can be dropped here.
+    size_t write = 0;
+    for (size_t i = 0; i < samples_.size(); ++i) {
+      if (!taken_[i] && !sampleFitsInStream(samples_[i].offset, samples_[i].size,
+                                            random_.size())) {
+        continue;
+      }
+      samples_[write] = samples_[i];
+      taken_[write] = taken_[i];
+      ++write;
+    }
+    if (write != samples_.size()) {
+      samples_.resize(write);
+      taken_.resize(write);
+      current_sample_index_ = 0;
+      while (current_sample_index_ < taken_.size() && taken_[current_sample_index_]) {
+        ++current_sample_index_;
+      }
+      buildKeyframeIndex();
+    }
+
+    if (samples_.empty()) {
+      const OMError error = fatal_ ? OM_FORMAT_CORRUPTED : OM_FORMAT_NO_STREAMS;
+      dropSegment();
+      return error;
+    }
+    return OM_SUCCESS;
+  }
+
+  auto segmentOpen() const -> bool { return segment_open_; }
+
+  auto needsSegment() const -> bool { return nextSampleIndex() >= samples_.size(); }
+
   auto nextDecodeTimeNs() const -> int64_t {
-    if (needsSegment()) return INT64_MAX;
-    const Sample& sample = samples_[current_sample_index_];
+    const size_t index = nextSampleIndex();
+    if (index >= samples_.size()) return INT64_MAX;
+    const Sample& sample = samples_[index];
     return toNanoseconds(sample.dts, publicTimescale(sample.stream_index));
   }
 
   auto remainingDurationNs() const -> int64_t {
-    if (needsSegment()) return 0;
-    const Sample& next = samples_[current_sample_index_];
-    const Sample& last = samples_.back();
+    const size_t index = nextSampleIndex();
+    if (index >= samples_.size()) return 0;
+    const Sample& next = samples_[index];
+    // Only what can be read right now counts. In a segment still arriving the
+    // samples named run past the samples whose bytes have got here, and a figure
+    // the caller throttles its downloading on must not include media whose bytes
+    // are what it would be downloading.
+    size_t last_index = samples_.size() - 1;
+    while (last_index > index && !sampleAvailable(samples_[last_index])) --last_index;
+    const Sample& last = samples_[last_index];
     // `samples_` is in decode order, so the last entry ends last.
     const int64_t end = toNanoseconds(last.dts + static_cast<int64_t>(last.duration),
                                       publicTimescale(last.stream_index));
@@ -2519,14 +2627,162 @@ private:
       track.crypto.subsamples.clear();
     }
     samples_.clear();
+    taken_.clear();
     keyframes_.clear();
     current_sample_index_ = 0;
     current_fragment_.reset();
     current_moof_offset_ = 0;
     current_track_slot_ = NO_TRACK;
 
+    segment_open_ = false;
+    scan_pos_ = 0;
+    pending_moof_.reset();
+    declared_end_ = 0;
+
     random_ = RandomRead();
     segment_.reset();
+  }
+
+  // `publishTracks` stamps each sample with its public index, and it ran back when
+  // the tracks were settled; samples parsed out of a fragment are new and still
+  // unstamped.
+  void stampAndMerge() {
+    for (const size_t slot : public_to_slot_) {
+      BMFFTrack& track = bmff_tracks_[slot];
+      for (Sample& sample : track.samples) {
+        sample.stream_index = track.index;
+      }
+    }
+    mergeSamplesByDecodeTime();
+    if (segment_open_) taken_.resize(samples_.size(), false);
+  }
+
+  // What a sample's offset and size are checked against while it is being parsed.
+  // Reading a segment whole that is the segment itself; reading one as it arrives,
+  // a `moof` names samples lying in an `mdat` whose bytes have not turned up yet,
+  // so the bound is how far the boxes seen so far declare the segment to run.
+  // needsSegment() then waits for each sample's own bytes, and endSegment() drops
+  // whatever never came.
+  auto sampleBound() const -> size_t {
+    return segment_open_ ? std::max(declared_end_, random_.size()) : random_.size();
+  }
+
+  // Whether this sample's bytes have got here, which in a segment read whole is
+  // always.
+  auto sampleAvailable(const Sample& sample) const -> bool {
+    return !segment_open_ || sampleFitsInStream(sample.offset, sample.size, random_.size());
+  }
+
+  // The sample to hand over next, or `samples_.size()` when there is none to hand
+  // over yet. Decode order for a segment read whole; for one read as it arrives,
+  // the earliest in decode order of those whose bytes are here.
+  auto nextSampleIndex() const -> size_t {
+    if (taken_.empty()) return current_sample_index_;
+
+    size_t best = samples_.size();
+    int64_t best_ns = INT64_MAX;
+    for (size_t i = current_sample_index_; i < samples_.size(); ++i) {
+      if (taken_[i] || !sampleAvailable(samples_[i])) continue;
+      const int64_t ns = toNanoseconds(samples_[i].dts, publicTimescale(samples_[i].stream_index));
+      if (ns < best_ns) {
+        best_ns = ns;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  void markRead(size_t index) {
+    if (taken_.empty()) {
+      ++current_sample_index_;
+      return;
+    }
+    taken_[index] = true;
+    // Nothing below this has anything left in it, which is what keeps the scan
+    // above from walking the whole segment over again for every packet.
+    while (current_sample_index_ < taken_.size() && taken_[current_sample_index_]) {
+      ++current_sample_index_;
+    }
+  }
+
+  // Walks the segment's top-level boxes as far as what has arrived allows. A `moof`
+  // is small and is read whole, but parsed only once the box behind it has said how
+  // far the segment reaches -- which is what its samples' offsets are checked
+  // against. An `mdat` needs nothing but its header: its body is addressed by those
+  // offsets and by nothing else, so there is no reason to wait for it.
+  void scanTopLevel(bool final) {
+    while (!fatal_) {
+      const size_t have = random_.size();
+      if (scan_pos_ + 8 > have) return;
+
+      uint8_t header[8];
+      if (!random_.read(scan_pos_, header, 8)) return;
+      const uint32_t raw_size = load_u32_be(header);
+      const uint32_t type = load_u32(header + 4);
+
+      size_t body_pos = scan_pos_ + 8;
+      uint64_t body_size = 0;
+      if (raw_size == 1) {
+        if (scan_pos_ + 16 > have) return;
+        uint8_t large[8];
+        if (!random_.read(body_pos, large, 8)) return;
+        const uint64_t full_size = load_u64_be(large);
+        body_pos = scan_pos_ + 16;
+        body_size = (full_size >= 16) ? full_size - 16u : 0u;
+      } else if (raw_size == 0) {
+        // To the end of the segment, which is a thing only the end of the segment
+        // can say.
+        if (!final) return;
+        body_size = have - body_pos;
+      } else if (raw_size < 8) {
+        fatal_ = true;
+        return;
+      } else {
+        body_size = raw_size - 8u;
+      }
+      const size_t box_end =
+          body_pos + static_cast<size_t>(std::min<uint64_t>(body_size, SIZE_MAX - body_pos));
+
+      // This box's header is what tells the `moof` in front of it where its samples
+      // lie, which is all that was being waited for.
+      if (pending_moof_) {
+        declared_end_ = std::max(declared_end_, box_end);
+        parsePendingMoof();
+        if (fatal_) return;
+      }
+
+      if (type == ATOM('m', 'o', 'o', 'f')) {
+        if (box_end > have) return;
+        pending_moof_ = std::pair<size_t, size_t> {scan_pos_, box_end};
+        scan_pos_ = box_end;
+        continue;
+      }
+      if (type == ATOM('m', 'd', 'a', 't')) {
+        declared_end_ = std::max(declared_end_, box_end);
+        scan_pos_ = box_end;
+        continue;
+      }
+      // `styp`, `sidx`, `emsg`, `pssh`: read from their bodies, so the whole box is
+      // needed. None of them is large.
+      if (box_end > have) return;
+      parseBoxes(scan_pos_, box_end);
+      scan_pos_ = box_end;
+    }
+  }
+
+  void parsePendingMoof() {
+    const auto [from, to] = *pending_moof_;
+    pending_moof_.reset();
+
+    const size_t before = samples_.size();
+    parseBoxes(from, to);
+    // A `traf` left open by a truncated box would otherwise take the next
+    // fragment's boxes for its own.
+    current_fragment_.reset();
+    stampAndMerge();
+    // Appended in decode order behind what is already there, so the position being
+    // read stays where it was and only the keyframe positions have to be redone.
+    if (samples_.size() != before) buildKeyframeIndex();
   }
 
   auto trackTimescale(int32_t public_index) -> uint32_t {
@@ -3028,7 +3284,7 @@ private:
     // sample_count is a 32-bit field from the file; the loop is bounded by the
     // box body instead, so a corrupt count cannot push millions of zero-sized
     // samples into the track.
-    const size_t stream_size = random_.size();
+    const size_t stream_size = sampleBound();
     for (uint32_t i = 0; i < sample_count && r.ok(); ++i) {
       const uint32_t duration = (flags & 0x000100u)
           ? r.u32be()
@@ -4357,6 +4613,15 @@ public:
   auto pushSegment(std::vector<uint8_t> segment) -> OMError override {
     return demuxer_.pushSegment(std::move(segment));
   }
+
+  auto beginSegment() -> OMError override { return demuxer_.beginSegment(); }
+
+  auto feedSegment(std::span<const uint8_t> bytes) -> OMError override {
+    return demuxer_.feedSegment(bytes);
+  }
+
+  auto endSegment() -> OMError override { return demuxer_.endSegment(); }
+  auto segmentOpen() const -> bool override { return demuxer_.segmentOpen(); }
 
   auto needsSegment() const -> bool override { return demuxer_.needsSegment(); }
   auto readPacket() -> Result<Packet, OMError> override { return demuxer_.readPacket(); }
