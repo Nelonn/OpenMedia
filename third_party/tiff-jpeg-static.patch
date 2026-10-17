@@ -1,0 +1,35 @@
+diff --git a/cmake/JPEGCodec.cmake b/cmake/JPEGCodec.cmake
+--- a/cmake/JPEGCodec.cmake
++++ b/cmake/JPEGCodec.cmake
+@@ -37,16 +37,26 @@
+     if(libjpeg-turbo_FOUND)
+         # libjpeg-turbo was found via CONFIG
+         # It provides targets like libjpeg-turbo::jpeg and libjpeg-turbo::turbojpeg
+-        # IMPORTANT: We need libjpeg-turbo::jpeg (standard libjpeg API), NOT turbojpeg
++        # IMPORTANT: We need the standard libjpeg API, NOT turbojpeg
+         # The turbojpeg target only provides the TurboJPEG API, which libtiff doesn't use
++        # Prefer the static archive when libjpeg-turbo provides one: hardcoding the
++        # shared libjpeg-turbo::jpeg target puts libjpeg.so into every consumer of
++        # libtiff, even when that consumer already links libjpeg.a itself, which
++        # ends up with two copies of libjpeg in one binary.
++        set(_jpeg_turbo_target "")
++        if(TARGET libjpeg-turbo::jpeg-static)
++            set(_jpeg_turbo_target libjpeg-turbo::jpeg-static)
++        elseif(TARGET libjpeg-turbo::jpeg)
++            set(_jpeg_turbo_target libjpeg-turbo::jpeg)
++        endif()
+         # Create an alias to JPEG::JPEG for consistent usage throughout the project
+-        if(TARGET libjpeg-turbo::jpeg AND NOT TARGET JPEG::JPEG)
+-            add_library(JPEG::JPEG ALIAS libjpeg-turbo::jpeg)
++        if(_jpeg_turbo_target AND NOT TARGET JPEG::JPEG)
++            add_library(JPEG::JPEG ALIAS ${_jpeg_turbo_target})
+             set(JPEG_FOUND TRUE)
+             # Set JPEG_LIBRARIES to the target name
+-            set(JPEG_LIBRARIES libjpeg-turbo::jpeg)
++            set(JPEG_LIBRARIES ${_jpeg_turbo_target})
+             # For JPEG_INCLUDE_DIRS, try to get the property, but it's OK if it's not set
+-            get_target_property(_jpeg_includes libjpeg-turbo::jpeg INTERFACE_INCLUDE_DIRECTORIES)
++            get_target_property(_jpeg_includes ${_jpeg_turbo_target} INTERFACE_INCLUDE_DIRECTORIES)
+             if(_jpeg_includes)
+                 set(JPEG_INCLUDE_DIRS "${_jpeg_includes}")
+             else()

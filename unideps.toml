@@ -87,7 +87,7 @@ enabled_if = "OPENMEDIA_WEBP"
 git = "https://github.com/libjpeg-turbo/libjpeg-turbo"
 tag = "3.2.0"
 strategy = "cmake-install"
-cmake_options = { CMAKE_INSTALL_DEFAULT_LIBDIR = "lib", WITH_TOOLS = "OFF" }
+cmake_options = { CMAKE_INSTALL_DEFAULT_LIBDIR = "lib", WITH_TOOLS = "OFF", ENABLE_SHARED = "OFF", ENABLE_STATIC = "ON" }
 enabled_if = "OPENMEDIA_JPEG"
 
 [dependencies.giflib]
@@ -144,8 +144,9 @@ commit = "dd0ed2c6198fb8fe736ec0329d24a50cfbb2f2ae"
 strategy = "cmake-install"
 import_name = "TIFF"
 cmake_options = { tiff-tools = "OFF", tiff-tests = "OFF", tiff-contrib = "OFF", tiff-docs = "OFF", tiff-install = "ON", libdeflate = "OFF", jbig = "OFF", lzma = "OFF", zstd = "OFF" }
+patches = [ "third_party/tiff-jpeg-static.patch" ]
 enabled_if = "OPENMEDIA_TIFF || OPENMEDIA_DNG"
-dependencies = [ "webp" ]
+dependencies = [ "webp", "libjpeg-turbo" ]
 
 [dependencies.sdl3]
 git = "https://github.com/libsdl-org/SDL"
