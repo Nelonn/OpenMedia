@@ -45,6 +45,7 @@ OM_ENUM(OMError, int32_t) {
   OM_FORMAT_SYNC_LOST = 3011,         // Lost sync, trying to resync
   OM_FORMAT_INVALID_PACKET = 3012,    // Packet size/flags make no sense
   OM_FORMAT_MISSING_KEYFRAME = 3013,  // Stream started without keyframe
+  OM_FORMAT_ENCRYPTED = 3014,         // Needs a key nothing supplied; not corrupt
 
   OM_CODEC_UNKNOWN_ERROR = 4000,
   OM_CODEC_NOT_FOUND = 4001,      // No decoder for codec_id

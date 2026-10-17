@@ -29,6 +29,30 @@ struct IndexDescription {
   uint32_t height = 0;
 };
 
+// `#EXT-X-KEY` turned into the form the demuxer and the caller both read.
+auto segmentEncryptionOf(const hls::Key& key, uint64_t sequence)
+    -> std::shared_ptr<const SegmentEncryption> {
+  if (!key.isEncrypted()) return nullptr;
+
+  auto out = std::make_shared<SegmentEncryption>();
+  out->method = key.method_name;
+  out->uri = key.uri;
+  out->key_format = key.format.empty() ? std::string("identity") : key.format;
+  out->key_format_versions = key.format_versions;
+  out->sequence = sequence;
+  out->whole_segment = key.method == hls::KeyMethod::Aes128;
+
+  // An initialization vector the tag did not state is the media sequence number,
+  // big-endian in the low eight bytes of the block (RFC 8216 5.2).
+  out->iv_explicit = hls::parseHexIv(key.iv, out->iv);
+  if (!out->iv_explicit) {
+    for (int i = 0; i < 8; ++i) {
+      out->iv[15 - i] = static_cast<uint8_t>((sequence >> (8 * i)) & 0xFFu);
+    }
+  }
+  return out;
+}
+
 // An HLS media playlist, answering the questions the segment demuxer asks.
 //
 // A playlist is already the explicit segment list DASH computes from a template, so
@@ -42,7 +66,9 @@ class HlsSegmentIndex final : public SegmentIndex {
   // Each segment's start in milliseconds, plus one entry for the end, so a binary
   // search answers ordinalForTime directly.
   std::vector<int64_t> starts_;
-  size_t usable_ = 0;
+  // Per segment, the `#EXT-X-KEY` in force there, or null where it is in the clear.
+  // Built once here rather than in segmentAt(), which is called per packet.
+  std::vector<std::shared_ptr<const SegmentEncryption>> keys_;
 
 public:
   HlsSegmentIndex(std::shared_ptr<const hls::MediaPlaylist> playlist,
@@ -50,48 +76,60 @@ public:
       : playlist_(std::move(playlist)), description_(std::move(description)) {
     const std::vector<hls::MediaSegment>& segments = playlist_->segments;
 
-    // A `#EXT-X-MAP` replaced part-way through changes the parameter sets the
-    // segments after it decode against, and a reader holds one initialization
-    // segment at a time -- so the run stops there rather than handing over segments
-    // that would decode as noise. MPEG-TS names no map, so its run is the whole
-    // playlist.
-    const std::string init = segments.empty() ? std::string() : segments.front().init_url;
-    while (usable_ < segments.size() && segments[usable_].init_url == init) ++usable_;
-
-    starts_.reserve(usable_ + 1);
+    starts_.reserve(segments.size() + 1);
+    keys_.reserve(segments.size());
     int64_t cursor = 0;
-    for (size_t i = 0; i < usable_; ++i) {
+    for (const hls::MediaSegment& segment : segments) {
       starts_.push_back(cursor);
-      cursor += static_cast<int64_t>(segments[i].duration * 1000.0 + 0.5);
+      cursor += static_cast<int64_t>(segment.duration * 1000.0 + 0.5);
+      // One per segment even where a run of them is under the same `#EXT-X-KEY`:
+      // every one carries its own media sequence number, and that is what a derived
+      // initialization vector is made of. Sharing them would have been a few hundred
+      // kilobytes on a four-hour playlist, against a copy of the tag itself that the
+      // playlist is already keeping per segment.
+      keys_.push_back(segmentEncryptionOf(segment.key, segment.sequence));
     }
     starts_.push_back(cursor);
   }
 
   auto initSegment() const -> std::optional<SegmentRequest> override {
     if (playlist_->segments.empty()) return std::nullopt;
-    const hls::MediaSegment& first = playlist_->segments.front();
-    if (first.init_url.empty()) return std::nullopt;
-    return SegmentRequest {first.init_url, first.init_range.offset, first.init_range.length};
+    return initOf(playlist_->segments.front());
   }
 
   auto segmentCount() const -> std::optional<uint64_t> override {
     // What this playlist listed, live or not: a growing playlist grows in a later
     // copy of itself, and fetching that copy is the caller's to do.
-    return static_cast<uint64_t>(usable_);
+    return static_cast<uint64_t>(playlist_->segments.size());
   }
 
   auto segmentAt(uint64_t ordinal) const -> std::optional<Segment> override {
-    if (ordinal >= usable_) return std::nullopt;
-    const hls::MediaSegment& segment = playlist_->segments[static_cast<size_t>(ordinal)];
-    const int64_t start = starts_[static_cast<size_t>(ordinal)];
-    return Segment {SegmentRequest {segment.url, segment.range.offset, segment.range.length},
-                    start, static_cast<uint64_t>(starts_[static_cast<size_t>(ordinal) + 1] - start)};
+    if (ordinal >= playlist_->segments.size()) return std::nullopt;
+    const auto at = static_cast<size_t>(ordinal);
+    const hls::MediaSegment& segment = playlist_->segments[at];
+    const int64_t start = starts_[at];
+
+    Segment out;
+    out.request = SegmentRequest {segment.url, segment.range.offset, segment.range.length};
+    out.time = start;
+    out.duration = static_cast<uint64_t>(starts_[at + 1] - start);
+    out.init = initOf(segment);
+    out.gap = segment.gap;
+    // A playlist's first segment is a discontinuity in all but name: the clock before
+    // it is whatever the last read left behind, which after a seek or a quality
+    // switch has nothing to do with this one.
+    out.discontinuity = segment.discontinuity || at == 0;
+    out.program_date_time_ms = segment.program_date_time_ms;
+    out.encryption = keys_[at];
+    return out;
   }
 
   auto ordinalForTime(int64_t media_time) const -> uint64_t override {
-    if (usable_ == 0 || media_time <= 0) return 0;
+    const size_t count = playlist_->segments.size();
+    if (count == 0 || media_time <= 0) return 0;
     // The first segment starting after the target, stepped back one.
-    const auto after = std::upper_bound(starts_.begin(), starts_.begin() + usable_, media_time);
+    const auto after = std::upper_bound(
+        starts_.begin(), starts_.begin() + static_cast<ptrdiff_t>(count), media_time);
     if (after == starts_.begin()) return 0;
     return static_cast<uint64_t>((after - starts_.begin()) - 1);
   }
@@ -106,8 +144,30 @@ public:
 
   auto isLive() const -> bool { return playlist_->isLive(); }
   auto totalDurationNs() const -> int64_t { return starts_.back() * INT64_C(1'000'000); }
-  auto isEncrypted() const -> bool { return playlist_->isEncrypted(); }
-  auto isEmpty() const -> bool { return usable_ == 0; }
+  auto isEmpty() const -> bool { return playlist_->segments.empty(); }
+
+  // `#EXT-X-TARGETDURATION`: the longest any one segment may be, which is how long
+  // a live playlist stays current.
+  auto targetDurationNs() const -> int64_t {
+    return static_cast<int64_t>(playlist_->target_duration * 1e9);
+  }
+
+  // `#EXT-X-START`, where the playlist asks playback to begin. A negative offset
+  // counts back from the end, which only a playlist with a known end can mean.
+  auto startOffsetNs() const -> int64_t {
+    if (!playlist_->has_start) return 0;
+    const double total = playlist_->totalDuration();
+    const double offset = playlist_->start_offset < 0 ? total + playlist_->start_offset
+                                                      : playlist_->start_offset;
+    return static_cast<int64_t>(std::clamp(offset, 0.0, total) * 1e9);
+  }
+
+private:
+  static auto initOf(const hls::MediaSegment& segment) -> std::optional<SegmentRequest> {
+    if (segment.init_url.empty()) return std::nullopt;
+    return SegmentRequest {segment.init_url, segment.init_range.offset,
+                           segment.init_range.length};
+  }
 };
 
 auto mediaTypeOf(hls::RenditionType type) -> OMMediaType {
@@ -117,6 +177,27 @@ auto mediaTypeOf(hls::RenditionType type) -> OMMediaType {
     case hls::RenditionType::Subtitles: return OM_MEDIA_SUBTITLE;
     default: return OM_MEDIA_NONE;
   }
+}
+
+// What `#EXT-X-MEDIA` says about a rendition's part in the presentation. The
+// CHARACTERISTICS strings are Apple's media characteristic identifiers, of which
+// the two accessibility ones are what a track list has somewhere to put.
+auto dispositionOf(const hls::Rendition& rendition) -> OMDisposition {
+  auto flags = static_cast<uint16_t>(OM_DISPOSITION_NONE);
+  if (rendition.is_default) flags |= OM_DISPOSITION_DEFAULT;
+  if (rendition.forced) flags |= OM_DISPOSITION_FORCED;
+  if (rendition.characteristics.find("public.accessibility.transcribes-spoken-dialog") !=
+          std::string::npos ||
+      rendition.characteristics.find(
+          "public.accessibility.describes-music-and-sound") != std::string::npos) {
+    flags |= OM_DISPOSITION_HEARING_IMPAIRED;
+  }
+  if (rendition.characteristics.find("public.accessibility.describes-video") !=
+      std::string::npos) {
+    flags |= OM_DISPOSITION_VISUAL_IMPAIRED;
+  }
+  if (rendition.type == hls::RenditionType::ClosedCaptions) flags |= OM_DISPOSITION_CAPTIONS;
+  return static_cast<OMDisposition>(flags);
 }
 
 auto sameLanguage(std::string_view a, std::string_view b) -> bool {
@@ -131,6 +212,36 @@ auto sameLanguage(std::string_view a, std::string_view b) -> bool {
            return std::tolower(static_cast<unsigned char>(x)) ==
                   std::tolower(static_cast<unsigned char>(y));
          });
+}
+
+// `hls::Key` as the public API reports it. `session` tells a master playlist's
+// `#EXT-X-SESSION-KEY` from a media playlist's `#EXT-X-KEY`, which is the one thing
+// a caller has to know before it can decide when to ask for a licence.
+auto publicKeyOf(const hls::Key& key, bool session) -> HlsKey {
+  HlsKey out;
+  out.method = key.method_name;
+  out.uri = key.uri;
+  // The spec's default: an ordinary key fetched over HTTP.
+  out.key_format = key.format.empty() ? std::string("identity") : key.format;
+  out.key_format_versions = key.format_versions;
+  out.iv = key.iv;
+  out.session = session;
+  return out;
+}
+
+// Two tags naming the same key, which is what a playlist repeating one does between
+// every pair of segments it covers. The initialization vector is left out: a
+// per-segment one does not make a second key, it makes the same key used again.
+auto sameKey(const HlsKey& a, const HlsKey& b) -> bool {
+  return a.method == b.method && a.uri == b.uri && a.key_format == b.key_format &&
+         a.session == b.session;
+}
+
+void appendKey(std::vector<HlsKey>& keys, HlsKey key) {
+  const bool seen = std::any_of(keys.begin(), keys.end(), [&](const HlsKey& existing) {
+    return sameKey(existing, key);
+  });
+  if (!seen) keys.push_back(std::move(key));
 }
 
 class HlsPlaylistsImpl final : public HlsPlaylists {
@@ -197,6 +308,27 @@ public:
     return ladder;
   }
 
+  auto keys() const -> std::vector<HlsKey> override {
+    std::vector<HlsKey> keys;
+    // The master playlist first, since those are the keys a player can act on
+    // before it has fetched anything else.
+    if (master_) {
+      for (const hls::Key& key : master_->session_keys) {
+        appendKey(keys, publicKeyOf(key, /*session=*/true));
+      }
+    }
+    // In the order the playlists were added, so a presentation's answer does not
+    // depend on how a std::map happened to order its URLs.
+    for (const std::string& url : arrival_) {
+      const auto found = media_.find(url);
+      if (found == media_.end()) continue;
+      for (const hls::MediaSegment& segment : found->second->segments) {
+        if (segment.key.isEncrypted()) appendKey(keys, publicKeyOf(segment.key, false));
+      }
+    }
+    return keys;
+  }
+
   auto open() -> Result<std::unique_ptr<SegmentedDemuxer>, OMError> override {
     if (media_.empty()) return Err(OM_IO_NOT_ENOUGH_DATA);
     for (const std::string& url : requiredUrls()) {
@@ -259,9 +391,20 @@ private:
           }
         }
       }
+      // DEFAULT=YES is what the playlist asks for when nothing else was asked for,
+      // and AUTOSELECT=NO withholds a rendition from exactly this choice (RFC 8216
+      // 4.3.4.1) -- a commentary or a descriptive track nobody asked to hear.
       if (!pick) {
         for (const hls::Rendition* candidate : group_members) {
           if (candidate->is_default) {
+            pick = candidate;
+            break;
+          }
+        }
+      }
+      if (!pick) {
+        for (const hls::Rendition* candidate : group_members) {
+          if (candidate->autoselect) {
             pick = candidate;
             break;
           }
@@ -297,6 +440,14 @@ private:
     return std::make_unique<HlsSegmentIndex>(found->second, std::move(description));
   }
 
+  // What the presentation as a whole is, as the playlist being read states it.
+  static void describeSource(SegmentSource& source, const HlsSegmentIndex& index) {
+    source.duration_ns = index.totalDurationNs();
+    source.live = index.isLive();
+    source.start_offset_ns = index.startOffsetNs();
+    source.target_duration_ns = index.targetDurationNs();
+  }
+
   auto sourceFromLoneMedia() const -> SegmentSource {
     SegmentSource source;
     const std::string& url = arrival_.front();
@@ -306,8 +457,7 @@ private:
     auto index = makeIndex(url, std::move(description));
     if (!index || index->isEmpty()) return source;
 
-    source.duration_ns = index->totalDurationNs();
-    source.live = index->isLive();
+    describeSource(source, *index);
 
     SegmentTrack track;
     // Nothing in a media playlist says whether it carries video, audio or both;
@@ -322,6 +472,7 @@ private:
     SegmentSource source;
     const hls::Variant* chosen = chosenVariant();
     if (!chosen) return source;
+    const HlsSegmentIndex* described = nullptr;
 
     // The variants are one track's alternatives. Only those whose playlist is in
     // hand are offered: switching to the rest would mean fetching a playlist
@@ -329,6 +480,7 @@ private:
     SegmentTrack variants;
     variants.type = OM_MEDIA_NONE; // the initialization segment knows
     size_t chosen_at = 0;
+    const HlsSegmentIndex* first_readable = nullptr;
     for (const hls::Variant& variant : master_->variants) {
       if (variant.iframes_only) continue;
       if (!media_.contains(playlistUrlOf(variant))) continue;
@@ -345,14 +497,20 @@ private:
 
       auto index = makeIndex(playlistUrlOf(variant), std::move(description));
       if (!index || index->isEmpty()) continue;
-      if (&variant == chosen) chosen_at = variants.alternatives.size();
-      if (variants.alternatives.empty()) {
-        source.duration_ns = index->totalDurationNs();
-        source.live = index->isLive();
+      if (!first_readable) first_readable = index.get();
+      // Described by the variant that will actually be read, not by whichever
+      // happened to be listed first: the two agree on a well-made ladder, and where
+      // they do not there is no reason to report the one nothing will play.
+      if (&variant == chosen) {
+        chosen_at = variants.alternatives.size();
+        described = index.get();
       }
       variants.alternatives.push_back(std::move(index));
     }
     if (variants.alternatives.empty()) return source;
+    // The chosen variant's own playlist turned out unreadable, so what will be
+    // played -- and what describes the presentation -- is the first that was not.
+    describeSource(source, *(described ? described : first_readable));
 
     // The segment demuxer picks the first alternative that fits its caps, which
     // were already applied here against what the master said; putting the choice
@@ -371,6 +529,9 @@ private:
       SegmentTrack track;
       track.type = mediaTypeOf(rendition->type);
       track.language = rendition->language;
+      track.name = rendition->name;
+      track.disposition = dispositionOf(*rendition);
+      track.channels = rendition->channels;
       track.alternatives.push_back(std::move(index));
       source.tracks.push_back(std::move(track));
     }
@@ -488,36 +649,32 @@ auto openHlsPlaylist(std::span<const uint8_t> document, std::string_view url,
   return playlists->open();
 }
 
-auto hlsPlaylistKeys(std::span<const uint8_t> document) -> std::vector<HlsKey> {
+auto hlsPlaylistKeys(std::span<const uint8_t> document, std::string_view url)
+    -> std::vector<HlsKey> {
   std::vector<HlsKey> keys;
   if (document.empty()) return keys;
 
-  // Only a media playlist has keys: a master names no segments, which reads as an
-  // empty list rather than an error -- there is nothing to key.
-  auto parsed = hls::parseMedia(document, {});
-  if (parsed.isErr()) return keys;
-
-  for (const hls::MediaSegment& segment : parsed.unwrap().segments) {
-    const hls::Key& key = segment.key;
-    if (!key.isEncrypted()) continue;
-
-    HlsKey out;
-    switch (key.method) {
-      case hls::KeyMethod::Aes128: out.method = "AES-128"; break;
-      case hls::KeyMethod::SampleAes: out.method = "SAMPLE-AES"; break;
-      case hls::KeyMethod::SampleAesCtr: out.method = "SAMPLE-AES-CTR"; break;
-      default: out.method = "UNSUPPORTED"; break;
+  // Either kind of playlist can name keys: a media playlist per segment, a master
+  // playlist for the presentation. Which one this is decides where to look, and a
+  // document that is neither has nothing to key.
+  switch (hls::detectKind(document)) {
+    case hls::PlaylistKind::Master: {
+      auto parsed = hls::parseMaster(document, url);
+      if (parsed.isErr()) return keys;
+      for (const hls::Key& key : std::move(parsed).unwrap().session_keys) {
+        appendKey(keys, publicKeyOf(key, /*session=*/true));
+      }
+      return keys;
     }
-    out.uri = key.uri;
-    // The spec's default: an ordinary key fetched over HTTP.
-    out.key_format = key.format.empty() ? std::string("identity") : key.format;
-    out.iv = key.iv;
-
-    const bool seen = std::any_of(keys.begin(), keys.end(), [&](const HlsKey& existing) {
-      return existing.method == out.method && existing.uri == out.uri &&
-             existing.key_format == out.key_format;
-    });
-    if (!seen) keys.push_back(std::move(out));
+    case hls::PlaylistKind::Media: {
+      auto parsed = hls::parseMedia(document, url);
+      if (parsed.isErr()) return keys;
+      for (const hls::MediaSegment& segment : std::move(parsed).unwrap().segments) {
+        if (segment.key.isEncrypted()) appendKey(keys, publicKeyOf(segment.key, false));
+      }
+      return keys;
+    }
+    case hls::PlaylistKind::Unknown: return keys;
   }
   return keys;
 }

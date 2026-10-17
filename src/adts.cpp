@@ -15,6 +15,9 @@ constexpr uint32_t SAMPLE_RATES[] = {96000, 88200, 64000, 48000, 44100, 32000,
 constexpr uint8_t CHANNELS[] = {0, 1, 2, 3, 4, 5, 6, 8};
 constexpr std::string_view TIMESTAMP_OWNER = "com.apple.streaming.transportStreamTimestamp";
 constexpr uint64_t TIMESTAMP_MASK = (UINT64_C(1) << 33) - 1;
+// An ID3 tag in front of an HLS audio segment carries a timestamp and little else; a
+// length beyond this is a length read out of the wrong bytes.
+constexpr size_t MAX_ID3_SIZE = 1u << 20;
 
 auto id3Size(std::span<const uint8_t> bytes) -> size_t {
   if (bytes.size() < 10 || std::memcmp(bytes.data(), "ID3", 3) != 0) return 0;
@@ -79,7 +82,12 @@ public:
   }
   auto tracks() const -> const std::vector<Track>& override { return tracks_; }
   auto metadata() const -> const Dictionary& override { return metadata_; }
-  void expectSegmentStart(int64_t start_ns) override { expected_start_ns_ = start_ns; }
+  void expectSegmentStart(int64_t start_ns, bool discontinuity) override {
+    expected_start_ns_ = start_ns;
+    // The anchor relates this stream's own timestamps to the playlist's timeline,
+    // and across a declared discontinuity there is no relation left to keep.
+    if (discontinuity) anchor_timestamp_.reset();
+  }
 
   auto pushSegment(std::vector<uint8_t> bytes) -> OMError override {
     if (const OMError error = beginSegment(); error != OM_SUCCESS) return error;
@@ -87,7 +95,9 @@ public:
     return endSegment();
   }
   auto beginSegment() -> OMError override {
-    packets_.clear();
+    // `packets_` is deliberately left alone: a caller is allowed to open the next
+    // segment while the last one's packets are still being read out, and clearing
+    // them here dropped whatever had not been taken yet.
     carry_.clear();
     segment_timestamp_.reset();
     clock_set_ = false;
@@ -104,7 +114,12 @@ public:
       if (available.size() >= 3 && std::memcmp(available.data(), "ID3", 3) == 0) {
         if (available.size() < 10) break;
         const size_t size = id3Size(available);
-        if (size < 10 || size > (1u << 20)) return OM_FORMAT_INVALID_HEADER;
+        if (size < 10 || size > MAX_ID3_SIZE) {
+          // Not a tag this reader can step over, and its length is the only thing
+          // that says where the frames behind it start.
+          carry_.erase(carry_.begin(), carry_.begin() + static_cast<std::ptrdiff_t>(at));
+          return OM_FORMAT_INVALID_HEADER;
+        }
         if (available.size() < size) break;
         if (const auto stamp = readTimestamp(available.first(size))) segment_timestamp_ = *stamp;
         at += size;
@@ -118,11 +133,22 @@ public:
       const size_t frame_size = ((static_cast<size_t>(available[3]) & 3) << 11)
                                 | (static_cast<size_t>(available[4]) << 3) | (available[5] >> 5);
       const size_t header_size = (available[1] & 1) ? 7 : 9;
-      if (frame_size <= header_size) return OM_FORMAT_INVALID_HEADER;
+      if (frame_size <= header_size) {
+        // A frame shorter than its own header leaves no way to find the next one, so
+        // the only thing to do is resynchronise past this byte.
+        ++at;
+        continue;
+      }
       if (available.size() < frame_size) break;
       const uint32_t rate_index = (available[2] >> 2) & 15;
       const uint32_t rate = SAMPLE_RATES[rate_index];
-      if (sample_rate_ != 0 && sample_rate_ != rate) return OM_FORMAT_NOT_SUPPORTED;
+      // The published time base is this rate, so a stream that changes it mid-flight
+      // would make every timestamp already handed out mean something else. Such a
+      // frame is stepped over instead, which costs one frame rather than the read.
+      if (sample_rate_ != 0 && sample_rate_ != rate) {
+        at += frame_size;
+        continue;
+      }
       if (tracks_.empty()) {
         sample_rate_ = rate;
         const uint32_t channel_config = ((available[2] & 1) << 2) | (available[3] >> 6);

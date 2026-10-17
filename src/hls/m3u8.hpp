@@ -38,26 +38,27 @@ enum class KeyMethod : uint8_t {
 // `#EXT-X-KEY`. The key behind `uri` is the caller's to fetch, like everything else.
 struct Key {
   KeyMethod method = KeyMethod::None;
+  // METHOD= as written. Kept beside the enum so a method this parser does not know
+  // still reaches a caller that does, under the name the playlist gave it.
+  std::string method_name;
   std::string uri; // resolved
   std::string iv;  // as written, `0x...`; empty means derive from the sequence number
   std::string format;
   std::string format_versions;
 
   auto isEncrypted() const -> bool { return method != KeyMethod::None; }
+  auto operator==(const Key&) const -> bool = default;
 };
 
 struct MediaSegment {
   std::string url; // resolved
   ByteRange range;
-  double duration = 0;    // seconds, from `#EXTINF`
-  uint64_t sequence = 0;  // its media sequence number
-  std::string title;      // the text after the duration in `#EXTINF`
-  uint32_t bitrate_kbps = 0;
+  double duration = 0;   // seconds, from `#EXTINF`
+  uint64_t sequence = 0; // its media sequence number, which is also its derived IV
 
   // Declared between segments, so it belongs to the one that follows: timestamps,
   // and possibly the encoding, start over here.
   bool discontinuity = false;
-  uint64_t discontinuity_sequence = 0;
 
   // `#EXT-X-GAP`: the segment is announced but not actually available.
   bool gap = false;
@@ -81,21 +82,19 @@ enum class PlaylistType : uint8_t {
 };
 
 struct MediaPlaylist {
-  uint32_t version = 1;
   double target_duration = 0; // the longest any segment may be, in seconds
   uint64_t media_sequence = 0;
-  uint64_t discontinuity_sequence = 0;
   PlaylistType type = PlaylistType::Unspecified;
-  bool endlist = false;        // no more segments will ever be added
-  bool iframes_only = false;   // every segment is a single I-frame
-  bool independent_segments = false;
+  bool endlist = false; // no more segments will ever be added
   bool has_start = false;
   double start_offset = 0; // `#EXT-X-START`, seconds; negative counts from the end
 
   std::vector<MediaSegment> segments;
 
-  // `#EXT-X-ENDLIST` is the only promise that the playlist will not change.
-  auto isLive() const -> bool { return !endlist; }
+  // Either promise that the playlist will not change: `#EXT-X-ENDLIST`, or a type
+  // of VOD, which says outright that the playlist is finished whether or not the
+  // tag announcing it is there.
+  auto isLive() const -> bool { return !endlist && type != PlaylistType::Vod; }
 
   auto totalDuration() const -> double; // seconds
   auto isEncrypted() const -> bool;
@@ -137,7 +136,6 @@ struct Rendition {
   std::string group_id;
   std::string name;
   std::string language;
-  std::string assoc_language;
   // Resolved, and empty where there is no separate playlist -- closed captions live
   // inside the video, and a rendition may describe a track muxed into the variant.
   std::string url;
@@ -149,10 +147,11 @@ struct Rendition {
 };
 
 struct MasterPlaylist {
-  uint32_t version = 1;
-  bool independent_segments = false;
   std::vector<Variant> variants; // highest bandwidth first
   std::vector<Rendition> renditions;
+  // `#EXT-X-SESSION-KEY`: the keys the presentation uses, named without naming a
+  // segment, so a player can ask for its licence before fetching a media playlist.
+  std::vector<Key> session_keys;
 };
 
 // Decided by the tags present: `.m3u8` says nothing about which kind it is.
@@ -177,5 +176,10 @@ auto parseByteRange(std::string_view text, int64_t previous_end) -> ByteRange;
 
 // Milliseconds since the Unix epoch, or -1.
 auto parseIso8601Ms(std::string_view text) -> int64_t;
+
+// `IV=0x...` into the 16 bytes of a cipher block. False when the attribute is
+// absent or not 16 bytes of hex, which is what says the vector has to be derived
+// from the media sequence number instead.
+auto parseHexIv(std::string_view text, uint8_t out[16]) -> bool;
 
 } // namespace openmedia::hls

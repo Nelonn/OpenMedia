@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <numeric>
 #include <annexb.hpp>
 #include <bmff_fragment.hpp>
 #include <nal_config.hpp>
@@ -1612,9 +1613,12 @@ inline void parseSgpd(std::span<const uint8_t> body, CryptoScope& scope) {
     if (length > r.remaining()) break;
 
     CencKey key;
+    // A copy shares the body and the position, so `entry.tell()` is an absolute
+    // offset into the body: only the distance it moved may be skipped over.
+    const size_t before = r.tell();
     ByteReader entry = (length != 0) ? r.sub(length) : r;
     const bool read = parseCencKey(entry, key);
-    if (length == 0) r.skip(entry.tell());
+    if (length == 0) r.skip(entry.tell() - before);
     if (!read) break;
 
     scope.group_keys.push_back(key);
@@ -1641,7 +1645,12 @@ inline void parseSeigGroups(std::span<const uint8_t> body, CryptoScope& scope) {
 
 // SampleAuxiliaryInformationSizesBox, ISO/IEC 14496-12 8.7.8. A box naming a type
 // other than common encryption's is describing something else entirely.
-inline void parseSaiz(std::span<const uint8_t> body, CryptoScope& scope) {
+//
+// `stream_size` bounds the sample count: with a default size stated, the box gives no
+// per-sample table to bound it against, and a 32-bit count out of a corrupt file
+// would otherwise stand.
+inline void parseSaiz(std::span<const uint8_t> body, CryptoScope& scope,
+                      size_t stream_size) {
   ByteReader r(body);
   r.skip(1); // version
   const uint32_t flags = r.u24be();
@@ -1668,7 +1677,10 @@ inline void parseSaiz(std::span<const uint8_t> body, CryptoScope& scope) {
     scope.aux_sample_count = count;
     return;
   }
-  scope.aux_sample_count = sample_count;
+  // The records are in the stream, so however many the box claims, there cannot be
+  // more of them than the stream has room for.
+  scope.aux_sample_count =
+      static_cast<uint32_t>(std::min<uint64_t>(sample_count, stream_size / default_size));
 }
 
 // SampleAuxiliaryInformationOffsetsBox, the companion to the above.
@@ -2339,6 +2351,11 @@ public:
 
     Packet pkt;
     if (!reframe) {
+      // The payload goes out in the container's own framing, which for a
+      // length-prefixed track is not the Annex-B every other packet of it is in.
+      // Saying so is the only way the caller can tell: it has to decipher first and
+      // reframe after, and nothing else about the packet distinguishes the two.
+      encryption->nal_length_size = track.nal_length_size;
       // Nothing is rewritten, so the packet shares the segment's bytes as the
       // unprotected path does.
       if (segment_ && !in_memory.empty()) {
@@ -3541,8 +3558,12 @@ private:
       return sample < scope.aux_sizes.size() ? scope.aux_sizes[sample] : 0u;
     };
 
-    uint64_t total = 0;
-    for (uint32_t i = 0; i < scope.aux_sample_count; ++i) total += sizeOf(i);
+    // Multiplied rather than summed where a default size stands: the count is
+    // bounded by the stream, not by a table, so the loop would have to run it out.
+    const uint64_t total =
+        scope.aux_default_size != 0
+            ? static_cast<uint64_t>(scope.aux_sample_count) * scope.aux_default_size
+            : std::accumulate(scope.aux_sizes.begin(), scope.aux_sizes.end(), uint64_t {0});
     if (total == 0 || total > random_.size()) return;
 
     const size_t at = auxInfoOffset(scope.aux_offsets.front(), static_cast<size_t>(total));
@@ -3751,7 +3772,7 @@ private:
         switch (type) {
           // Read later, against the keys this same scope may still redefine.
           case ATOM('s', 'e', 'n', 'c'): scope->senc.assign(body.begin(), body.end()); break;
-          case ATOM('s', 'a', 'i', 'z'): parseSaiz(body, *scope); break;
+          case ATOM('s', 'a', 'i', 'z'): parseSaiz(body, *scope, random_.size()); break;
           case ATOM('s', 'a', 'i', 'o'): parseSaio(body, *scope); break;
           default: parseSgpd(body, *scope); break;
         }

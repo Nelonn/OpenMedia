@@ -57,6 +57,14 @@ struct OPENMEDIA_ABI SampleEncryption {
 
   // Empty means the whole payload is protected.
   std::vector<SubsampleEntry> subsamples;
+
+  // Non-zero when the payload is framed as the container stored it rather than as
+  // the demuxer normally hands it out: NAL units behind length prefixes this many
+  // bytes wide, instead of Annex-B start codes. It happens where reframing would
+  // have invalidated the description above -- a sample protected end to end has its
+  // length fields enciphered too -- so a decryptor deciphers first and reframes
+  // after. Zero means the payload is framed as every other packet of the track.
+  uint8_t nal_length_size = 0;
 };
 
 } // namespace openmedia

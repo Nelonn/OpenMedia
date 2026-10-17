@@ -153,10 +153,6 @@ struct ElementaryStream {
   bool collecting = false;
   int32_t continuity = -1;
 
-  // Unwraps the wire's modulo-2^33 timestamps back into a clock that keeps counting.
-  int64_t previous_raw = -1;
-  int64_t wraps = 0;
-
   // Set from the first frame and then left alone, since the demuxer publishes the
   // track list once.
   bool described = false;
@@ -203,6 +199,17 @@ class MpegTsReader final : public SegmentReader {
   // needs its earliest decode time -- not the first one parsed.
   bool base_settled_ = false;
 
+  // The furthest the program's clock has been unwrapped to, over every stream of it.
+  //
+  // PTS and DTS of one program all count on the same 33-bit system clock, so its wrap
+  // belongs to the program and not to any one elementary stream. Each stream crosses
+  // it at its own moment -- video running a second ahead of the audio covering the
+  // same instant is ordinary -- and unwrapping them against counters of their own put
+  // the two a whole modulus apart. The segment's anchor is then taken as the earliest
+  // of them, so one stream on the far side of the wrap moved every packet of the
+  // other by 26.5 hours.
+  int64_t clock_reference_ = INT64_MIN;
+
   // Whether a segment is open, and the tail of the last piece that did not add up to
   // a whole transport packet.
   bool segment_open_ = false;
@@ -231,7 +238,13 @@ public:
     return true;
   }
 
-  void expectSegmentStart(int64_t start_ns) override { expected_start_ns_ = start_ns; }
+  void expectSegmentStart(int64_t start_ns, bool discontinuity) override {
+    expected_start_ns_ = start_ns;
+    // A declared discontinuity is the playlist saying outright what settleBase()
+    // would otherwise have to infer from a jump in the timestamps: nothing this
+    // reader worked out about the clock carries into the segment coming.
+    if (discontinuity) have_base_ = false;
+  }
 
   auto pushSegment(std::vector<uint8_t> segment) -> OMError override {
     if (segment.empty()) return OM_COMMON_INVALID_ARGUMENT;
@@ -311,10 +324,9 @@ public:
     // clock at the new one is whatever the next segment's expectSegmentStart() says.
     for (ElementaryStream& stream : streams_) {
       stream.continuity = -1;
-      stream.previous_raw = -1;
-      stream.wraps = 0;
       stream.audio_cursor = -1;
     }
+    clock_reference_ = INT64_MIN;
     pat_.reset();
     pmt_.reset();
     have_base_ = false;
@@ -554,12 +566,15 @@ private:
     if (payload_at >= pes.size()) return;
     const std::span<const uint8_t> payload(pes.data() + payload_at, pes.size() - payload_at);
 
-    // Unwrapped against the decode clock, the monotone one: a presentation time runs
-    // ahead and back again whenever the stream has B-frames, and letting that drive
-    // the wrap count would invent a wrap.
+    // Only decode times move the program's clock on: a presentation time runs ahead
+    // of the decode time and back again whenever the stream has B-frames, so counting
+    // wraps off that would invent one. The presentation time is then placed against
+    // its own decode time, already unwrapped, which is the nearest point on the real
+    // timeline it has.
     if (dts >= 0) {
-      dts = unwrap(stream, dts, /*monotone=*/true);
-      pts = unwrap(stream, pts, /*monotone=*/false);
+      const int64_t raw_dts = dts;
+      dts = unwrapClock(dts);
+      pts = unwrapAgainst(pts, raw_dts, dts);
     }
 
     if (stream.type == OM_MEDIA_VIDEO) {
@@ -569,14 +584,46 @@ private:
     }
   }
 
-  auto unwrap(ElementaryStream& stream, int64_t raw, bool monotone) -> int64_t {
+  // A decode time on the timeline the program's clock would have had if its counter
+  // were wider: the epoch that brings it nearest to everything already read.
+  //
+  // Nearest in both directions, not merely counting upwards. A step forward of more
+  // than half the range is the counter wrapping rather than the clock leaping ahead;
+  // a step back of more than half is a stream that has not crossed the wrap yet, or
+  // two consecutive segments of one encode overlapping by a frame -- both of which
+  // happen, and neither of which is time running backwards.
+  auto unwrapClock(int64_t raw) -> int64_t {
     if (raw < 0) return -1;
-    // A step back of more than half the range is a wrap, not time running backwards.
-    if (stream.previous_raw >= 0 && raw + TS_TIMESTAMP_MODULUS / 2 < stream.previous_raw) {
-      ++stream.wraps;
+    if (clock_reference_ == INT64_MIN) {
+      clock_reference_ = raw;
+      return raw;
     }
-    if (monotone) stream.previous_raw = raw;
-    return raw + stream.wraps * TS_TIMESTAMP_MODULUS;
+    const int64_t away = clock_reference_ - raw;
+    // Rounded division, so the epoch chosen is the nearest rather than the one below.
+    const int64_t epochs = away >= 0
+                               ? (away + TS_TIMESTAMP_MODULUS / 2) / TS_TIMESTAMP_MODULUS
+                               : -((-away + TS_TIMESTAMP_MODULUS / 2) / TS_TIMESTAMP_MODULUS);
+    const int64_t out = raw + epochs * TS_TIMESTAMP_MODULUS;
+    // The frontier, not the last value seen: a stream lagging the others must not
+    // drag it back, or the next wrap is counted twice.
+    clock_reference_ = std::max(clock_reference_, out);
+    return out;
+  }
+
+  // One access unit's presentation time, put on the same unwrapped timeline as its
+  // own decode time. The two are within a reorder delay of each other, so whichever
+  // of the three candidate epochs lands nearest the decode time is the right one --
+  // and an access unit straddling the wrap, with one of the pair past it and the
+  // other not, comes out right without touching the wrap count.
+  static auto unwrapAgainst(int64_t raw_pts, int64_t raw_dts, int64_t dts) -> int64_t {
+    if (raw_pts < 0) return -1;
+    const int64_t base = dts - raw_dts; // whole modulus multiples already applied
+    int64_t best = raw_pts + base;
+    for (const int64_t shift : {-TS_TIMESTAMP_MODULUS, TS_TIMESTAMP_MODULUS}) {
+      const int64_t candidate = raw_pts + base + shift;
+      if (std::abs(candidate - dts) < std::abs(best - dts)) best = candidate;
+    }
+    return best;
   }
 
   void emitVideoFrame(ElementaryStream& stream, std::span<const uint8_t> payload, int64_t pts,

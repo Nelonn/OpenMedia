@@ -45,11 +45,14 @@ public:
   // hundred kilobytes later in a 4K stream.
   virtual auto tracksDescribed() const -> bool { return !tracks().empty(); }
 
-  // Where the segment about to be pushed starts in the presentation, per the
-  // manifest. Ignored where timestamps are already presentation-relative; MPEG-TS
-  // needs it, because its clock starts wherever the encoder's did and only the
-  // playlist knows where a segment sits.
-  virtual void expectSegmentStart(int64_t /*start_ns*/) {}
+  // What the manifest says about the segment about to be pushed: where it starts in
+  // the presentation, and whether the playlist declared a discontinuity in front of
+  // it. The start is ignored where timestamps are already presentation-relative;
+  // MPEG-TS needs it, because its clock starts wherever the encoder's did and only
+  // the playlist knows where a segment sits. A declared discontinuity says outright
+  // what a reader would otherwise have to infer from the timestamps: that nothing it
+  // worked out about the clock carries over.
+  virtual void expectSegmentStart(int64_t /*start_ns*/, bool /*discontinuity*/) {}
 
   // Takes ownership: packets may point into these bytes rather than copy out of them.
   virtual auto pushSegment(std::vector<uint8_t> segment) -> OMError = 0;

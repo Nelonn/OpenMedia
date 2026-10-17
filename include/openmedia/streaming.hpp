@@ -39,7 +39,57 @@ struct OPENMEDIA_ABI SegmentPlan {
   // Needed before any media segment of that track, and again after
   // selectRepresentation().
   bool initialization = false;
+  // Wall-clock time of the first sample, milliseconds since the Unix epoch, where
+  // the playlist dated it (`#EXT-X-PROGRAM-DATE-TIME`); -1 otherwise. What a live
+  // stream is seeked by, since only this relates its media times to the clock.
+  int64_t program_date_time_ms = -1;
 };
+
+/**
+ * How one segment's bytes are protected, where the whole segment is.
+ *
+ * This is the shape HLS `AES-128` takes: the segment is ciphertext end to end, so
+ * no container parser can touch it until a key has been applied. What a key means
+ * is the DRM's business, so the URI is reported as the playlist wrote it and the
+ * initialization vector is given as the 16 bytes to use -- either the one the tag
+ * stated or the one derived from the media sequence number, which is what the
+ * specification says to use when the tag states none.
+ *
+ * Sample-level schemes are not this: there the container parses as it stands and
+ * each packet carries its own Packet::encryption.
+ */
+struct OPENMEDIA_ABI SegmentEncryption {
+  std::string method;     // METHOD=, e.g. "AES-128"
+  std::string uri;        // URI=, resolved against the playlist's own URL
+  std::string key_format; // KEYFORMAT=; "identity" when the tag did not say
+  std::string key_format_versions;
+  uint8_t iv[16] = {};
+  // Whether `iv` came from an IV= attribute or was derived from `sequence`.
+  bool iv_explicit = false;
+  uint64_t sequence = 0; // the segment's media sequence number
+
+  // Whether the cipher covers the whole segment, which is what `AES-128` means and
+  // what StreamOptions::decrypt answers for. False for the sample-level schemes
+  // (`SAMPLE-AES`, `SAMPLE-AES-CTR`), where the container has to be parsed before
+  // anything can be deciphered: those are reported, through keys() and
+  // OM_FORMAT_ENCRYPTED, but not yet read.
+  bool whole_segment = true;
+};
+
+/**
+ * Optionally, a way to turn one wholly protected segment's bytes into plaintext.
+ *
+ * Only the caller can hold a key, so without this a segment encrypted end to end is
+ * unreadable and the demuxer reports OM_FORMAT_ENCRYPTED rather than parsing
+ * ciphertext into whatever it happens to look like. Set it and each protected
+ * segment's bytes come through here on the way in.
+ *
+ * Return OM_FORMAT_NOT_SUPPORTED for a scheme or key format this caller does not
+ * handle: that segment is then skipped rather than read as noise. Any other error
+ * is reported to whoever called readPacket().
+ */
+using SegmentDecryptFn = std::function<Result<std::vector<uint8_t>, OMError>(
+    const SegmentEncryption&, std::span<const uint8_t>)>;
 
 /**
  * Optionally, a way for a streaming demuxer to fetch a segment itself.
@@ -99,6 +149,11 @@ struct OPENMEDIA_ABI StreamOptions {
   FetchFn fetch;
   // The same, read as each segment arrives. Preferred over `fetch` when both are set.
   StreamFetchFn stream_fetch;
+  // Applied to a segment the playlist protects end to end. Unset, such a segment
+  // reports OM_FORMAT_ENCRYPTED. A segment read piece by piece cannot go through it
+  // -- a block cipher has no answer for half a segment -- so a protected segment is
+  // read whole however it is delivered.
+  SegmentDecryptFn decrypt;
 };
 
 /** One alternative as offered for a track, for reporting and for switching. */
@@ -205,6 +260,25 @@ OPENMEDIA_ABI auto openDashManifest(std::span<const uint8_t> mpd_xml,
 // HLS
 // ---------------------------------------------------------------------------
 
+/**
+ * One `#EXT-X-KEY` or `#EXT-X-SESSION-KEY` as a playlist declared it.
+ *
+ * Reported verbatim: a `skd://` URI and a base64 Widevine PSSH are both just a URI
+ * here, because what a URI means is the DRM's business, not a container's. The
+ * caller reads `key_format` and interprets `uri` accordingly.
+ */
+struct OPENMEDIA_ABI HlsKey {
+  std::string method;     // METHOD=, e.g. "SAMPLE-AES", "AES-128"
+  std::string uri;        // URI=, resolved against the playlist it was declared in
+  std::string key_format; // KEYFORMAT=; "identity" when the tag did not say
+  std::string key_format_versions;
+  std::string iv; // IV=, as written; empty when it is per-segment or derived
+  // A `#EXT-X-SESSION-KEY` from the master playlist, which names the keys the
+  // presentation uses without naming a segment. A player asks for its licence up
+  // front from these rather than waiting for a media playlist to arrive.
+  bool session = false;
+};
+
 /** One rendition a master playlist offers, as the playlist describes it. */
 struct OPENMEDIA_ABI HlsVariant {
   std::string url; // the media playlist this rendition's segments are listed in
@@ -263,6 +337,21 @@ public:
    */
   virtual auto variants() const -> std::vector<HlsVariant> = 0;
 
+  /** The distinct keys every playlist added so far declares, first appearance
+   * first: the `#EXT-X-SESSION-KEY` tags of the master playlist and the
+   * `#EXT-X-KEY` tags of each media playlist.
+   *
+   * Taken from the playlists already parsed, so every URI is resolved against the
+   * document that named it -- which a key URI usually needs, being relative far
+   * more often than not. Empty where nothing is encrypted.
+   *
+   * What it is for: a service whose keys come from a licence rather than an HTTP
+   * fetch reads them here, asks for its licence, and gives StreamOptions::decrypt
+   * something to work with. Session keys are reported as soon as the master
+   * playlist is in, before any media playlist has been fetched.
+   */
+  virtual auto keys() const -> std::vector<HlsKey> = 0;
+
   virtual auto open() -> Result<std::unique_ptr<SegmentedDemuxer>, OMError> = 0;
 };
 
@@ -281,26 +370,17 @@ OPENMEDIA_ABI auto openHlsPlaylist(std::span<const uint8_t> document, std::strin
     -> Result<std::unique_ptr<SegmentedDemuxer>, OMError>;
 
 /**
- * One `#EXT-X-KEY` as a media playlist declared it.
+ * The distinct keys one playlist declares, first appearance first, for a caller
+ * holding a single document and not a whole presentation.
  *
- * Reported verbatim: a `skd://` URI and a base64 Widevine PSSH are both just a URI
- * here, because what a URI means is the DRM's business, not a container's. The
- * caller reads `key_format` and interprets `uri` accordingly.
- */
-struct OPENMEDIA_ABI HlsKey {
-  std::string method;     // METHOD=, e.g. "SAMPLE-AES", "AES-128"
-  std::string uri;        // URI=, resolved against the playlist's own URL
-  std::string key_format; // KEYFORMAT=; "identity" when the tag did not say
-  std::string iv;         // IV=, as written; empty when it is per-segment or derived
-};
-
-/**
- * The distinct `#EXT-X-KEY` tags a media playlist carries, first appearance first.
+ * `url` is where the document came from, which is what its key URIs resolve
+ * against; without it a relative URI cannot be made into an address, so passing it
+ * is not optional in any case that matters. Empty where nothing is encrypted.
  *
- * Empty for a playlist that is not encrypted and for anything that is not a media
- * playlist -- there is nothing to key either way. Exposed so a service whose keys
- * come from a licence rather than an HTTP fetch has somewhere to read them from.
+ * HlsPlaylists::keys() is the same answer over every playlist added, and is what a
+ * presentation spanning a master and several media playlists wants.
  */
-OPENMEDIA_ABI auto hlsPlaylistKeys(std::span<const uint8_t> document) -> std::vector<HlsKey>;
+OPENMEDIA_ABI auto hlsPlaylistKeys(std::span<const uint8_t> document, std::string_view url)
+    -> std::vector<HlsKey>;
 
 } // namespace openmedia

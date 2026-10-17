@@ -151,6 +151,25 @@ auto keyMethodOf(std::string_view text) -> KeyMethod {
   return KeyMethod::Unsupported;
 }
 
+// `#EXT-X-KEY` and `#EXT-X-SESSION-KEY` carry the same attributes, so both read
+// through here. METHOD=NONE cancels whatever was in force and carries nothing else.
+auto parseKeyTag(std::string_view value, std::string_view playlist_url) -> Key {
+  const Attributes attributes(value);
+  Key key;
+  const std::string_view method = attributes.find("METHOD");
+  key.method = keyMethodOf(method);
+  if (key.method == KeyMethod::None) return key;
+
+  key.method_name = std::string(method);
+  if (const std::string_view uri = attributes.find("URI"); !uri.empty()) {
+    key.uri = resolveUrl(playlist_url, uri);
+  }
+  key.iv = attributes.text("IV");
+  key.format = attributes.text("KEYFORMAT");
+  key.format_versions = attributes.text("KEYFORMATVERSIONS");
+  return key;
+}
+
 // Whether two `#EXT-X-STREAM-INF` entries describe the same rendition, decided by
 // every attribute that says anything about it: a variant repeated with nothing
 // changed is another place to fetch that rendition from, not another quality.
@@ -287,6 +306,28 @@ auto parseIso8601Ms(std::string_view text) -> int64_t {
   return ms;
 }
 
+auto parseHexIv(std::string_view text, uint8_t out[16]) -> bool {
+  text = trim(text);
+  if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+    text.remove_prefix(2);
+  }
+  if (text.size() != 32) return false;
+
+  const auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < 16; ++i) {
+    const int hi = nibble(text[i * 2]);
+    const int lo = nibble(text[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
+}
+
 auto detectKind(std::span<const uint8_t> document) -> PlaylistKind {
   const std::string_view text = asText(document);
   LineReader reader(text);
@@ -341,11 +382,7 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
     std::string_view value;
     splitTag(line, name, value);
 
-    if (name == "#EXT-X-VERSION") {
-      playlist.version = static_cast<uint32_t>(toUInt(value));
-    } else if (name == "#EXT-X-INDEPENDENT-SEGMENTS") {
-      playlist.independent_segments = true;
-    } else if (name == "#EXT-X-STREAM-INF") {
+    if (name == "#EXT-X-STREAM-INF") {
       const Attributes attributes(value);
       pending = Variant {};
       pending.bandwidth = static_cast<uint32_t>(attributes.number("BANDWIDTH"));
@@ -380,7 +417,6 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
       rendition.group_id = attributes.text("GROUP-ID");
       rendition.name = attributes.text("NAME");
       rendition.language = attributes.text("LANGUAGE");
-      rendition.assoc_language = attributes.text("ASSOC-LANGUAGE");
       rendition.is_default = attributes.isYes("DEFAULT");
       rendition.autoselect = attributes.isYes("AUTOSELECT");
       rendition.forced = attributes.isYes("FORCED");
@@ -390,9 +426,19 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
         rendition.url = resolveUrl(playlist_url, uri);
       }
       playlist.renditions.push_back(std::move(rendition));
+    } else if (name == "#EXT-X-SESSION-KEY") {
+      // The same tag as `#EXT-X-KEY`, hoisted up here so a licence can be asked for
+      // before any media playlist has been fetched. A repeat of one already listed
+      // says nothing new.
+      Key key = parseKeyTag(value, playlist_url);
+      if (key.isEncrypted() &&
+          std::find(playlist.session_keys.begin(), playlist.session_keys.end(), key) ==
+              playlist.session_keys.end()) {
+        playlist.session_keys.push_back(std::move(key));
+      }
     }
-    // Everything else -- session data, session keys, later revisions' tags --
-    // addresses something other than a reader of the media.
+    // Everything else -- session data, later revisions' tags -- addresses something
+    // other than a reader of the media.
   }
 
   if (playlist.variants.empty()) return Err(OM_FORMAT_NO_STREAMS);
@@ -437,13 +483,10 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
   std::string init_url;
   ByteRange init_range;
   double duration = 0;
-  std::string title;
-  uint32_t bitrate_kbps = 0;
   bool have_duration = false;
   bool discontinuity = false;
   bool gap = false;
   int64_t program_date_time_ms = -1;
-  uint64_t discontinuity_sequence = 0;
   bool have_sequence_start = false;
 
   // `#EXT-X-BYTERANGE` with no offset continues from the previous range over the
@@ -461,10 +504,7 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
       MediaSegment segment;
       segment.url = resolveUrl(playlist_url, line);
       segment.duration = duration;
-      segment.title = title;
-      segment.bitrate_kbps = bitrate_kbps;
       segment.discontinuity = discontinuity;
-      segment.discontinuity_sequence = discontinuity_sequence;
       segment.gap = gap;
       segment.program_date_time_ms = program_date_time_ms;
       segment.init_url = init_url;
@@ -492,7 +532,6 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
       have_duration = false;
       have_range = false;
       duration = 0;
-      title.clear();
       discontinuity = false;
       gap = false;
       continue;
@@ -503,21 +542,17 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
     splitTag(line, name, value);
 
     if (name == "#EXTINF") {
+      // The text after the duration is a title for a human, and nothing reads it.
       const size_t comma = value.find(',');
       duration = toDouble(comma == std::string_view::npos ? value : value.substr(0, comma));
-      title = (comma == std::string_view::npos) ? std::string()
-                                                : std::string(trim(value.substr(comma + 1)));
       have_duration = true;
     } else if (name == "#EXT-X-BYTERANGE") {
       pending_range.assign(value);
       have_range = true;
     } else if (name == "#EXT-X-DISCONTINUITY") {
       discontinuity = true;
-      ++discontinuity_sequence;
     } else if (name == "#EXT-X-GAP") {
       gap = true;
-    } else if (name == "#EXT-X-VERSION") {
-      playlist.version = static_cast<uint32_t>(toUInt(value));
     } else if (name == "#EXT-X-TARGETDURATION") {
       playlist.target_duration = toDouble(value);
     } else if (name == "#EXT-X-MEDIA-SEQUENCE") {
@@ -526,11 +561,6 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
       if (!have_sequence_start && playlist.segments.empty()) {
         playlist.media_sequence = toUInt(value);
         have_sequence_start = true;
-      }
-    } else if (name == "#EXT-X-DISCONTINUITY-SEQUENCE") {
-      if (playlist.segments.empty()) {
-        playlist.discontinuity_sequence = toUInt(value);
-        discontinuity_sequence = playlist.discontinuity_sequence;
       }
     } else if (name == "#EXT-X-PLAYLIST-TYPE") {
       const std::string_view type = trim(value);
@@ -541,30 +571,14 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
       }
     } else if (name == "#EXT-X-ENDLIST") {
       playlist.endlist = true;
-    } else if (name == "#EXT-X-I-FRAMES-ONLY") {
-      playlist.iframes_only = true;
-    } else if (name == "#EXT-X-INDEPENDENT-SEGMENTS") {
-      playlist.independent_segments = true;
     } else if (name == "#EXT-X-START") {
       const Attributes attributes(value);
       playlist.start_offset = attributes.real("TIME-OFFSET");
       playlist.has_start = true;
-    } else if (name == "#EXT-X-BITRATE") {
-      bitrate_kbps = static_cast<uint32_t>(toUInt(value));
     } else if (name == "#EXT-X-PROGRAM-DATE-TIME") {
       program_date_time_ms = parseIso8601Ms(value);
     } else if (name == "#EXT-X-KEY") {
-      const Attributes attributes(value);
-      key = Key {};
-      key.method = keyMethodOf(attributes.find("METHOD"));
-      if (key.method != KeyMethod::None) {
-        if (const std::string_view uri = attributes.find("URI"); !uri.empty()) {
-          key.uri = resolveUrl(playlist_url, uri);
-        }
-        key.iv = attributes.text("IV");
-        key.format = attributes.text("KEYFORMAT");
-        key.format_versions = attributes.text("KEYFORMATVERSIONS");
-      }
+      key = parseKeyTag(value, playlist_url);
     } else if (name == "#EXT-X-MAP") {
       const Attributes attributes(value);
       const std::string_view uri = attributes.find("URI");

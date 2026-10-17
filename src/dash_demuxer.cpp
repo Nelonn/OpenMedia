@@ -32,7 +32,20 @@ public:
   auto segmentAt(uint64_t ordinal) const -> std::optional<Segment> override {
     const auto segment = rep_.segmentAt(ordinal);
     if (!segment) return std::nullopt;
-    return Segment {segment->request, segment->time, segment->duration};
+
+    Segment out;
+    out.request = segment->request;
+    out.time = segment->time;
+    out.duration = segment->duration;
+    // One initialization section for the whole representation: an MPD states it
+    // once, in `Initialization`, and changing it means a new Period rather than a
+    // new segment. Repeated per segment all the same, so the reader need not ask
+    // which of the two shapes it is looking at.
+    out.init = rep_.initSegment();
+    // A period starts the timeline over; the first segment of a representation is
+    // where the reader is handed a clock it has not been following.
+    out.discontinuity = ordinal == 0;
+    return out;
   }
 
   auto ordinalForTime(int64_t media_time) const -> uint64_t override {
