@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <adts.hpp>
 #include <bmff_fragment.hpp>
 #include <cctype>
 #include <cstddef>
@@ -784,10 +785,12 @@ private:
       // that one waits for the segment, once, and streams every segment after it.
       if (const auto partial = stream.inbox.find(stream.read_ordinal);
           partial != stream.inbox.end() && !partial->second.complete) {
-        if (!looksLikeMpegTs(partial->second.bytes)) return OM_IO_NOT_ENOUGH_DATA;
+        const bool transport_stream = looksLikeMpegTs(partial->second.bytes);
+        const bool adts_stream = looksLikeAdts(partial->second.bytes);
+        if (!transport_stream && !adts_stream) return OM_IO_NOT_ENOUGH_DATA;
         const std::optional<Stream::Held> held = stream.takeHeld(stream.read_ordinal);
 
-        stream.reader = createMpegTsReader();
+        stream.reader = transport_stream ? createMpegTsReader() : createAdtsReader();
         if (!stream.reader) return OM_COMMON_OUT_OF_MEMORY;
         if (const OMError opened = stream.reader->openInit({}); opened != OM_SUCCESS) {
           return opened;
@@ -820,13 +823,15 @@ private:
       // rendition switched to may be laid out nothing like the one before it --
       // another program, other stream identifiers.
       const bool transport_stream = looksLikeMpegTs(bytes);
-      stream.reader = transport_stream ? createMpegTsReader() : createFragmentedMP4Reader();
+      const bool adts_stream = !transport_stream && looksLikeAdts(bytes);
+      stream.reader = transport_stream ? createMpegTsReader()
+                     : adts_stream ? createAdtsReader() : createFragmentedMP4Reader();
       if (!stream.reader) return OM_COMMON_OUT_OF_MEMORY;
       // Self-contained fragmented MP4 has to read its own header before the samples
       // sitting behind it in the same bytes, so that one segment is handed over
       // twice -- the only copy any of this makes.
-      const OMError opened =
-          transport_stream ? stream.reader->openInit({}) : stream.reader->openInit(bytes);
+      const OMError opened = (transport_stream || adts_stream)
+                                 ? stream.reader->openInit({}) : stream.reader->openInit(bytes);
       if (opened != OM_SUCCESS) return opened;
 
       stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()));

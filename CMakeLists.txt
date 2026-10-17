@@ -303,6 +303,8 @@ if (OPENMEDIA_STREAMING)
             src/hls_demuxer.cpp
             src/hls/m3u8.cpp
             src/hls/m3u8.hpp
+            src/adts.cpp
+            src/adts.hpp
             src/mpegts.cpp
             src/mpegts.hpp
             src/streaming/segment_demuxer.cpp
