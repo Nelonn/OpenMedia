@@ -12,25 +12,25 @@
 
 namespace openmedia {
 
-// Reads a presentation one segment at a time: bytes in, packets out, and nothing
-// outside the segment in hand ever addressed. A caller streaming segments therefore
-// never needs the whole presentation to be reachable, seekable, or of known length --
-// all of which a file demuxer does need, since it indexes every sample up front.
+// Reads a presentation one segment at a time, addressing nothing outside the segment
+// in hand. That is what lets a caller stream segments without the whole presentation
+// being reachable, seekable or of known length -- all of which a file demuxer needs,
+// since it indexes every sample up front.
 //
-// Two shapes of segment exist, and this is the interface both answer to:
+// Two shapes of segment answer to this interface:
 //
-//  * Headers arrive separately, as an initialization section -- fragmented ISO BMFF,
-//    which is what DASH's `Initialization` and HLS's `#EXT-X-MAP` name. openInit()
-//    settles the tracks before any media is pushed.
-//  * Every segment carries its own headers -- MPEG-TS, which repeats its program
-//    tables and parameter sets throughout. There is no initialization section to
-//    give, so the tracks are known only once the first media segment has arrived.
+//  * Headers arrive separately, as an initialization section (fragmented ISO BMFF:
+//    DASH's `Initialization`, HLS's `#EXT-X-MAP`). openInit() settles the tracks
+//    before any media is pushed.
+//  * Every segment carries its own headers (MPEG-TS, which repeats its program
+//    tables and parameter sets throughout), so the tracks are known only once the
+//    first media segment has arrived.
 class SegmentReader {
 public:
   virtual ~SegmentReader() = default;
 
-  // The initialization section, for a container that has one. A container that
-  // repeats its headers in every segment is opened with nothing.
+  // The initialization section, or nothing for a container that repeats its
+  // headers in every segment.
   virtual auto openInit(std::span<const uint8_t> init) -> OMError = 0;
 
   // Settled by openInit(), or by the first pushSegment() for a container that
@@ -38,18 +38,16 @@ public:
   virtual auto tracks() const -> const std::vector<Track>& = 0;
   virtual auto metadata() const -> const Dictionary& = 0;
 
-  // Whether the track list is not merely there but complete enough to open decoders
-  // against. The two come apart only when a segment is read as it arrives: MPEG-TS
-  // names its tracks in a program map and describes them -- parameter sets, picture
-  // size, channel layout -- only when the first access unit of each turns up, which
-  // is a few hundred kilobytes later in a 4K stream. Publishing the list in between
-  // would hand the caller a video track with no `extradata` and no size.
+  // Whether the track list is complete enough to open decoders against, which comes
+  // apart from merely existing only when a segment is read as it arrives: MPEG-TS
+  // names its tracks in a program map but describes them -- parameter sets, picture
+  // size, channel layout -- only when each one's first access unit turns up, a few
+  // hundred kilobytes later in a 4K stream.
   virtual auto tracksDescribed() const -> bool { return !tracks().empty(); }
 
-  // Where the segment about to be pushed starts in the presentation, in
-  // nanoseconds, according to the manifest or playlist. Ignored by a container
-  // whose timestamps are already presentation-relative; MPEG-TS needs it, because
-  // its clock starts wherever the encoder's clock happened to be and only the
+  // Where the segment about to be pushed starts in the presentation, per the
+  // manifest. Ignored where timestamps are already presentation-relative; MPEG-TS
+  // needs it, because its clock starts wherever the encoder's did and only the
   // playlist knows where a segment sits.
   virtual void expectSegmentStart(int64_t /*start_ns*/) {}
 
@@ -58,28 +56,25 @@ public:
 
   // --- A segment that is still arriving ---------------------------------------
   //
-  // The same segment pushSegment() takes whole, taken as it downloads. Both shapes
-  // can be read this way, because both are written front to back: a transport
-  // stream is a run of 188-byte packets, and a fragmented MP4 segment names its
-  // samples in a `moof` that sits in front of the `mdat` holding them. So what has
-  // arrived can be parsed without waiting for what has not, and the packets it
-  // completed can be read out at once -- which is the only way a 4K segment, tens
-  // of megabytes of it, starts showing pictures before it has finished
-  // downloading.
+  // Both shapes can be read as they download, because both are written front to
+  // back: a transport stream is a run of 188-byte packets, and a fragmented MP4
+  // segment names its samples in a `moof` sitting in front of the `mdat` holding
+  // them. So what has arrived parses without waiting for what has not -- the only
+  // way a 4K segment, tens of megabytes, shows pictures before it finishes.
   //
   // beginSegment(), then feedSegment() for each piece in order, then endSegment().
   // Between the two, needsSegment() means "nothing readable yet" rather than "on
-  // to the next segment", which is what segmentOpen() is there to tell apart.
+  // to the next segment", which is what segmentOpen() tells apart.
 
   virtual auto beginSegment() -> OMError = 0;
 
-  // Reads as much of `bytes` as completes something, keeping the remainder.
-  // Whatever packets that produced are readable on return.
+  // Reads as much of `bytes` as completes something, keeping the remainder. The
+  // packets that produced are readable on return.
   virtual auto feedSegment(std::span<const uint8_t> bytes) -> OMError = 0;
 
-  // No more is coming. Reports what pushSegment() would have: OM_FORMAT_NO_STREAMS
-  // for a segment that held nothing for this reader's tracks, which includes a
-  // download that stopped before anything readable arrived.
+  // No more is coming. Reports what pushSegment() would have, so
+  // OM_FORMAT_NO_STREAMS covers both a segment holding nothing for these tracks and
+  // a download that stopped before anything readable arrived.
   virtual auto endSegment() -> OMError = 0;
 
   // Between beginSegment() and endSegment().

@@ -17,11 +17,11 @@ struct Segment {
   uint64_t duration = 0; // in `timescale` units, 0 when nothing says
 };
 
-// One way of naming a presentation's segments, whatever named them: given an ordinal,
-// which bytes, at what media time, for how long -- and the reverse, for seeking. A DASH
-// representation answers it from a template or a timeline, an HLS media playlist from
-// the list it already is, and neither shape reaches any further into the demuxer.
-// Ordinals count from zero whatever the source numbers its own segments.
+// One way of naming a presentation's segments: given an ordinal, which bytes, at what
+// media time, for how long -- and the reverse, for seeking. A DASH representation
+// answers from a template or a timeline, an HLS media playlist from the list it already
+// is, and neither shape reaches any further into the demuxer. Ordinals count from zero
+// whatever the source numbers its own segments.
 class SegmentIndex {
 public:
   virtual ~SegmentIndex() = default;
@@ -29,8 +29,8 @@ public:
   // Nothing when the media carries its own header.
   virtual auto initSegment() const -> std::optional<SegmentRequest> = 0;
 
-  // Nothing when the source does not bound them: a live timeline, or a template with
-  // no known duration.
+  // Nothing where the source does not bound them: a live timeline, or a template
+  // with no known duration.
   virtual auto segmentCount() const -> std::optional<uint64_t> = 0;
 
   virtual auto segmentAt(uint64_t ordinal) const -> std::optional<Segment> = 0;
@@ -51,8 +51,8 @@ public:
   virtual auto height() const -> uint32_t { return 0; }
 };
 
-// One track, and the interchangeable ways of fetching it: switching quality means
-// moving between `alternatives`, which is why they are grouped rather than listed flat.
+// One track and the interchangeable ways of fetching it, grouped rather than listed
+// flat because switching quality means moving between `alternatives`.
 struct SegmentTrack {
   OMMediaType type = OM_MEDIA_NONE; // NONE when only the initialization segment knows
   std::string language;

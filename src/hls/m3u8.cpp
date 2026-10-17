@@ -25,8 +25,8 @@ auto trim(std::string_view text) -> std::string_view {
 
 auto asText(std::span<const uint8_t> document) -> std::string_view {
   std::string_view text(reinterpret_cast<const char*>(document.data()), document.size());
-  // A playlist is required to be UTF-8 without a byte-order mark, but one turns
-  // up often enough that refusing the playlist over it would be perverse.
+  // A playlist must be UTF-8 with no byte-order mark, but one turns up often
+  // enough that refusing the playlist over it would be perverse.
   if (text.starts_with("\xEF\xBB\xBF")) text.remove_prefix(3);
   return text;
 }
@@ -45,9 +45,8 @@ auto toDouble(std::string_view text) -> double {
   return (end == owned.c_str()) ? 0.0 : value;
 }
 
-// Walks the lines of a playlist, dropping blank ones and comments. A line
-// beginning with `#` is a tag only when it begins with `#EXT`; anything else is a
-// comment and carries no meaning.
+// Walks a playlist's lines, dropping blank ones and comments. A `#` line is a tag
+// only when it begins with `#EXT`; anything else is a comment.
 class LineReader {
   std::string_view text_;
   size_t pos_ = 0;
@@ -72,8 +71,8 @@ public:
   }
 };
 
-// Splits `#EXT-X-NAME:value` into its name and its value. A tag with no colon
-// has no value, which for the boolean tags is the whole of their meaning.
+// Splits `#EXT-X-NAME:value`. A tag with no colon has no value, which for the
+// boolean tags is the whole of their meaning.
 void splitTag(std::string_view line, std::string_view& name, std::string_view& value) {
   const size_t colon = line.find(':');
   if (colon == std::string_view::npos) {
@@ -115,11 +114,10 @@ public:
             static_cast<uint32_t>(toUInt(value.substr(x + 1)))};
   }
 
-  // A frame rate is written as a decimal, which loses the ratio it came from, so
-  // the two families that actually occur are reconstructed: whole rates, and the
-  // `n * 1000/1001` ones. The tolerance is set by how a playlist writes them --
-  // `29.970`, not `29.97002997` -- so it has to allow for that rounding rather
-  // than for floating-point error.
+  // A decimal frame rate has lost the ratio it came from, so the two families that
+  // occur are reconstructed: whole rates and `n * 1000/1001`. The tolerance allows
+  // for how a playlist writes them -- `29.970`, not `29.97002997` -- rather than
+  // for floating-point error.
   auto framerate(std::string_view key) const -> Rational {
     const double value = real(key);
     if (value <= 0) return {};
@@ -153,10 +151,9 @@ auto keyMethodOf(std::string_view text) -> KeyMethod {
   return KeyMethod::Unsupported;
 }
 
-// Whether two `#EXT-X-STREAM-INF` entries describe the same rendition, which is
-// decided by every attribute that says anything about it: a playlist that repeats
-// one of its variants with nothing changed is naming another place to fetch that
-// same rendition from, not another quality.
+// Whether two `#EXT-X-STREAM-INF` entries describe the same rendition, decided by
+// every attribute that says anything about it: a variant repeated with nothing
+// changed is another place to fetch that rendition from, not another quality.
 auto isSameRendition(const Variant& a, const Variant& b) -> bool {
   return a.iframes_only == b.iframes_only && a.bandwidth == b.bandwidth &&
          a.average_bandwidth == b.average_bandwidth && a.codecs == b.codecs &&
@@ -194,9 +191,8 @@ auto parseAttributes(std::string_view list) -> std::vector<std::pair<std::string
     std::string_view value;
 
     if (value_begin < list.size() && list[value_begin] == '"') {
-      // A quoted value runs to the closing quote, and the commas inside it are
-      // part of the value -- which is what makes CODECS="a,b" a list of one
-      // attribute rather than two.
+      // Commas inside a quoted value are part of it, which is what makes
+      // CODECS="a,b" one attribute rather than two.
       const size_t close = list.find('"', value_begin + 1);
       if (close == std::string_view::npos) {
         value = list.substr(value_begin + 1);
@@ -223,9 +219,8 @@ auto parseByteRange(std::string_view text, int64_t previous_end) -> ByteRange {
   text = trim(text);
   const size_t at = text.find('@');
   if (at == std::string_view::npos) {
-    // No offset given: the range picks up where the last one from the same
-    // resource left off. That is what lets a playlist address a single file as a
-    // run of adjacent segments.
+    // No offset: the range picks up where the previous one over the same resource
+    // left off, which is how a playlist addresses one file as adjacent segments.
     return {previous_end < 0 ? 0 : previous_end, static_cast<int64_t>(toUInt(text))};
   }
   return {static_cast<int64_t>(toUInt(text.substr(at + 1))),
@@ -247,8 +242,8 @@ auto parseIso8601Ms(std::string_view text) -> int64_t {
   const int64_t second = static_cast<int64_t>(toUInt(text.substr(17, 2)));
   if (month < 1 || month > 12 || day < 1 || day > 31) return -1;
 
-  // Days from the civil date, by Howard Hinnant's algorithm: the era arithmetic
-  // avoids a leap-year table and is exact for every date a playlist can name.
+  // Howard Hinnant's civil-date algorithm: era arithmetic avoids a leap-year table
+  // and is exact for every date a playlist can name.
   const int64_t y = year - (month <= 2 ? 1 : 0);
   const int64_t era = (y >= 0 ? y : y - 399) / 400;
   const int64_t year_of_era = y - era * 400;
@@ -300,8 +295,7 @@ auto detectKind(std::span<const uint8_t> document) -> PlaylistKind {
   if (!reader.next(line) || line != HEADER) return PlaylistKind::Unknown;
 
   // Whichever kind of tag appears first settles it. A playlist carrying both is
-  // invalid; taking the first match keeps the answer stable rather than depending
-  // on which tag happens to appear last.
+  // invalid, and taking the first match at least keeps the answer stable.
   while (reader.next(line)) {
     if (line.starts_with("#EXT-X-STREAM-INF") || line.starts_with("#EXT-X-I-FRAME-STREAM-INF") ||
         line.starts_with("#EXT-X-MEDIA:") || line.starts_with("#EXT-X-SESSION-DATA") ||
@@ -326,7 +320,7 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
   if (!reader.next(line) || line != HEADER) return Err(OM_FORMAT_INVALID_HEADER);
 
   MasterPlaylist playlist;
-  // A `#EXT-X-STREAM-INF` describes the variant named on the line after it, so the
+  // A `#EXT-X-STREAM-INF` describes the variant named on the line after it, so its
   // attributes are held until that URI turns up.
   bool expecting_uri = false;
   Variant pending;
@@ -366,7 +360,7 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
       pending.closed_captions_group = attributes.text("CLOSED-CAPTIONS");
       expecting_uri = true;
     } else if (name == "#EXT-X-I-FRAME-STREAM-INF") {
-      // This one carries its URI as an attribute rather than on the next line.
+      // Carries its URI as an attribute rather than on the next line.
       const Attributes attributes(value);
       Variant variant;
       variant.iframes_only = true;
@@ -397,18 +391,15 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
       }
       playlist.renditions.push_back(std::move(rendition));
     }
-    // Everything else -- session data, session keys, tags from a later revision --
-    // describes the presentation to something other than a reader of it.
+    // Everything else -- session data, session keys, later revisions' tags --
+    // addresses something other than a reader of the media.
   }
 
   if (playlist.variants.empty()) return Err(OM_FORMAT_NO_STREAMS);
 
-  // Failover entries folded into the rendition they duplicate, in the order the
-  // playlist gave them. Left as they are they would read as a ladder of identical
-  // rungs -- and a master playlist from a CDN with several origins repeats itself
-  // dozens of times over, so what is actually a seven-rung ladder arrives as
-  // eighty-five variants that are seven renditions and seventy-eight spare
-  // addresses for them.
+  // Failover entries folded into the rendition they duplicate, in playlist order.
+  // Left flat they read as a ladder of identical rungs: a CDN with several origins
+  // publishes a seven-rung ladder as eighty-five variants.
   std::vector<Variant> renditions;
   renditions.reserve(playlist.variants.size());
   for (Variant& variant : playlist.variants) {
@@ -424,9 +415,8 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
   }
   playlist.variants = std::move(renditions);
 
-  // Highest bandwidth first, so picking under a cap is a scan from the front and
-  // picking the best of all is the first entry -- the same order parseManifest()
-  // puts DASH representations in.
+  // Highest bandwidth first, so picking under a cap is a scan from the front --
+  // the same order parseManifest() puts DASH representations in.
   std::stable_sort(playlist.variants.begin(), playlist.variants.end(),
                    [](const Variant& a, const Variant& b) { return a.bandwidth > b.bandwidth; });
   return Ok(std::move(playlist));
@@ -456,9 +446,9 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
   uint64_t discontinuity_sequence = 0;
   bool have_sequence_start = false;
 
-  // `#EXT-X-BYTERANGE` without an offset continues from the previous range of the
-  // same resource. Which resource that is only becomes known on the URI line
-  // below, so the tag's text is held until then rather than resolved on sight.
+  // `#EXT-X-BYTERANGE` with no offset continues from the previous range over the
+  // same resource, and which resource that is only becomes known on the URI line
+  // below -- so the tag's text is held until then rather than resolved on sight.
   std::string pending_range;
   std::string range_url;
   int64_t range_end = 0;
@@ -492,7 +482,7 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
       }
 
       // Program dates apply from the tag onwards, each segment starting where the
-      // one before it ended.
+      // one before ended.
       if (program_date_time_ms >= 0) {
         program_date_time_ms += static_cast<int64_t>(duration * 1000.0);
       }
@@ -531,8 +521,8 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
     } else if (name == "#EXT-X-TARGETDURATION") {
       playlist.target_duration = toDouble(value);
     } else if (name == "#EXT-X-MEDIA-SEQUENCE") {
-      // Only meaningful before the first segment, and the sequence numbers
-      // already handed out would be wrong if it moved afterwards.
+      // Only meaningful before the first segment: moving it later would make the
+      // sequence numbers already handed out wrong.
       if (!have_sequence_start && playlist.segments.empty()) {
         playlist.media_sequence = toUInt(value);
         have_sequence_start = true;

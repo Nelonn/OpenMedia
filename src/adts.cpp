@@ -112,7 +112,7 @@ public:
       }
       if (available.size() < 7) break;
       if (!adtsHeader(available)) {
-        ++at; // resynchronise after padding or a damaged frame
+        ++at; // resynchronise past padding or a damaged frame
         continue;
       }
       const size_t frame_size = ((static_cast<size_t>(available[3]) & 3) << 11)

@@ -21,25 +21,22 @@ constexpr uint8_t TS_SYNC_BYTE = 0x47;
 // the only timescale this reader ever reports.
 constexpr uint32_t TS_TIMESCALE = 90000;
 
-// PTS and DTS are 33 bits wide, so they wrap every 26.5 hours. Live streams do run
-// that long, and a stream may be published with its clock already close to the end
-// of the range.
+// PTS and DTS are 33 bits wide, so they wrap every 26.5 hours -- which live streams
+// do reach, and a stream may be published with its clock already near the end.
 constexpr int64_t TS_TIMESTAMP_MODULUS = INT64_C(1) << 33;
 
 constexpr uint16_t PAT_PID = 0x0000;
 constexpr uint16_t NULL_PID = 0x1FFF;
 
-// Consecutive segments of one encode meet on the wire's own clock to within a frame
-// -- both figures compared here are read off that clock, so how well the playlist's
-// durations match the media never enters into it. A step of a whole second is
-// therefore not drift: the playlist declared a discontinuity, the encoder's clock
-// was reset or wrapped, or a segment in between was skipped. Timestamps are re-based
-// onto the playlist's own timeline there, which is the only thing both sides agree
-// on from that point.
+// Consecutive segments of one encode meet on the wire's clock to within a frame, and
+// both figures compared here are read off that clock, so a step of a whole second is
+// not drift but a discontinuity, a clock reset or wrap, or a skipped segment. There,
+// timestamps are re-based onto the playlist's timeline -- the only thing both sides
+// still agree on.
 constexpr int64_t DISCONTINUITY_TICKS = TS_TIMESCALE;
 
-// An AAC frame is 1024 samples, every one of them, which is what lets the frames of
-// one PES packet be timed from the single timestamp in front of them.
+// Every AAC frame is 1024 samples, which is what lets the frames of one PES packet be
+// timed from the single timestamp in front of them.
 constexpr int64_t AAC_FRAME_SAMPLES = 1024;
 
 // ISO/IEC 13818-1 Table 2-34, the entries an HLS segment actually carries.
@@ -60,9 +57,9 @@ auto readTimestamp(const uint8_t* bytes) -> int64_t {
          (static_cast<int64_t>(bytes[4]) >> 1);
 }
 
-// Each Annex-B NAL unit of `bytes`, start code excluded. A NAL runs to the next
-// start code; the zero bytes of a four-byte start code are left on the end of the
-// one before it, which no reader of a NAL header or of an RBSP minds.
+// Each Annex-B NAL unit of `bytes`, start code excluded. The zero byte of a four-byte
+// start code is left on the end of the NAL before it, which no reader of a NAL header
+// or an RBSP minds.
 template <typename Fn>
 void forEachNal(std::span<const uint8_t> bytes, Fn&& fn) {
   size_t start = 0;
@@ -104,9 +101,8 @@ auto reduced(int64_t numerator, int64_t denominator) -> Rational {
   return {static_cast<int32_t>(numerator / divisor), static_cast<int32_t>(denominator / divisor)};
 }
 
-// What a PSI table arrives in: sections, which start at a pointer-delimited offset
-// of the packet that carries the payload-unit-start flag and may run over several
-// packets after it.
+// PSI sections, which start at a pointer-delimited offset of the packet carrying the
+// payload-unit-start flag and may run over several packets after it.
 class SectionAssembler {
   std::vector<uint8_t> data_;
   size_t expected_ = 0;
@@ -141,8 +137,8 @@ public:
   }
 };
 
-// One elementary stream of the program, its PES assembly state, and whatever the
-// bitstream has told us about the track it feeds.
+// One elementary stream, its PES assembly state, and what the bitstream has said
+// about the track it feeds.
 struct ElementaryStream {
   uint16_t pid = NULL_PID;
   uint8_t stream_type = 0;
@@ -151,30 +147,28 @@ struct ElementaryStream {
   OMMediaType type = OM_MEDIA_NONE;
 
   std::vector<uint8_t> pes;
-  // PES_packet_length, or 0 for the unbounded form a video stream uses -- such a
-  // packet ends only where the next one starts, or where the segment does.
+  // PES_packet_length, or 0 for the unbounded form a video stream uses, which ends
+  // only where the next packet or the segment does.
   size_t declared = 0;
   bool collecting = false;
   int32_t continuity = -1;
 
-  // Timestamps come off the wire modulo 2^33; this is what unwraps them back into
-  // a clock that keeps counting.
+  // Unwraps the wire's modulo-2^33 timestamps back into a clock that keeps counting.
   int64_t previous_raw = -1;
   int64_t wraps = 0;
 
-  // Set from the first frame of the stream and then left alone: the demuxer
-  // publishes the track list once, so the track cannot be described twice.
+  // Set from the first frame and then left alone, since the demuxer publishes the
+  // track list once.
   bool described = false;
   uint32_t sample_rate = 0;
-  // Where the next audio frame falls when its PES packet carries no timestamp of
-  // its own, which is allowed as long as one came before it.
+  // Where the next audio frame falls when its PES packet carries no timestamp, which
+  // is allowed as long as one came before.
   int64_t audio_cursor = -1;
 
-  // Packets parsed out of this stream but not readable yet. Two things are waited
-  // for here: a video frame lasts until the frame after it, so it cannot go until
-  // its successor has arrived, and no stream's packet can go before the other
-  // streams have one to compare it against -- otherwise a segment read as it
-  // arrives would hand out video ahead of the audio belonging in front of it.
+  // Parsed but not readable yet, waiting on two things: a video frame lasts until the
+  // frame after it, and no stream's packet can go before the others have one to
+  // compare against -- or a segment read as it arrives hands out video ahead of the
+  // audio belonging in front of it.
   std::deque<Packet> staged;
   size_t timed = 0;       // leading entries of `staged` whose duration is settled
   int64_t video_step = 0; // the last frame interval seen, for the frame ending a segment
@@ -189,31 +183,28 @@ class MpegTsReader final : public SegmentReader {
   SectionAssembler pmt_;
   std::vector<ElementaryStream> streams_;
 
-  // Packets ready to be read, in decode order. A segment that arrives in pieces
-  // adds to this as it goes, so it is drained from the front rather than indexed.
+  // Ready to be read, in decode order. A segment arriving in pieces adds to this as
+  // it goes, so it is drained from the front rather than indexed.
   std::deque<Packet> packets_;
-  // How many this segment has handed over. A segment read as it arrived has had its
-  // packets taken already, so an empty queue at the end of one says nothing about
-  // whether there was anything in it.
+  // How many this segment handed over. A segment read as it arrived has had its
+  // packets taken already, so an empty queue at its end says nothing.
   size_t released_ = 0;
 
-  // The playlist's timeline against the stream's own clock. A transport stream
-  // starts counting wherever the encoder's clock stood, so the two differ by an
-  // offset that only the playlist can supply.
+  // The playlist's timeline against the stream's own clock, which started wherever
+  // the encoder's stood -- so the offset between them is the playlist's to supply.
   int64_t expected_start_ns_ = 0;
   int64_t base_ = 0;
   bool have_base_ = false;
-  // Where the previous segment ended, on the wire's clock, for telling drift from
-  // a discontinuity, and the same figure being accumulated for the segment in hand.
+  // Where the previous segment ended on the wire's clock, for telling drift from a
+  // discontinuity, and the same figure accumulating for the segment in hand.
   int64_t previous_end_raw_ = 0;
   int64_t segment_end_raw_ = 0;
-  // Whether this segment's packets have been anchored onto the playlist's timeline.
-  // Settling that needs the segment's earliest decode time, which is not the first
-  // one parsed.
+  // Whether this segment's packets are anchored onto the playlist's timeline, which
+  // needs its earliest decode time -- not the first one parsed.
   bool base_settled_ = false;
 
-  // A segment arriving in pieces: whether one is open, and the tail of the last
-  // piece that did not add up to a whole transport packet.
+  // Whether a segment is open, and the tail of the last piece that did not add up to
+  // a whole transport packet.
   bool segment_open_ = false;
   std::vector<uint8_t> carry_;
 
@@ -221,8 +212,8 @@ class MpegTsReader final : public SegmentReader {
 
 public:
   auto openInit(std::span<const uint8_t> init) -> OMError override {
-    // A transport stream has no initialization section: a playlist that gives one
-    // anyway is describing fragmented MP4, and these bytes are not it.
+    // A transport stream has no initialization section, so a playlist giving one is
+    // describing fragmented MP4 and these bytes are not it.
     return init.empty() ? OM_SUCCESS : OM_FORMAT_NOT_SUPPORTED;
   }
 
@@ -231,10 +222,9 @@ public:
 
   auto tracksDescribed() const -> bool override {
     if (tracks_.empty()) return false;
-    // A program map names a PID and its stream type and nothing else. What a
-    // decoder needs -- the parameter sets, the picture size, the
-    // AudioSpecificConfig -- is in the elementary stream itself, so a track is
-    // described only once a frame of it has been read.
+    // A program map names only a PID and a stream type. What a decoder needs --
+    // parameter sets, picture size, AudioSpecificConfig -- is in the elementary
+    // stream, so a track is described only once a frame of it has been read.
     for (const ElementaryStream& stream : streams_) {
       if (stream.track >= 0 && !stream.described) return false;
     }
@@ -252,9 +242,8 @@ public:
     size_t at = 0;
     while (at + TS_PACKET_SIZE <= bytes.size()) {
       if (bytes[at] != TS_SYNC_BYTE) {
-        // Sync is lost rather than slightly off, and the stride has to be found
-        // again: guessing it wrong reads payload as packet headers, which is how a
-        // demuxer invents streams.
+        // Sync is lost, and the stride has to be found again: guessing it wrong
+        // reads payload as packet headers, which is how a demuxer invents streams.
         at = findSync(bytes, at);
         continue;
       }
@@ -318,10 +307,8 @@ public:
     startSegment();
     segment_open_ = false;
     carry_.clear();
-    // Whatever was half-assembled belonged to a position this reader is no longer
-    // at, and the clock at the new position is whatever the next segment says it
-    // is -- read against expectSegmentStart(), which the caller sets from the
-    // playlist.
+    // What was half-assembled belonged to a position this reader has left, and the
+    // clock at the new one is whatever the next segment's expectSegmentStart() says.
     for (ElementaryStream& stream : streams_) {
       stream.continuity = -1;
       stream.previous_raw = -1;
@@ -343,10 +330,8 @@ private:
     return bytes.size();
   }
 
-  // Everything that is true of a segment rather than of the stream: the packets it
-  // produced, the staging each of its tracks is in the middle of, and where the
-  // playlist says it sits. What survives a segment -- the program tables, the track
-  // list, the wrap count, the clock offset -- is not touched here.
+  // Resets what belongs to a segment rather than the stream. What survives one --
+  // program tables, track list, wrap count, clock offset -- is not touched here.
   void startSegment() {
     packets_.clear();
     released_ = 0;
@@ -356,8 +341,8 @@ private:
       stream.staged.clear();
       stream.timed = 0;
       stream.video_step = 0;
-      // A PES packet is entirely inside one segment: anything half-assembled when
-      // the next one starts was cut off by the end of the last.
+      // A PES packet lies entirely inside one segment, so anything half-assembled
+      // was cut off by the end of the last.
       stream.pes.clear();
       stream.collecting = false;
       stream.declared = 0;
@@ -365,31 +350,28 @@ private:
   }
 
   auto finishSegment() -> OMError {
-    // Every segment of a playlist is entered on its own, so a PES packet still open
-    // at the end of one is complete as far as this segment is concerned.
+    // Every segment is entered on its own, so a PES packet still open at the end of
+    // one is as complete as it is going to get.
     for (ElementaryStream& stream : streams_) emitPes(stream);
     releaseStaged(/*final=*/true);
     previous_end_raw_ = segment_end_raw_;
 
-    // No track means no program map was ever seen; no packet means nothing of the
-    // program this reader carries was in these bytes. Either way there was nothing
-    // here to read, and the caller reads on to the next segment.
+    // No track means no program map was seen; no packet means nothing of this
+    // reader's program was in these bytes. Either way the caller reads on.
     if (tracks_.empty() || released_ == 0) return OM_FORMAT_NO_STREAMS;
     return OM_SUCCESS;
   }
 
-  // Reads every whole transport packet out of `carry_` and keeps the rest for the
-  // piece that follows it.
+  // Every whole transport packet in `carry_`, keeping the rest for the next piece.
   void consumeWholePackets(bool final) {
     const std::span<const uint8_t> bytes(carry_);
     size_t at = 0;
     while (at + TS_PACKET_SIZE <= bytes.size()) {
       if (bytes[at] != TS_SYNC_BYTE) {
         const size_t sync = findSync(bytes, at);
-        // findSync confirms a boundary by the sync byte one packet further on, and
-        // past the end of what has arrived it has to take the candidate on trust.
-        // Mid-segment there is no need to: the bytes that would confirm it are
-        // coming, so the candidate is kept and looked at again then.
+        // findSync confirms a boundary by the sync byte a packet further on, and
+        // past the end of what arrived it has to guess. Mid-segment it need not:
+        // the confirming bytes are coming, so the candidate waits for them.
         at = sync;
         if (!final && sync + 2 * TS_PACKET_SIZE > bytes.size()) break;
         continue;
@@ -412,8 +394,8 @@ private:
     const uint16_t pid = static_cast<uint16_t>(((packet[1] & 0x1F) << 8) | packet[2]);
     if (pid == NULL_PID) return;
 
-    // Scrambled at the transport layer, which this reader has no key for. Parsing
-    // the payload anyway would read ciphertext as PES headers.
+    // Scrambled at the transport layer, and parsing it anyway would read ciphertext
+    // as PES headers.
     if ((packet[3] & 0xC0) != 0) return;
 
     const bool start = (packet[1] & 0x40) != 0;
@@ -441,9 +423,9 @@ private:
     ElementaryStream* stream = streamOf(pid);
     if (!stream || stream->track < 0) return; // not ours, or of a kind not read
 
-    // A break in the continuity counter means packets were lost, and the PES packet
-    // being assembled has a hole in it. Dropping it loses one frame; keeping it
-    // feeds a decoder a frame that is missing its middle.
+    // A break in the continuity counter means the PES packet being assembled has a
+    // hole in it. Dropping it loses one frame; keeping it feeds a decoder a frame
+    // missing its middle.
     const int32_t expected = stream->continuity < 0 ? continuity : (stream->continuity + 1) & 0x0F;
     stream->continuity = continuity;
     if (continuity != expected && stream->collecting) {
@@ -520,11 +502,10 @@ private:
         stream.type = OM_MEDIA_AUDIO;
         break;
       default:
-        // Known of, but each needs framing of its own before its packets could be
-        // timed: MPEG audio and AC-3 arrive as a run of frames in one PES packet
-        // carrying a single timestamp, which has to be split frame by frame the way
-        // the AAC path below does. The PID is remembered so its packets are
-        // recognised and skipped rather than resynchronised against.
+        // Known of, but each needs framing of its own to be timed: MPEG audio and
+        // AC-3 arrive as a run of frames under one timestamp, to be split the way
+        // the AAC path below does. The PID is remembered so its packets are skipped
+        // rather than resynchronised against.
         log(OM_CATEGORY_DEMUXER, OM_LEVEL_INFO,
             "MPEG-TS: stream type 0x{:02X} on PID {} is not read", stream_type, pid);
         streams_.push_back(std::move(stream));
@@ -573,9 +554,9 @@ private:
     if (payload_at >= pes.size()) return;
     const std::span<const uint8_t> payload(pes.data() + payload_at, pes.size() - payload_at);
 
-    // Both are unwrapped against the decode clock, which is the monotone one: a
-    // presentation time runs ahead of it and back again whenever the stream has
-    // B-frames, and letting that drive the wrap count would invent a wrap.
+    // Unwrapped against the decode clock, the monotone one: a presentation time runs
+    // ahead and back again whenever the stream has B-frames, and letting that drive
+    // the wrap count would invent a wrap.
     if (dts >= 0) {
       dts = unwrap(stream, dts, /*monotone=*/true);
       pts = unwrap(stream, pts, /*monotone=*/false);
@@ -590,8 +571,7 @@ private:
 
   auto unwrap(ElementaryStream& stream, int64_t raw, bool monotone) -> int64_t {
     if (raw < 0) return -1;
-    // A step backwards of more than half the range is the counter wrapping, not the
-    // stream going back in time.
+    // A step back of more than half the range is a wrap, not time running backwards.
     if (stream.previous_raw >= 0 && raw + TS_TIMESTAMP_MODULUS / 2 < stream.previous_raw) {
       ++stream.wraps;
     }
@@ -718,10 +698,9 @@ private:
   }
 
   void emitAdtsFrames(ElementaryStream& stream, std::span<const uint8_t> payload, int64_t pts) {
-    // One PES packet holds a run of ADTS frames and a single timestamp in front of
-    // them. Each frame becomes a packet of its own, timed from the one before it by
-    // its own sample count -- the only thing that keeps an audio track in step with
-    // the clock it is decoded against.
+    // One PES packet holds a run of ADTS frames under a single timestamp. Each frame
+    // becomes a packet timed from the one before by its own sample count, which is
+    // what keeps the audio track in step with its decode clock.
     int64_t frame_pts = pts >= 0 ? pts : stream.audio_cursor;
     if (frame_pts < 0) return; // nothing has ever placed this stream in time
 
@@ -792,10 +771,10 @@ private:
 
   // --- Timing ---------------------------------------------------------------
 
-  // A video frame's duration is the step to the frame that follows it in decode
-  // order, so one frame of lookahead is staged before the frame in front of it can
-  // be handed over. `timed` counts how many of the leading staged frames have had
-  // theirs settled, which is every one of them once the segment ends.
+  // A video frame's duration is the step to the next in decode order, so one frame
+  // of lookahead is staged before the frame in front of it can go. `timed` counts the
+  // leading staged frames whose duration is settled -- all of them once a segment
+  // ends.
   void assignDurations(ElementaryStream& stream, bool final) {
     if (stream.type != OM_MEDIA_VIDEO) {
       // An ADTS frame's duration comes from its own sample count, settled where it
@@ -824,10 +803,9 @@ private:
     }
   }
 
-  // Whether a packet from every track is staged, which is what it takes to know
-  // which of them comes first. A segment carrying nothing at all of one of its
-  // tracks never gets there, and is read out in one go when it ends -- no worse
-  // than reading it whole, which is what there was before.
+  // Whether every track has a packet staged, which is what it takes to know which
+  // comes first. A segment carrying nothing of one of its tracks never gets there and
+  // is read out in one go when it ends.
   auto everyTrackStaged() const -> bool {
     for (const ElementaryStream& stream : streams_) {
       if (stream.track >= 0 && stream.staged.empty()) return false;
@@ -835,9 +813,8 @@ private:
     return true;
   }
 
-  // Moves the segment's timestamps onto the playlist's timeline, so that the
-  // nth second of the presentation is the nth second of a packet's timestamp
-  // whatever clock the encoder was running.
+  // Moves the segment's timestamps onto the playlist's timeline, so the nth second of
+  // the presentation is the nth second of a packet whatever clock the encoder ran.
   void settleBase(int64_t first_raw) {
     base_settled_ = true;
     segment_end_raw_ = first_raw;
@@ -846,33 +823,28 @@ private:
                            std::abs(first_raw - previous_end_raw_) <= DISCONTINUITY_TICKS;
     if (continues) return;
 
-    // Either this is the first segment read, or the clock jumped -- a declared
-    // discontinuity, a wrap, or a seek into a stream whose clock this reader has
-    // not followed. The playlist says where the segment belongs; the stream only
-    // says how its own samples are spaced.
+    // Either the first segment read, or the clock jumped -- a discontinuity, a wrap,
+    // or a seek into a clock this reader has not followed. The playlist says where
+    // the segment belongs; the stream only says how its samples are spaced.
     //
-    // The anchor is the earliest decode time rather than the earliest presentation
-    // time, so that no timestamp comes out negative and each segment's packets fall
-    // inside the span the playlist gave it -- which is what everything upstream
-    // reasons in. A stream with B-frames decodes its opening frames before it shows
-    // them, so its first picture appears that much after the start; the error is a
-    // reorder delay, the same at every point of the stream, and it does not
-    // accumulate.
+    // Anchored on the earliest decode time, not presentation time, so no timestamp
+    // comes out negative and each segment's packets fall inside the span the playlist
+    // gave it. With B-frames the first picture then appears a reorder delay late --
+    // the same at every point of the stream, so it does not accumulate.
     base_ = first_raw - nsToScale(expected_start_ns_, TS_TIMESCALE);
     have_base_ = true;
   }
 
-  // Hands over every staged packet whose turn has come: earliest decode time first,
-  // and only while the order is beyond doubt. Reading a segment whole settles that
-  // with a sort; reading one as it arrives settles it by waiting -- a packet goes
-  // only once every track has one to be compared against, so nothing is handed out
-  // ahead of a packet that belongs in front of it and has not been parsed yet.
+  // Every staged packet whose turn has come, earliest decode time first and only
+  // while the order is beyond doubt. Reading a segment as it arrives settles that by
+  // waiting: a packet goes only once every track has one to compare against, so
+  // nothing goes out ahead of a packet that belongs in front of it.
   void releaseStaged(bool final) {
     for (ElementaryStream& stream : streams_) assignDurations(stream, final);
 
     if (!base_settled_) {
-      // The anchor is the segment's earliest decode time, and which track that
-      // belongs to is not knowable until each has spoken.
+      // The anchor is the segment's earliest decode time, and which track owns that
+      // is not knowable until each has spoken.
       if (!final && !everyTrackStaged()) return;
       int64_t first_raw = INT64_MAX;
       for (const ElementaryStream& stream : streams_) {
@@ -889,8 +861,8 @@ private:
       for (ElementaryStream& stream : streams_) {
         if (stream.track < 0) continue;
         if (stream.staged.empty()) {
-          // Nothing to compare against, so nothing can be said to come first --
-          // unless the segment has ended, in which case nothing more is coming.
+          // Nothing to compare against, so nothing comes first -- unless the
+          // segment has ended and nothing more is coming.
           if (!final) comparable = false;
           continue;
         }
@@ -918,8 +890,8 @@ private:
 auto looksLikeMpegTs(std::span<const uint8_t> bytes) -> bool {
   if (bytes.size() < TS_PACKET_SIZE) return false;
   if (bytes[0] != TS_SYNC_BYTE) return false;
-  // One sync byte is a coincidence a `moov` can produce; a second and a third one a
-  // packet apart are the stride of a transport stream.
+  // One sync byte is a coincidence a `moov` can produce; three a packet apart are the
+  // stride of a transport stream.
   for (size_t at = TS_PACKET_SIZE; at < bytes.size() && at <= 2 * TS_PACKET_SIZE;
        at += TS_PACKET_SIZE) {
     if (bytes[at] != TS_SYNC_BYTE) return false;

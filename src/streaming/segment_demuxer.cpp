@@ -18,21 +18,19 @@
 namespace openmedia {
 namespace {
 
-// How far ahead of what it is reading a stream will recognise one of its own
-// segments. Naming a segment means building its URL, so this is also the cost of an
-// append that matches nothing -- which is why it covers a generous prefetch depth
-// rather than an unbounded one. StreamOptions::max_buffered_bytes stops a caller
-// getting this far ahead in the first place.
+// How far ahead a stream will recognise one of its own segments. Naming a segment
+// means building its URL, so this is also what an append that matches nothing costs
+// -- hence a generous prefetch depth rather than an unbounded one.
 constexpr uint64_t RECOGNITION_WINDOW = 64;
 
-// A segment that yields no sample for the track it belongs to is skipped rather
-// than played, but a run of them means something is wrong with the addressing
-// rather than with one segment, and looping over thousands would just hide it.
+// A segment yielding no sample for its track is skipped, but a run of them means
+// the addressing is wrong rather than one segment, and looping over thousands of
+// them would hide that.
 constexpr int MAX_EMPTY_SEGMENTS = 8;
 
-// How much of a segment is read at a time from a StreamOptions::stream_fetch. Small
-// enough that the first picture of a 4K segment does not wait on megabytes it does
-// not need, large enough that reading one is not a syscall per transport packet.
+// How much of a segment is read at a time from a StreamOptions::stream_fetch: small
+// enough that a 4K segment's first picture does not wait on megabytes it does not
+// need, large enough not to be a syscall per transport packet.
 constexpr size_t PULL_CHUNK = 64u << 10;
 
 auto percentDecode(std::string_view text) -> std::string {
@@ -63,8 +61,8 @@ auto urlToLocalPath(std::string_view url) -> std::string {
   std::string_view path = url;
   if (path.starts_with("file://")) {
     path.remove_prefix(7);
-    // `file:///C:/x` and `file://C:/x` are both written in the wild; the leading
-    // slash in front of a drive letter is not part of the path.
+    // Both `file:///C:/x` and `file://C:/x` are written in the wild, and the slash
+    // in front of a drive letter is not part of the path.
     if (path.size() >= 3 && path[0] == '/' && path[2] == ':') path.remove_prefix(1);
   }
   const size_t cut = path.find_first_of("?#");
@@ -78,32 +76,30 @@ class SegmentDemuxer final : public SegmentedDemuxer {
     size_t alternative = 0;
     std::unique_ptr<SegmentReader> reader;
 
-    // Reader track index to the index this demuxer publishes it under. One
-    // alternative carries one track in all but pathological cases, but nothing in
-    // the format says it must, so the mapping is explicit.
+    // Reader track index to the index this demuxer publishes it under. Nothing in
+    // the format says an alternative carries only one track, so it is explicit.
     std::vector<int32_t> public_tracks;
 
     bool needs_init = true;
     bool finished = false;
     uint64_t read_ordinal = 0; // the media segment the reader is on
 
-    // The reader is part-way through `read_ordinal` and waiting for the rest of it.
-    // Its bytes are no longer held here: they went straight into the reader, which
-    // is what reading a segment as it arrives means.
+    // Part-way through `read_ordinal` and waiting for the rest. Its bytes are not
+    // held here: they went straight into the reader.
     bool streaming = false;
-    // Where the segment being streamed is read from, when StreamOptions supplied
-    // somewhere to read it from rather than the caller pushing its pieces in.
+    // Where the streamed segment is read from, when StreamOptions named somewhere
+    // rather than the caller pushing its pieces in.
     std::unique_ptr<InputStream> pulling;
-    // The decode time last handed out, which is where whatever this stream is
-    // missing must come at or after.
+    // The decode time last handed out, which is where whatever is missing must come
+    // at or after.
     int64_t last_read_ns = INT64_MIN;
 
     std::optional<std::vector<uint8_t>> init_inbox;
     bool init_complete = false;
 
-    // A segment handed over, whole or in pieces. Half a segment is still worth
-    // holding: once this track reaches it, the reader is given what there is and
-    // reads it while the rest arrives.
+    // A segment handed over, whole or in pieces. Half a segment is worth holding:
+    // once this track reaches it, the reader reads what there is while the rest
+    // arrives.
     struct Held {
       std::vector<uint8_t> bytes;
       bool complete = true;
@@ -152,9 +148,8 @@ class SegmentDemuxer final : public SegmentedDemuxer {
 
 public:
   auto open(std::unique_ptr<InputStream>) -> OMError override {
-    // Opening this demuxer means handing it a described presentation and a way to
-    // name segments, which is more than a byte stream carries. The DASH and HLS
-    // entry points do the stream-shaped version of this.
+    // This demuxer needs a described presentation and a way to name segments, which
+    // is more than a byte stream carries; the DASH and HLS entry points take one.
     return OM_FORMAT_NOT_SUPPORTED;
   }
 
@@ -167,14 +162,11 @@ public:
       stream.track = track;
       stream.alternative = chooseAlternative(*track);
 
-      // An initialization section settles the matter: those segments are
-      // fragmented MP4. Without one they are MPEG-TS -- which is how HLS was
-      // published for a decade and how most of the web still serves it -- or else
-      // fragmented MP4 whose every segment carries a header of its own, and only
-      // the bytes say which. The one put here stands in until the first segment
-      // settles it, so that a stream always has a reader to answer for it: before
-      // then an unprimed reader says it needs a segment and holds no packet, which
-      // is exactly the truth of the matter.
+      // An initialization section settles it: fragmented MP4. Without one the
+      // segments are MPEG-TS, bare ADTS, or self-contained fragmented MP4, and only
+      // the bytes say which -- so this one stands in until the first segment
+      // arrives, an unprimed reader saying it needs a segment and holding no
+      // packet, which is the truth of the matter.
       stream.reader = track->alternatives[stream.alternative]->initSegment()
                           ? createFragmentedMP4Reader()
                           : createMpegTsReader();
@@ -184,9 +176,8 @@ public:
 
     if (streams_.empty()) return OM_FORMAT_NO_STREAMS;
 
-    // With a fetch function the caller has said it is content to block, so the
-    // tracks can be settled here and `tracks()` is populated on return, the way
-    // every other demuxer behaves.
+    // A fetch function means the caller is content to block, so tracks() can be
+    // populated on return the way every other demuxer behaves.
     if (options_.fetch || options_.stream_fetch) {
       for (Stream& stream : streams_) {
         const OMError error = ensureInit(stream);
@@ -216,8 +207,8 @@ public:
     std::vector<SegmentPlan> plans;
     if (max_count == 0 || streams_.empty()) return plans;
 
-    // An initialization segment blocks everything behind it, so all of them come
-    // first and in stream order, without competing on time with media.
+    // An initialization segment blocks everything behind it, so they all come first,
+    // in stream order, without competing on time with media.
     for (size_t i = 0; i < streams_.size(); ++i) {
       const Stream& stream = streams_[i];
       if (!stream.needs_init || stream.init_inbox) continue;
@@ -231,9 +222,8 @@ public:
       if (plans.size() >= max_count) return plans;
     }
 
-    // Beyond that, the segment wanted soonest is the one whose media starts
-    // earliest, whichever stream it belongs to -- which is also the order that
-    // keeps every track's buffer growing at the same rate.
+    // Beyond that, the segment wanted soonest is whichever starts earliest, which
+    // is also the order that keeps every track's buffer growing at the same rate.
     std::vector<SegmentPlan> candidates;
     for (size_t i = 0; i < streams_.size(); ++i) {
       const Stream& stream = streams_[i];
@@ -245,8 +235,7 @@ public:
       for (size_t taken = 0; taken < max_count; ++ordinal) {
         if (bound && ordinal >= *bound) break;
         if (stream.inbox.contains(ordinal)) continue; // already in hand
-        // Being read as it arrives: the caller is downloading it already, and
-        // asking for it again would have it downloaded twice.
+        // Being read as it arrives, so asking again would download it twice.
         if (stream.streaming && ordinal == stream.read_ordinal) continue;
         const auto segment = index.segmentAt(ordinal);
         if (!segment) break;
@@ -296,13 +285,12 @@ public:
         const auto segment = index.segmentAt(ordinal);
         if (!segment) break;
         if (!(segment->request == request)) continue;
-        // One request is delivered one way or the other. Taking the whole of a
-        // segment whose pieces are already going in would leave the pieces that
-        // follow with nowhere to go and the segment read twice over.
+        // One request is delivered one way or the other: taking the whole of a
+        // segment whose pieces are already going in would leave those that follow
+        // nowhere to go.
         if (isPartlyDelivered(stream, ordinal)) return OM_COMMON_INVALID_ARGUMENT;
-        // Full is not the same as unwanted: the caller is told to keep these bytes
-        // and offer them again, rather than have them silently dropped and then
-        // wait forever for a segment it believes it already delivered.
+        // Full is not unwanted: dropping these silently would leave the caller
+        // waiting forever for a segment it believes it delivered.
         if (options_.max_buffered_bytes != 0 &&
             stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
           return OM_COMMON_OVERFLOW;
@@ -315,9 +303,8 @@ public:
       }
     }
 
-    // Seeked past, or belonging to an alternative since switched away from. The
-    // caller cannot always know that in time, and throwing the bytes away is the
-    // whole of the correct response.
+    // Seeked past, or switched away from. The caller cannot always know that in
+    // time, so dropping the bytes is the whole of the correct response.
     return OM_SUCCESS;
   }
 
@@ -329,8 +316,8 @@ public:
         if (stream.init_complete) return OM_COMMON_INVALID_ARGUMENT;
         if (!stream.init_inbox) stream.init_inbox.emplace();
         stream.init_inbox->insert(stream.init_inbox->end(), bytes.begin(), bytes.end());
-        // There is nothing to gain from reading half an initialization segment:
-        // it is where the track list comes from, and half a track list is not one.
+        // Half an initialization segment is nothing to read: it is where the track
+        // list comes from, and half a track list is not one.
         if (!last) return OM_SUCCESS;
         stream.init_complete = true;
         settleInitsIfComplete();
@@ -348,9 +335,8 @@ public:
         if (!segment) break;
         if (!(segment->request == request)) continue;
 
-        // The segment being read right now: its pieces go straight through to the
-        // reader, which parses each one on arrival. This is the whole point of the
-        // call -- packets out of a segment that is still downloading.
+        // The segment being read right now: its pieces go straight to the reader,
+        // which is the whole point of the call.
         if (stream.streaming && ordinal == stream.read_ordinal) {
           if (const OMError fed = stream.reader->feedSegment(bytes); fed != OM_SUCCESS) {
             return fed;
@@ -366,9 +352,8 @@ public:
             held != stream.inbox.end() && held->second.complete) {
           return OM_COMMON_INVALID_ARGUMENT; // delivered whole already
         }
-        // Not reached yet. The pieces accumulate, and when this track does reach
-        // the segment the reader is given however much of it has turned up and
-        // reads on from there as the rest arrives.
+        // Not reached yet, so the pieces accumulate; the reader picks up however
+        // much has turned up once this track gets there.
         if (options_.max_buffered_bytes != 0 &&
             stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
           return OM_COMMON_OVERFLOW;
@@ -425,20 +410,16 @@ public:
     const size_t chosen = static_cast<size_t>(found - alternatives.begin());
     if (chosen == stream->alternative) return OM_SUCCESS;
 
-    // Where the switch lands: the segment after the ones already read, named by the
-    // time it starts at, since the two alternatives number their segments
-    // independently. `read_ordinal` is the segment the old alternative had not
-    // reached -- whether its reader is part-way through the one before it or has run
-    // dry exactly on the boundary -- and that instant is the one the two have in
-    // common. Resuming from the time being read instead would land back inside a
-    // segment already delivered and hand out its packets a second time, timestamps
-    // and all.
+    // Named by start time, because the two alternatives number their segments
+    // independently and that instant is what they have in common. `read_ordinal` is
+    // the segment the old alternative had not reached; resuming from the time being
+    // read instead would land inside a segment already delivered and hand out its
+    // packets a second time.
     const auto boundary = stream->index().segmentAt(stream->read_ordinal);
     const int64_t resume_ns =
         boundary ? scaleToNs(boundary->time, stream->index().timescale()) : -1;
 
-    // Whatever is buffered belongs to the old alternative and is dropped, since its
-    // bytes decode against the old initialization segment.
+    // What is buffered decodes against the old initialization segment.
     stream->alternative = chosen;
     stream->dropHeld();
     stream->init_inbox.reset();
@@ -454,8 +435,8 @@ public:
     if (resume_ns >= 0) {
       stream->read_ordinal = index.ordinalForTime(nsToScale(resume_ns, index.timescale()));
     } else {
-      // The old alternative had been read to its end, so the new one starts there
-      // too: a switch is not a reason to play anything over again.
+      // The old alternative was read to its end, and a switch is not a reason to
+      // play anything over again.
       stream->read_ordinal = index.segmentCount().value_or(0);
     }
     ready_ = false;
@@ -472,9 +453,8 @@ public:
     }
 
     // Every stream that could still produce a packet has to be holding one before
-    // the earliest can be picked out; otherwise a stream whose bytes have not
-    // arrived is read as though it had ended, and its packets turn up later than
-    // the ones they should have come before.
+    // the earliest can be picked out, or a stream whose bytes have not arrived reads
+    // as though it had ended and its packets turn up out of order.
     OMError starved = OM_SUCCESS;
     int64_t starved_at = INT64_MAX;
 
@@ -496,15 +476,15 @@ public:
       }
     }
 
-    // A stream still waiting for bytes only holds everything up if what it is
-    // waiting for comes before what is ready. Video segments routinely land ahead
-    // of the audio covering the same instant, and stalling on that would make
-    // every prefetch race decide whether playback stutters.
+    // A stream waiting for bytes only holds everything up when what it waits for
+    // comes before what is ready. Video segments routinely land ahead of the audio
+    // covering the same instant, and stalling on that would let every prefetch race
+    // decide whether playback stutters.
     if (starved != OM_SUCCESS && starved_at <= earliest_dts) return Err(starved);
     if (!earliest || earliest_dts == INT64_MAX) return Err(OM_FORMAT_END_OF_FILE);
 
-    // What this stream is still missing comes at or after this, which is what makes
-    // a stream part-way through a segment hold up only the streams behind it.
+    // What this stream is still missing comes at or after this, so a stream part-way
+    // through a segment holds up only the streams behind it.
     earliest->last_read_ns = earliest_dts;
 
     auto packet = earliest->reader->readPacket();
@@ -525,17 +505,16 @@ public:
     if (timestamp < 0) return OM_COMMON_INVALID_ARGUMENT;
     if (stream_idx >= static_cast<int32_t>(tracks_.size())) return OM_FORMAT_STREAM_NOT_FOUND;
 
-    // A presentation time, in nanoseconds, is the one thing every stream can be
-    // positioned by: each has its own timescale and its own presentation offset.
+    // Nanoseconds of presentation time is the one thing every stream can be
+    // positioned by: each has its own timescale and presentation offset.
     int64_t target_ns = 0;
     if (stream_idx < 0) {
       target_ns = timestamp * INT64_C(1'000);
     } else {
-      // The caller's timestamp is in the track's own time base, which is the unit
-      // the packets are in -- the media timescale, not whatever unit the manifest
-      // counted segments in. Reading it back off the published track is what keeps
-      // a seek and the timestamps it is aimed at in the same unit; for DASH the two
-      // units normally agree, and for HLS they never do.
+      // The caller's timestamp is in the track's own time base -- the media
+      // timescale, not whatever unit the manifest counted segments in. Reading it
+      // back off the published track keeps a seek and the timestamps it aims at in
+      // the same unit; for DASH the two normally agree, for HLS never.
       if (tracks_[static_cast<size_t>(stream_idx)].time_base.den <= 0) {
         return OM_FORMAT_INVALID_TIMESTAMP;
       }
@@ -548,18 +527,17 @@ public:
       stream.reader->flushSegments();
       stream.dropHeld();
       stream.finished = false;
-      // Whatever was half-read belonged to where the reader was, not to where it is
-      // going; the pieces still coming for it will match nothing and be dropped.
+      // What was half-read belonged to where the reader was; the pieces still coming
+      // will match nothing and be dropped.
       stream.streaming = false;
       stream.pulling.reset();
       stream.last_read_ns = INT64_MIN;
       stream.read_ordinal = index.ordinalForTime(nsToScale(target_ns, index.timescale()));
     }
 
-    // Landing on a segment boundary is as precise as a manifest lets a seek be,
-    // and every segment starts at a sync sample, so this is already what
-    // PREVIOUS_SYNC asks for. Trimming to an exact frame is the caller's to do by
-    // dropping packets, since only it knows what its decoder has been given.
+    // A segment boundary is as precise as a manifest lets a seek be, and every
+    // segment starts at a sync sample, so this is already PREVIOUS_SYNC. Trimming to
+    // an exact frame is the caller's: only it knows what its decoder has been given.
     return OM_SUCCESS;
   }
 
@@ -580,8 +558,8 @@ private:
   }
 
   // Everything read is also downloaded, so this is where a presentation offering
-  // eight audio languages stops costing eight audio streams. A track whose type the
-  // source did not state is kept: in HLS only the initialization segment knows.
+  // eight audio languages stops costing eight audio streams. A track of unstated
+  // type is kept: in HLS only the initialization segment knows.
   auto selectTracks() const -> std::vector<const SegmentTrack*> {
     std::vector<const SegmentTrack*> chosen;
     for (const SegmentTrack& track : source_.tracks) {
@@ -591,9 +569,9 @@ private:
     }
     if (options_.language.empty()) return chosen;
 
-    // Per type, keep only what was asked for -- but only when the asked-for
-    // language is actually on offer, since dropping every audio track because none
-    // of them is French would leave the presentation silent.
+    // Per type, keep only what was asked for -- but only when it is on offer, since
+    // dropping every audio track because none is French would leave the
+    // presentation silent.
     for (const OMMediaType type : {OM_MEDIA_AUDIO, OM_MEDIA_SUBTITLE}) {
       const bool offered = std::any_of(chosen.begin(), chosen.end(),
                                       [&](const SegmentTrack* track) {
@@ -612,9 +590,9 @@ private:
   }
 
   auto chooseAlternative(const SegmentTrack& track) const -> size_t {
-    // Sorted best-first by whoever built the source, so the first entry inside
-    // every cap is the best one that fits, and falling off the end means nothing
-    // fits and the least bad choice is the smallest.
+    // Sorted best-first by whoever built the source, so the first entry inside every
+    // cap is the best fit; falling off the end means nothing fits, and the least bad
+    // choice is then the smallest.
     for (size_t i = 0; i < track.alternatives.size(); ++i) {
       const SegmentIndex& index = *track.alternatives[i];
       if (options_.max_bandwidth != 0 && index.bandwidth() > options_.max_bandwidth) continue;
@@ -650,17 +628,17 @@ private:
 
   auto pendingStartNs(const Stream& stream) const -> int64_t {
     if (stream.needs_init) return INT64_MIN; // nothing can be read before this
-    // Part-way through a segment, what is missing comes after what has already been
-    // read out of it -- not at the segment's start, which was handed over long
-    // since and would stall every other track for the length of a whole segment.
+    // Part-way through a segment, what is missing comes after what has been read out
+    // of it -- not at the segment's start, which would stall every other track for a
+    // whole segment's length.
     if (stream.streaming && stream.last_read_ns != INT64_MIN) return stream.last_read_ns;
     const auto segment = stream.index().segmentAt(stream.read_ordinal);
     if (!segment) return INT64_MAX;
     return scaleToNs(segment->time, stream.index().timescale());
   }
 
-  // Whether this ordinal's pieces are going in one at a time, so that the whole of
-  // it must not also be offered.
+  // Whether this ordinal's pieces are going in one at a time, so the whole of it
+  // must not also be offered.
   static auto isPartlyDelivered(const Stream& stream, uint64_t ordinal) -> bool {
     if (stream.streaming && ordinal == stream.read_ordinal) return true;
     const auto held = stream.inbox.find(ordinal);
@@ -676,9 +654,9 @@ private:
       return Ok(std::move(bytes));
     }
     if (options_.fetch) return options_.fetch(request);
-    // An initialization segment, and the first segment of a stream that has none,
-    // are wanted whole however they are read: the track list comes out of them, and
-    // half a track list is not one. A stream_fetch can supply that much.
+    // An initialization segment -- and the first segment of a stream that has none
+    // -- is wanted whole however it is read, because the track list comes out of it
+    // and half a track list is not one.
     if (options_.stream_fetch) {
       auto input = options_.stream_fetch(request);
       if (input.isErr()) return Err(std::move(input).unwrapErr());
@@ -693,9 +671,8 @@ private:
 
   // --- Reading a segment as it arrives ----------------------------------------
 
-  // Puts the reader at the start of a segment and gives it however much of it is in
-  // hand. From here on the reader is mid-segment: it holds packets as the rest of
-  // the bytes turn up, and read_ordinal does not move until the segment ends.
+  // Puts the reader at the start of a segment with however much is in hand. From
+  // here the reader is mid-segment, so read_ordinal does not move until it ends.
   auto openStreamed(Stream& stream, const Segment& segment, std::span<const uint8_t> arrived)
       -> OMError {
     const SegmentIndex& index = stream.index();
@@ -706,8 +683,8 @@ private:
     stream.streaming = true;
     if (arrived.empty()) return OM_SUCCESS;
     const OMError fed = stream.reader->feedSegment(arrived);
-    // Left mid-segment with no way to go on, the stream would wait for the rest of
-    // a segment nothing is going to finish.
+    // Left mid-segment with no way on, the stream would wait for the rest of a
+    // segment nothing is going to finish.
     if (fed != OM_SUCCESS) closeStreamed(stream);
     return fed;
   }
@@ -717,14 +694,14 @@ private:
     stream.streaming = false;
     stream.pulling.reset();
     ++stream.read_ordinal;
-    // A segment with nothing in it for this track -- which includes a download that
-    // stopped before anything readable arrived -- is skipped, not failed.
+    // A segment with nothing for this track -- including a download that stopped
+    // before anything readable arrived -- is skipped, not failed.
     return error == OM_FORMAT_NO_STREAMS ? OM_SUCCESS : error;
   }
 
-  // Reads from the segment's own stream until the reader holds a packet, or until
-  // the segment runs out. What makes StreamOptions::stream_fetch worth having: the
-  // first picture costs the first chunk of the segment rather than all of it.
+  // Reads from the segment's own stream until the reader holds a packet or the
+  // segment runs out -- which is what makes stream_fetch worth having: the first
+  // picture costs the first chunk rather than the whole segment.
   auto pumpStreamed(Stream& stream) -> OMError {
     std::array<uint8_t, PULL_CHUNK> chunk;
     while (stream.reader->needsSegment()) {
@@ -743,7 +720,7 @@ private:
     if (!stream.needs_init) return OM_SUCCESS;
 
     if (const auto request = stream.index().initSegment()) {
-      // Still arriving in pieces: there is nothing to read out of part of it.
+      // Still arriving in pieces, and part of one describes nothing.
       if (stream.init_inbox && !stream.init_complete) return OM_IO_NOT_ENOUGH_DATA;
       auto bytes = obtain(*request, stream.init_inbox);
       if (bytes.isErr()) return std::move(bytes).unwrapErr();
@@ -757,10 +734,9 @@ private:
     return primeFromFirstSegment(stream);
   }
 
-  // A stream the manifest gave no initialization section for is settled by its own
-  // first media segment: the headers are in there, repeated, and the samples beside
-  // them are read as media like any others. Nothing is spent on being a header,
-  // which is the whole point of the shape.
+  // A stream with no initialization section is settled by its own first media
+  // segment: the headers are in there, repeated, and the samples beside them read as
+  // media like any others.
   auto primeFromFirstSegment(Stream& stream) -> OMError {
     for (int attempt = 0; attempt < MAX_EMPTY_SEGMENTS; ++attempt) {
       const SegmentIndex& index = stream.index();
@@ -768,21 +744,18 @@ private:
       if (!segment) return OM_FORMAT_NO_STREAMS;
 
       if (stream.streaming) {
-        // Already being read as it arrives, and has not described its tracks yet.
         if (!stream.reader->tracksDescribed()) return OM_IO_NOT_ENOUGH_DATA;
-        // Settled out of a segment the reader is now part-way through, so
-        // read_ordinal stays where it is until that segment ends.
+        // Settled out of a segment the reader is part-way through, so read_ordinal
+        // stays put until that segment ends.
         stream.needs_init = false;
         return OM_SUCCESS;
       }
 
-      // A segment that is still arriving can describe the stream before it is
-      // whole, as long as what has arrived says which of the two shapes it is. A
-      // transport stream does: its program tables and parameter sets sit in its
-      // first packets and are repeated throughout, so the track list falls out of
-      // what is already in hand and the rest is read as it comes. Self-contained
-      // fragmented MP4 does not, because openInit() needs the whole `moov` -- so
-      // that one waits for the segment, once, and streams every segment after it.
+      // A segment still arriving can describe the stream before it is whole, as
+      // long as what arrived says which shape it is. A transport stream does: its
+      // program tables and parameter sets sit in its first packets and repeat
+      // throughout. Self-contained fragmented MP4 does not, since openInit() needs
+      // the whole `moov` -- so that one waits for the segment, once.
       if (const auto partial = stream.inbox.find(stream.read_ordinal);
           partial != stream.inbox.end() && !partial->second.complete) {
         const bool transport_stream = looksLikeMpegTs(partial->second.bytes);
@@ -800,8 +773,8 @@ private:
           return error;
         }
         if (!stream.reader->tracksDescribed()) return OM_IO_NOT_ENOUGH_DATA;
-        // Settled out of a segment the reader is now part-way through, so
-        // read_ordinal stays where it is until that segment ends.
+        // Settled out of a segment the reader is part-way through, so read_ordinal
+        // stays put until that segment ends.
         stream.needs_init = false;
         return OM_SUCCESS;
       }
@@ -811,25 +784,25 @@ private:
       if (inbox_held) held = std::move(inbox_held->bytes);
       auto fetched = obtain(segment->request, held);
       if (fetched.isErr()) {
-        // Put it back, so a fetch that failed or declined leaves the stream able to
-        // try the very same segment again.
+        // Put it back: a failed or declined fetch has to leave the stream able to
+        // try the same segment again.
         if (held) stream.hold(stream.read_ordinal, std::move(*held), /*complete=*/true);
         return std::move(fetched).unwrapErr();
       }
       std::vector<uint8_t> bytes = std::move(fetched).unwrap();
 
-      // A reader of its own every time, the way openInit() gives the fragmented-MP4
-      // path a clean slate: priming also happens after a quality switch, and the
-      // rendition switched to may be laid out nothing like the one before it --
-      // another program, other stream identifiers.
+      // A reader of its own every time, the clean slate openInit() gives the
+      // fragmented-MP4 path: priming also happens after a quality switch, and the
+      // rendition switched to may be laid out nothing like the last -- another
+      // program, other stream identifiers.
       const bool transport_stream = looksLikeMpegTs(bytes);
       const bool adts_stream = !transport_stream && looksLikeAdts(bytes);
       stream.reader = transport_stream ? createMpegTsReader()
                      : adts_stream ? createAdtsReader() : createFragmentedMP4Reader();
       if (!stream.reader) return OM_COMMON_OUT_OF_MEMORY;
-      // Self-contained fragmented MP4 has to read its own header before the samples
-      // sitting behind it in the same bytes, so that one segment is handed over
-      // twice -- the only copy any of this makes.
+      // Self-contained fragmented MP4 reads its own header before the samples behind
+      // it in the same bytes, so that one segment is handed over twice -- the only
+      // copy any of this makes.
       const OMError opened = (transport_stream || adts_stream)
                                  ? stream.reader->openInit({}) : stream.reader->openInit(bytes);
       if (opened != OM_SUCCESS) return opened;
@@ -839,8 +812,8 @@ private:
       ++stream.read_ordinal;
       if (pushed != OM_SUCCESS && pushed != OM_FORMAT_NO_STREAMS) return pushed;
 
-      // Priming is a property of the stream rather than of one segment: a segment
-      // that described no track leaves it unprimed, and the next one is tried.
+      // Priming belongs to the stream, not one segment: one that described no track
+      // leaves it unprimed, and the next is tried.
       if (!stream.reader->tracks().empty()) {
         stream.needs_init = false;
         return OM_SUCCESS;
@@ -850,7 +823,7 @@ private:
   }
 
   // In stream order, so a track index does not depend on which initialization
-  // segment happened to arrive first.
+  // segment arrived first.
   void publishTracks() {
     tracks_.clear();
     for (Stream& stream : streams_) {
@@ -861,25 +834,21 @@ private:
         Track track = reader_track;
         // Timestamps come off `tfdt` and `trun`, so their unit is the media
         // timescale the initialization segment declared -- not whatever unit the
-        // manifest happened to count segments in. For DASH the two normally agree;
-        // for HLS there is no declared unit at all, since a playlist measures
-        // segments in seconds. Taking it from the samples' own header is right
-        // either way, and is the only thing that makes a published time_base
-        // describe the packets actually handed out.
+        // manifest counted segments in. Taking it from the samples' own header is
+        // the only thing that makes a published time_base describe the packets
+        // actually handed out.
         const uint32_t media_timescale = stream.reader->timescaleOf(reader_track.index);
         track.index = static_cast<int32_t>(tracks_.size());
         track.time_base = {1, static_cast<int32_t>(media_timescale)};
         if (track.bitrate == 0) track.bitrate = index.bandwidth();
-        // A video track whose own header never stated its size -- which happens
-        // when the parameter sets are in the segments rather than in a header this
-        // reader parses. The manifest's own figure is then all there is, and a
-        // caller sizing a window before the first frame is decoded needs it.
+        // A video track whose own header never stated its size, which happens when
+        // the parameter sets are in the segments. The manifest's figure is then all
+        // a caller sizing a window before the first frame has to go on.
         if (track.format.type == OM_MEDIA_VIDEO && track.format.video.width == 0) {
           track.format.video.width = index.width();
           track.format.video.height = index.height();
         }
-        // Where this track sits in the presentation, converted into the unit the
-        // timestamps are in.
+        // Where this track sits in the presentation, in the timestamps' own unit.
         track.start_time = rescaleTime(index.presentationTimeOffset(), index.timescale(),
                                        media_timescale);
         if (track.duration <= 0 && source_.duration_ns > 0) {
@@ -899,20 +868,19 @@ private:
     for (const Stream& stream : streams_) {
       if (!stream.needs_init) continue;
       if (stream.index().initSegment()) {
-        // Half an initialization segment describes nothing; the rest is coming.
+        // Half an initialization segment describes nothing.
         if (!stream.init_complete) return;
         continue;
       }
       // A stream with no initialization section is primed by its first media
-      // segment, which arrives through the same door as every other one -- or is
-      // already being read as that door opens.
+      // segment, which arrives through the same door as every other.
       if (!stream.streaming && !stream.inbox.contains(stream.read_ordinal)) return;
     }
     settleInits();
   }
 
-  // A partial track list would renumber as the rest arrived, so there is none until
-  // every stream's initialization segment is in.
+  // A partial track list would renumber as the rest arrived, so there is none
+  // until every stream's initialization segment is in.
   auto settleInits() -> OMError {
     for (Stream& stream : streams_) {
       const OMError error = ensureInit(stream);
@@ -923,11 +891,10 @@ private:
   }
 
   auto advance(Stream& stream) -> OMError {
-    // Only a segment that turned out to hold nothing for this track counts against
-    // the bound; opening one costs a turn round the loop and is not a failure.
+    // Only a segment that held nothing for this track counts against the bound:
+    // opening one costs a turn round the loop and is not a failure.
     for (int empty = 0; empty < MAX_EMPTY_SEGMENTS;) {
-      // Part-way through a segment: what the reader wants is the rest of that one,
-      // not the next one.
+      // Part-way through a segment: what the reader wants is the rest of that one.
       if (stream.streaming) {
         if (!stream.pulling) {
           // The rest is the caller's to hand over, through appendSegmentChunk().
@@ -951,7 +918,7 @@ private:
         return OM_SUCCESS;
       }
 
-      // A segment the caller is still downloading is read from where it has got to.
+      // A segment still downloading is read from where it has got to.
       if (const auto partial = stream.inbox.find(stream.read_ordinal);
           partial != stream.inbox.end() && !partial->second.complete) {
         const std::optional<Stream::Held> held = stream.takeHeld(stream.read_ordinal);
@@ -961,8 +928,8 @@ private:
         return OM_IO_NOT_ENOUGH_DATA; // what has arrived completed no packet yet
       }
 
-      // Nothing in hand and somewhere to read it from: read it as it comes rather
-      // than waiting for the whole of it, which at 4K is tens of megabytes.
+      // Nothing in hand and somewhere to read from: read as it comes rather than
+      // waiting for the whole of it, which at 4K is tens of megabytes.
       if (!stream.inbox.contains(stream.read_ordinal) && options_.stream_fetch) {
         auto input = options_.stream_fetch(segment->request);
         if (input.isErr()) return std::move(input).unwrapErr();
@@ -986,8 +953,8 @@ private:
 
       auto bytes = obtain(segment->request, held);
       if (bytes.isErr()) {
-        // Put it back: a fetch that failed or declined must leave the stream able to
-        // try the very same segment again.
+        // Put it back: a failed or declined fetch has to leave the stream able to
+        // try the same segment again.
         if (held) stream.hold(stream.read_ordinal, std::move(*held), /*complete=*/true);
         return std::move(bytes).unwrapErr();
       }
@@ -1016,9 +983,8 @@ auto createSegmentDemuxer(SegmentSource source, const StreamOptions& options)
 
 namespace {
 
-// Reads one byte range of one file and nothing past it, so that a segment given as
-// a range of a larger resource ends where the playlist said it ends rather than at
-// the end of the file.
+// Reads one byte range and nothing past it, so a segment given as a range of a
+// larger resource ends where the playlist said rather than at the end of the file.
 class RangeStream final : public InputStream {
   std::unique_ptr<InputStream> source_;
   int64_t remaining_;
@@ -1047,8 +1013,8 @@ public:
     return true;
   }
 
-  // A range is read front to back and nothing in this library asks it to do
-  // otherwise, so there is no position for a seek to be relative to.
+  // Read front to back, and nothing here asks otherwise, so there is no position
+  // for a seek to be relative to.
   auto canSeek() const -> bool override { return false; }
   auto seek(int64_t, Whence) -> bool override { return false; }
   auto size() const -> int64_t override { return remaining_; }

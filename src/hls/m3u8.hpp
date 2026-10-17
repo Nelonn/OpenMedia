@@ -12,9 +12,8 @@
 namespace openmedia::hls {
 
 // HLS is two documents deep: a master playlist lists variants, and each variant's
-// segments live in a media playlist of its own, fetched separately. So parsing is two
-// calls with a fetch in between, and a single-variant stream is published as a media
-// playlist with no master above it at all.
+// segments live in a media playlist fetched separately -- hence two parse calls with a
+// fetch in between. A single-variant stream is published as a media playlist alone.
 enum class PlaylistKind : uint8_t {
   Unknown, // not a playlist, or nothing in it says which kind
   Master,
@@ -33,7 +32,7 @@ enum class KeyMethod : uint8_t {
   Aes128,
   SampleAes,
   SampleAesCtr,
-  Unsupported, // a method this parser does not know; the segments are unreadable
+  Unsupported, // unknown method, so the segments are unreadable
 };
 
 // `#EXT-X-KEY`. The key behind `uri` is the caller's to fetch, like everything else.
@@ -55,22 +54,20 @@ struct MediaSegment {
   std::string title;      // the text after the duration in `#EXTINF`
   uint32_t bitrate_kbps = 0;
 
-  // A discontinuity is declared between segments, so it belongs to the one that
-  // follows it: timestamps, and possibly the encoding itself, start over here.
+  // Declared between segments, so it belongs to the one that follows: timestamps,
+  // and possibly the encoding, start over here.
   bool discontinuity = false;
   uint64_t discontinuity_sequence = 0;
 
   // `#EXT-X-GAP`: the segment is announced but not actually available.
   bool gap = false;
 
-  // Milliseconds since the Unix epoch, from `#EXT-X-PROGRAM-DATE-TIME`, carried
-  // forward across the segments that follow the tag. -1 when the playlist never
-  // gives one.
+  // From `#EXT-X-PROGRAM-DATE-TIME`, carried forward across the segments after the
+  // tag. -1 when the playlist never gives one.
   int64_t program_date_time_ms = -1;
 
-  // The `#EXT-X-MAP` in force: an initialization section, which is what a
-  // fragmented-MP4 playlist puts its `moov` in. Empty for MPEG-TS, which carries
-  // its own headers in every segment.
+  // The `#EXT-X-MAP` in force, where a fragmented-MP4 playlist puts its `moov`.
+  // Empty for MPEG-TS, which carries its own headers in every segment.
   std::string init_url;
   ByteRange init_range;
 
@@ -112,11 +109,9 @@ struct Resolution {
 // `#EXT-X-STREAM-INF`, one rendition of the whole presentation.
 struct Variant {
   std::string url; // resolved; the media playlist to fetch next
-  // Where the same rendition is published besides `url`, in the order the playlist
-  // listed them. A master playlist that repeats a variant with the attributes
-  // unchanged is not offering another quality, it is offering another place to get
-  // that one from when the first cannot be reached -- RFC 8216 6.3.1. Those entries
-  // are collapsed into the first of them and end up here.
+  // Where the same rendition is published besides `url`, in playlist order. A
+  // variant repeated with its attributes unchanged is another address for that one
+  // quality, not another quality (RFC 8216 6.3.1), so such entries collapse here.
   std::vector<std::string> backup_urls;
   uint32_t bandwidth = 0;
   uint32_t average_bandwidth = 0;
@@ -124,14 +119,13 @@ struct Variant {
   Resolution resolution;
   Rational framerate = {};
   std::string video_range; // SDR, HLG, PQ
-  // Which `#EXT-X-MEDIA` groups this variant draws its other tracks from. An
-  // empty group means that track is muxed into the variant itself.
+  // Which `#EXT-X-MEDIA` groups this variant draws its other tracks from. Empty
+  // means that track is muxed into the variant itself.
   std::string audio_group;
   std::string video_group;
   std::string subtitle_group;
   std::string closed_captions_group;
-  // From `#EXT-X-I-FRAME-STREAM-INF`: a trick-play track, not something to play
-  // straight through.
+  // `#EXT-X-I-FRAME-STREAM-INF`: trick play, not something to play straight through.
   bool iframes_only = false;
 };
 
@@ -144,7 +138,7 @@ struct Rendition {
   std::string name;
   std::string language;
   std::string assoc_language;
-  // Resolved, and empty when there is no separate playlist: closed captions live
+  // Resolved, and empty where there is no separate playlist -- closed captions live
   // inside the video, and a rendition may describe a track muxed into the variant.
   std::string url;
   bool is_default = false;
@@ -172,13 +166,13 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
 
 // Exposed so they can be tested on their own.
 
-// `KEY=VALUE` separated by commas, where a quoted value may contain commas of its own
-// -- which `CODECS="avc1.4d401f,mp4a.40.2"` always does, and which is the one thing a
-// naive split gets wrong. Quotes are removed.
+// `KEY=VALUE` separated by commas. A quoted value may hold commas of its own, which
+// `CODECS="avc1.4d401f,mp4a.40.2"` always does and a naive split always gets wrong.
+// Quotes are removed.
 auto parseAttributes(std::string_view list) -> std::vector<std::pair<std::string, std::string>>;
 
 // `<length>[@<offset>]`. With no offset the range follows `previous_end`, the end of
-// the last range read from the same resource.
+// the previous range over the same resource.
 auto parseByteRange(std::string_view text, int64_t previous_end) -> ByteRange;
 
 // Milliseconds since the Unix epoch, or -1.
