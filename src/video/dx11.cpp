@@ -770,7 +770,9 @@ public:
         if (FAILED(attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) return OM_CODEC_OPEN_FAILED;
         is_async_ = true;
       }
-      attributes->SetUINT32(MF_LOW_LATENCY, FALSE);
+      // Real-time senders cannot afford the encoder holding frames back for
+      // lookahead; file encoding prefers the quality, so this is opt-in.
+      attributes->SetUINT32(MF_LOW_LATENCY, options.extra.getBool("low_latency", false) ? TRUE : FALSE);
     }
 
     // Hand the encoder our D3D11 device so texture input stays on the GPU.
@@ -845,6 +847,17 @@ public:
     v.ulVal = target_bitrate(rc);
     const GUID prop = CODECAPI_AVEncCommonMeanBitRate;
     return SUCCEEDED(codec_api_->SetValue(&prop, &v)) ? OM_SUCCESS : OM_CODEC_OPEN_FAILED;
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!encoder_) return OM_CODEC_OPEN_FAILED;
+    if (!codec_api_) return OM_COMMON_NOT_SUPPORTED;
+
+    VARIANT v = {};
+    v.vt = VT_UI4;
+    v.ulVal = 1;
+    const GUID prop = CODECAPI_AVEncVideoForceKeyFrame;
+    return SUCCEEDED(codec_api_->SetValue(&prop, &v)) ? OM_SUCCESS : OM_COMMON_NOT_SUPPORTED;
   }
 
   void release() {
@@ -1022,7 +1035,6 @@ public:
         codec_id_ != OM_CODEC_AV1 && codec_id_ != OM_CODEC_VP9) return OM_CODEC_NOT_SUPPORTED;
     width_ = options.format.video.width;
     height_ = options.format.video.height;
-    if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
 
     uint8_t bit_depth = 8;
     if (codec_id_ == OM_CODEC_H264) {
@@ -1047,6 +1059,27 @@ public:
           // 4:4:4 stream here would decode into an NV12/P010 surface and hand
           // back a wrong picture instead of failing over to software.
           if (h264_.sps[i].chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
+          // A caller feeding a live elementary stream has no container to read
+          // the picture size from, so it is taken from the sequence parameter
+          // set the stream itself carries.
+          if (width_ == 0 || height_ == 0) {
+            const auto& sps = h264_.sps[i];
+            const uint32_t coded_width = padded_width_;
+            const uint32_t coded_height =
+                static_cast<uint32_t>(sps.pic_height_in_map_units_minus1 + 1) * 16u *
+                (sps.frame_mbs_only_flag ? 1u : 2u);
+            uint32_t crop_x = 0;
+            uint32_t crop_y = 0;
+            if (sps.frame_cropping_flag != 0) {
+              // Offsets are in chroma units: 4:2:0 doubles them horizontally,
+              // and vertically as well in a frame-only stream.
+              crop_x = static_cast<uint32_t>(sps.frame_crop_left_offset + sps.frame_crop_right_offset) * 2u;
+              crop_y = static_cast<uint32_t>(sps.frame_crop_top_offset + sps.frame_crop_bottom_offset) * 2u *
+                       (sps.frame_mbs_only_flag ? 1u : 2u);
+            }
+            width_ = coded_width > crop_x ? coded_width - crop_x : coded_width;
+            height_ = coded_height > crop_y ? coded_height - crop_y : coded_height;
+          }
           break;
         }
       }
@@ -1070,6 +1103,7 @@ public:
         height_ = seq.max_frame_height;
         bit_depth = seq.color_config.bit_depth;
       }
+      if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
       // AV1 superblocks are up to 128x128, so give the surface room for a
       // whole one; the download crops back to the coded size.
       padded_width_ = dx_h264::alignUp(width_, 128u);
@@ -1089,10 +1123,18 @@ public:
           dpb_slot_count_ = 16; // HEVC usually needs up to 16
           bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
           if (s.chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
+          if (width_ == 0 || height_ == 0) {
+            width_ = static_cast<uint32_t>(s.pic_width_in_luma_samples);
+            height_ = static_cast<uint32_t>(s.pic_height_in_luma_samples);
+          }
           break;
         }
       }
     }
+
+    // VP9 carries nothing out of band, so its size can only have come from the
+    // caller; every other codec has had a chance to read it from the stream.
+    if (width_ == 0 || height_ == 0) return OM_CODEC_INVALID_PARAMS;
 
     hardware_output_ = options.hardware_output;
 

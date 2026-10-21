@@ -249,6 +249,10 @@ public:
   }
 
   virtual auto updateBitrate(const RateControlParams& rc) -> OMError = 0;
+
+  virtual auto requestKeyframe() -> OMError {
+    return OM_COMMON_NOT_IMPLEMENTED;
+  }
 };
 
 enum CodecFlags : uint8_t {
