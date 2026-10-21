@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <openmedia/video.hpp>
+#include <thread>
 #include <util/io_util.hpp>
 #include <vector>
 
@@ -45,7 +46,12 @@ public:
     }
 
     vpx_codec_dec_cfg_t cfg = {};
-    cfg.threads = 1; // Default to 1, can be tuned via extra options if needed
+    // One thread cannot decode a large picture in real time. VP9 splits a
+    // frame into tile columns, so more than a handful of threads buys nothing.
+    const int64_t requested_threads = options.extra.getInt64("threads", 0);
+    unsigned int threads = requested_threads > 0 ? static_cast<unsigned int>(requested_threads)
+                                                 : std::thread::hardware_concurrency();
+    cfg.threads = std::min(threads == 0 ? 1U : threads, 4U);
     cfg.w = options.format.video.width;
     cfg.h = options.format.video.height;
 
@@ -163,6 +169,9 @@ class VpxEncoder final : public Encoder {
   OMCodecId codec_id_;
   VideoFormat format_ = {};
   vpx_codec_enc_cfg_t cfg_ = {};
+  // Set by requestKeyframe(), consumed by the next encode(). libvpx has no way
+  // to ask for a keyframe out of band: the request is a per-frame flag.
+  bool force_keyframe_ = false;
 
 public:
   explicit VpxEncoder(OMCodecId codec_id)
@@ -198,7 +207,46 @@ public:
     cfg.g_h = options.video_format.height;
     cfg.g_timebase.num = options.format.video.framerate.den;
     cfg.g_timebase.den = options.format.video.framerate.num;
-    cfg.g_threads = 1;
+
+    // libvpx defaults to a single thread, which cannot keep up with anything
+    // much above 720p in real time. VP9 only splits work across threads where
+    // the picture can be divided into tile columns, and a tile column is at
+    // least 256 pixels wide, so the count is capped by the width.
+    const int64_t requested_threads = options.extra.getInt64("threads", 0);
+    unsigned int threads = requested_threads > 0 ? static_cast<unsigned int>(requested_threads)
+                                                 : std::thread::hardware_concurrency();
+    if (threads == 0) threads = 1;
+    threads = std::min(threads, 8U);
+    int tile_columns_log2 = 0;
+    if (codec_id_ == OM_CODEC_VP9) {
+      const unsigned int max_tile_columns = std::max(1U, cfg.g_w / 256U);
+      while ((1U << (tile_columns_log2 + 1)) <= max_tile_columns && tile_columns_log2 < 6) {
+        ++tile_columns_log2;
+      }
+      threads = std::min(threads, 1U << tile_columns_log2);
+    }
+    cfg.g_threads = threads;
+
+    // Keyframe interval, in frames. Left alone, libvpx keeps kf_max_dist at its
+    // default of 9999: a live stream then runs for minutes without a keyframe,
+    // and a receiver that joined late has nothing to start decoding from.
+    const int64_t gop = options.extra.getInt64("gop_size", 0);
+    if (gop > 0) {
+      cfg.kf_mode = VPX_KF_AUTO;
+      cfg.kf_min_dist = 0;
+      cfg.kf_max_dist = static_cast<unsigned int>(gop);
+    }
+
+    if (options.extra.getBool("low_latency", false)) {
+      // A frame handed in has to come back out as a packet. Any lookahead is
+      // latency, and so is a buffer model sized for file encoding: these are
+      // the window sizes a conferencing encoder uses.
+      cfg.g_lag_in_frames = 0;
+      cfg.g_pass = VPX_RC_ONE_PASS;
+      cfg.rc_buf_sz = 1000;
+      cfg.rc_buf_initial_sz = 500;
+      cfg.rc_buf_optimal_sz = 600;
+    }
 
     if (auto* cbr = std::get_if<CbrParams>(&options.rate_control.params)) {
       cfg.rc_end_usage = VPX_CBR;
@@ -228,10 +276,33 @@ public:
       return OM_CODEC_OPEN_FAILED;
     }
 
+    // Encoding speed. 0 is the slowest and is what the default leaves it at,
+    // which is nowhere near real time; the realtime deadline only has an effect
+    // from about 5 upwards.
+    const bool realtime = options.extra.getBool("low_latency", false);
+    const int64_t cpu_used = options.extra.getInt64("cpu_used", realtime ? 7 : 0);
+    vpx_codec_control(&ctx_, VP8E_SET_CPUUSED, static_cast<int>(cpu_used));
+    if (realtime) {
+      // Skip blocks that did not change, which on a shared screen is most of
+      // the picture.
+      vpx_codec_control(&ctx_, VP8E_SET_STATIC_THRESHOLD, 1U);
+    }
+
     // These are sequence-level and must be set on the codec, not per picture.
     if (codec_id_ == OM_CODEC_VP9) {
       vpx_codec_control(&ctx_, VP9E_SET_COLOR_SPACE, static_cast<int>(color_space_));
       vpx_codec_control(&ctx_, VP9E_SET_COLOR_RANGE, static_cast<int>(color_range_));
+      vpx_codec_control(&ctx_, VP9E_SET_TILE_COLUMNS, tile_columns_log2);
+      // Rows within a tile in parallel, which is what makes more threads than
+      // tile columns worth having. Frame-parallel decoding is off: it costs
+      // compression and the threading here does not need it.
+      vpx_codec_control(&ctx_, VP9E_SET_ROW_MT, 1U);
+      vpx_codec_control(&ctx_, VP9E_SET_FRAME_PARALLEL_DECODING, 0U);
+      // Screen content: flat areas, hard edges and text rather than camera
+      // noise. The encoder picks different tools for it.
+      if (options.extra.getString("tune_content") == "screen") {
+        vpx_codec_control(&ctx_, VP9E_SET_TUNE_CONTENT, VP9E_CONTENT_SCREEN);
+      }
     }
 
     cfg_ = cfg;
@@ -326,11 +397,24 @@ public:
     if (pic.content_light_level.has_value) content_light_level_ = pic.content_light_level;
 
     vpx_codec_pts_t pts = frame.pts;
-    if (vpx_codec_encode(&ctx_, &img, pts, 1, 0, VPX_DL_REALTIME) != VPX_CODEC_OK) {
+    vpx_enc_frame_flags_t flags = 0;
+    if (force_keyframe_) {
+      flags |= VPX_EFLAG_FORCE_KF;
+      force_keyframe_ = false;
+    }
+    if (vpx_codec_encode(&ctx_, &img, pts, 1, flags, VPX_DL_REALTIME) != VPX_CODEC_OK) {
       return Err(OM_CODEC_ENCODE_FAILED);
     }
 
     return Ok(collect());
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_) return OM_COMMON_NOT_INITIALIZED;
+    // libvpx takes the request as a flag on the next frame handed in, so this
+    // only records it; the keyframe comes out of the next encode().
+    force_keyframe_ = true;
+    return OM_SUCCESS;
   }
 
   auto updateBitrate(const RateControlParams& rc) -> OMError override {
