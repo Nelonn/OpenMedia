@@ -23,6 +23,7 @@ constexpr int32_t PCM_FLOAT = 4;
 // The NDK symbols were exported later than the corresponding MediaCodec keys.
 constexpr const char* PCM_ENCODING_KEY = "pcm-encoding";
 constexpr const char* VIDEO_BITRATE_KEY = "video-bitrate";
+constexpr const char* REQUEST_SYNC_FRAME_KEY = "request-sync";
 
 auto codecIdToMime(OMCodecId id) -> const char* {
   switch (id) {
@@ -620,6 +621,17 @@ public:
 #else
     return OM_COMMON_NOT_SUPPORTED;
 #endif
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!started_) return OM_COMMON_NOT_INITIALIZED;
+    if (type_ != OM_MEDIA_VIDEO) return OM_COMMON_NOT_SUPPORTED;
+    AMediaFormat* params = AMediaFormat_new();
+    if (!params) return OM_COMMON_OUT_OF_MEMORY;
+    AMediaFormat_setInt32(params, REQUEST_SYNC_FRAME_KEY, 0);
+    const media_status_t status = AMediaCodec_setParameters(codec_, params);
+    AMediaFormat_delete(params);
+    return status == AMEDIA_OK ? OM_SUCCESS : OM_CODEC_ENCODE_FAILED;
   }
 };
 

@@ -1086,6 +1086,7 @@ public:
 
   auto configure(const EncoderOptions& options) -> OMError override {
     closeSession();
+    force_keyframe_ = false;
 
     if (options.format.type != OM_MEDIA_VIDEO || options.format.codec_id != codec_id_) {
       return OM_CODEC_INVALID_PARAMS;
@@ -1247,12 +1248,26 @@ public:
         callback_context_.packets.clear();
     }
     
-    status = VTCompressionSessionEncodeFrame(session_, pixel_buffer, pts, kCMTimeInvalid, nullptr, nullptr, nullptr);
+    CFMutableDictionaryRef frame_properties = nullptr;
+    if (force_keyframe_) {
+        frame_properties = CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
+                                                     &kCFTypeDictionaryKeyCallBacks,
+                                                     &kCFTypeDictionaryValueCallBacks);
+        if (!frame_properties) {
+            CFRelease(pixel_buffer);
+            return Err(OM_COMMON_OUT_OF_MEMORY);
+        }
+        CFDictionarySetValue(frame_properties, kVTEncodeFrameOptionKey_ForceKeyFrame, kCFBooleanTrue);
+    }
+    status = VTCompressionSessionEncodeFrame(session_, pixel_buffer, pts, kCMTimeInvalid,
+                                             frame_properties, nullptr, nullptr);
+    if (frame_properties) CFRelease(frame_properties);
     CFRelease(pixel_buffer);
 
     if (status != noErr) {
         return Err(OM_CODEC_ENCODE_FAILED);
     }
+    force_keyframe_ = false;
 
     {
         std::lock_guard<std::mutex> lock(callback_context_.mutex);
@@ -1316,6 +1331,12 @@ public:
     return OM_SUCCESS;
   }
 
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_ || !session_) return OM_COMMON_NOT_INITIALIZED;
+    force_keyframe_ = true;
+    return OM_SUCCESS;
+  }
+
 private:
   void closeSession() {
     initialized_ = false;
@@ -1339,6 +1360,7 @@ private:
   uint32_t height_ = 0;
   int32_t timescale_ = kDefaultTimeScale;
   bool initialized_ = false;
+  bool force_keyframe_ = false;
 };
 
 auto createVideoToolboxDecoder(OMCodecId codec_id) -> std::unique_ptr<Decoder> {

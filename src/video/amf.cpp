@@ -714,12 +714,14 @@ class AMFEncoder final : public Encoder {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   bool initialized_ = false;
+  bool force_keyframe_ = false;
 
 public:
   ~AMFEncoder() override { close(); }
 
   auto configure(const EncoderOptions& options) -> OMError override {
     close();
+    force_keyframe_ = false;
 
     ids_ = encoderIds(options.format.codec_id);
     if (!ids_) return OM_CODEC_NOT_SUPPORTED;
@@ -784,13 +786,35 @@ public:
 
     amf::AMFSurfacePtr surface;
     if (const OMError err = makeSurface(*picture, frame.pts, surface); err != OM_SUCCESS) return Err(err);
+    if (force_keyframe_) {
+      AMF_RESULT status = AMF_FAIL;
+      switch (codec_id_) {
+        case OM_CODEC_H264:
+          status = surface->SetProperty(AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE,
+                                        static_cast<amf_int64>(AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR));
+          break;
+        case OM_CODEC_H265:
+          status = surface->SetProperty(AMF_VIDEO_ENCODER_HEVC_FORCE_PICTURE_TYPE,
+                                        static_cast<amf_int64>(AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR));
+          break;
+        case OM_CODEC_AV1:
+          status = surface->SetProperty(AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE,
+                                        static_cast<amf_int64>(AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY));
+          break;
+        default: return Err(OM_CODEC_NOT_SUPPORTED);
+      }
+      if (status != AMF_OK) return Err(OM_CODEC_ENCODE_FAILED);
+    }
 
     // As on the decoder, a full input queue is cleared by taking the packets the
     // encoder already has and offering the same surface again.
     std::vector<Packet> packets;
     while (true) {
       const AMF_RESULT res = encoder_->SubmitInput(surface);
-      if (res == AMF_OK || res == AMF_NEED_MORE_INPUT) break;
+      if (res == AMF_OK || res == AMF_NEED_MORE_INPUT) {
+        force_keyframe_ = false;
+        break;
+      }
       if (res != AMF_INPUT_FULL) return Err(OM_CODEC_ENCODE_FAILED);
       if (const OMError err = collectOutput(packets); err != OM_SUCCESS) return Err(err);
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -805,6 +829,12 @@ public:
     const RateControl rc = rateControl(params, codec_id_);
     if (!rc.target_bitrate && !rc.qp_intra) return OM_CODEC_NOT_SUPPORTED;
     applyRateControl(rc);
+    return OM_SUCCESS;
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_) return OM_COMMON_NOT_INITIALIZED;
+    force_keyframe_ = true;
     return OM_SUCCESS;
   }
 

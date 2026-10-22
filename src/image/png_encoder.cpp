@@ -252,6 +252,10 @@ public:
     return OM_COMMON_NOT_SUPPORTED;
   }
 
+  auto requestKeyframe() -> OMError override {
+    return initialized_ ? OM_SUCCESS : OM_COMMON_NOT_INITIALIZED;
+  }
+
 private:
   static void writeColorChunks(WriteContext& ctx, const Picture& pic, int color_type) {
     const bool is_rgb = color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_RGBA;

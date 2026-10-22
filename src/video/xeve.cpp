@@ -232,6 +232,7 @@ public:
       memcpy(packet.bytes.data(), bitstream_buffer_.data(), stat.write);
       packet.pts = bitb.ts[XEVE_TS_PTS];
       packet.dts = bitb.ts[XEVE_TS_DTS];
+      packet.is_keyframe = stat.nalu_type == XEVE_IDR_NUT;
 
       // Capture extradata from first frame (contains SPS/PPS)
       if (extradata_.empty() && stat.nalu_type == XEVE_SPS_NUT) {
@@ -274,6 +275,14 @@ public:
     }
 
     return OM_SUCCESS;
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_ || !ctx_) return OM_COMMON_NOT_INITIALIZED;
+    int force = 1;
+    int size = sizeof(force);
+    return XEVE_FAILED(xeve_config(ctx_.get(), XEVE_CFG_SET_FINTRA, &force, &size))
+               ? OM_CODEC_ENCODE_FAILED : OM_SUCCESS;
   }
 };
 

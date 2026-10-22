@@ -249,6 +249,10 @@ public:
     // bitrate to retarget.
     return OM_COMMON_NOT_SUPPORTED;
   }
+
+  auto requestKeyframe() -> OMError override {
+    return initialized_ ? OM_SUCCESS : OM_COMMON_NOT_INITIALIZED;
+  }
 };
 
 auto createWEBPEncoder() -> std::unique_ptr<Encoder> {

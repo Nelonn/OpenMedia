@@ -429,6 +429,8 @@ public:
   }
 
   auto configure(const EncoderOptions& options) -> OMError override {
+    force_keyframe_ = false;
+    is_video_ = options.format.type == OM_MEDIA_VIDEO;
     auto& codec_loader = LibAVCodec::getInstance();
     auto& util_loader = LibAVUtil::getInstance();
 
@@ -553,6 +555,10 @@ public:
         av_frame->width = static_cast<int>(pic.width);
         av_frame->height = static_cast<int>(pic.height);
         av_frame->pts = static_cast<int64_t>(frame.pts);
+        if (force_keyframe_) {
+          av_frame->pict_type = AV_PICTURE_TYPE_I;
+          av_frame->flags |= AV_FRAME_FLAG_KEY;
+        }
         av_frame->colorspace = omColorSpaceToAvColorSpace(pic.color_space);
         av_frame->color_trc = omColorTransferToAvTransfer(pic.transfer_char);
         av_frame->color_primaries = omColorPrimariesToAvPrimaries(pic.color_primaries);
@@ -610,6 +616,7 @@ public:
     if (ret < 0) {
       return Err(avErrorToOmError(ret));
     }
+    if (av_frame && std::holds_alternative<Picture>(frame.data)) force_keyframe_ = false;
 
     while (true) {
       ret = codec_loader.avcodec_receive_packet(codec_ctx_.get(), packet_.get());
@@ -659,6 +666,13 @@ public:
     return OM_SUCCESS;
   }
 
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_ || !codec_ctx_) return OM_COMMON_NOT_INITIALIZED;
+    if (!is_video_) return OM_COMMON_NOT_SUPPORTED;
+    force_keyframe_ = true;
+    return OM_SUCCESS;
+  }
+
 private:
   void release() {
     auto& util_loader = LibAVUtil::getInstance();
@@ -676,6 +690,8 @@ private:
   VideoFormat configured_video_format_ = {};
   AVDictionary* options_dict_ = nullptr;
   bool initialized_ = false;
+  bool is_video_ = false;
+  bool force_keyframe_ = false;
 };
 
 // Minimal bump allocator for strings. Blocks are never moved or freed until

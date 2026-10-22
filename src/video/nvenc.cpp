@@ -46,12 +46,14 @@ class NVEnc final : public Encoder {
   uint32_t current_index_ = 0;
 
   bool initialized_ = false;
+  bool force_keyframe_ = false;
 
 public:
   NVEnc() = default;
   ~NVEnc() override { release(); }
 
   auto configure(const EncoderOptions& options) -> OMError override {
+    force_keyframe_ = false;
     if (!options.hw_device.has_value() || options.hw_device->type != HWDeviceType::CUDA) {
       return OM_CODEC_HWACCEL_FAILED;
     }
@@ -219,6 +221,12 @@ public:
     return OM_SUCCESS;
   }
 
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_) return OM_COMMON_NOT_INITIALIZED;
+    force_keyframe_ = true;
+    return OM_SUCCESS;
+  }
+
 private:
   auto encodeCommon(NV_ENC_INPUT_PTR input, int64_t pts, const Picture& picture) -> Result<std::vector<Packet>, OMError> {
     OutputBuffer& out = output_buffers_[current_index_];
@@ -231,6 +239,7 @@ private:
     pic_params.outputBitstream = out.output_ptr;
     pic_params.inputTimeStamp = pts;
     pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
+    if (force_keyframe_) pic_params.encodePicFlags |= NV_ENC_PIC_FLAG_FORCEIDR;
 
     MASTERING_DISPLAY_INFO md = {};
     CONTENT_LIGHT_LEVEL cll = {};
@@ -259,6 +268,7 @@ private:
     }
 
     if (nvenc_.nvEncEncodePicture(encoder_, &pic_params) != NV_ENC_SUCCESS) return Err(OM_CODEC_ENCODE_FAILED);
+    force_keyframe_ = false;
 
     std::vector<Packet> packets;
     NV_ENC_LOCK_BITSTREAM lock_bit = {};
@@ -269,6 +279,7 @@ private:
       pkt.allocate(lock_bit.bitstreamSizeInBytes);
       std::memcpy(pkt.bytes.data(), lock_bit.bitstreamBufferPtr, lock_bit.bitstreamSizeInBytes);
       pkt.pts = lock_bit.outputTimeStamp;
+      pkt.is_keyframe = lock_bit.pictureType == NV_ENC_PIC_TYPE_IDR;
       packets.push_back(std::move(pkt));
       nvenc_.nvEncUnlockBitstream(encoder_, out.output_ptr);
     }

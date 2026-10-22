@@ -452,6 +452,11 @@ public:
     return OM_COMMON_NOT_IMPLEMENTED;
   }
 
+  auto requestKeyframe() -> OMError override {
+    if (!encoder_ || !initialized_) return OM_COMMON_NOT_INITIALIZED;
+    return encoder_->ForceIntraFrame(true) == cmResultSuccess ? OM_SUCCESS : OM_CODEC_ENCODE_FAILED;
+  }
+
 private:
   static auto bitstreamSize(const SFrameBSInfo& bs_info) -> size_t {
     size_t total_size = 0;

@@ -23,6 +23,8 @@
 #include <mfidl.h>
 #include <mfobjects.h>
 #include <mftransform.h>
+#include <codecapi.h>
+#include <icodecapi.h>
 
 #include <util/wmf.hpp>
 #include "dx_h264.hpp"
@@ -1125,6 +1127,17 @@ public:
 
     attributes->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
     return OM_SUCCESS;
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_ || !encoder_) return OM_COMMON_NOT_INITIALIZED;
+    ComPtr<ICodecAPI> codec_api;
+    if (FAILED(encoder_.As(&codec_api))) return OM_COMMON_NOT_SUPPORTED;
+    VARIANT value = {};
+    value.vt = VT_UI4;
+    value.ulVal = 1;
+    const GUID property = CODECAPI_AVEncVideoForceKeyFrame;
+    return SUCCEEDED(codec_api->SetValue(&property, &value)) ? OM_SUCCESS : OM_COMMON_NOT_SUPPORTED;
   }
 
   void release() {
