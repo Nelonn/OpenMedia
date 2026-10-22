@@ -1124,8 +1124,16 @@ public:
           bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
           if (s.chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
           if (width_ == 0 || height_ == 0) {
-            width_ = static_cast<uint32_t>(s.pic_width_in_luma_samples);
-            height_ = static_cast<uint32_t>(s.pic_height_in_luma_samples);
+            // HEVC encoders may pad the coded picture (for example 1080 to 1088)
+            // and signal the visible rectangle in the conformance window.
+            const uint32_t coded_width = static_cast<uint32_t>(s.pic_width_in_luma_samples);
+            const uint32_t coded_height = static_cast<uint32_t>(s.pic_height_in_luma_samples);
+            const uint32_t crop_x = s.conformance_window_flag
+                ? 2u * static_cast<uint32_t>(s.conf_win_left_offset + s.conf_win_right_offset) : 0u;
+            const uint32_t crop_y = s.conformance_window_flag
+                ? 2u * static_cast<uint32_t>(s.conf_win_top_offset + s.conf_win_bottom_offset) : 0u;
+            width_ = coded_width > crop_x ? coded_width - crop_x : coded_width;
+            height_ = coded_height > crop_y ? coded_height - crop_y : coded_height;
           }
           break;
         }
