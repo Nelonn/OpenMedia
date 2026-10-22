@@ -1043,14 +1043,22 @@ public:
     const auto* pic = std::get_if<Picture>(&frame.data);
     bool submitted = true;
     if (pic && pic->width != 0) {
-      const bool key = frames_since_key_ == 0 || frames_since_key_ >= gop_ || pic->is_keyframe || !have_reference_;
+      const bool key = force_keyframe_ || frames_since_key_ == 0 || frames_since_key_ >= gop_ ||
+                       pic->is_keyframe || !have_reference_;
       submitted = submit(frame, *pic, key);
+      if (submitted) force_keyframe_ = false;
     }
     if (previous) {
       if (auto packet = collect(*previous)) packets.push_back(std::move(*packet));
     }
     if (!submitted && packets.empty()) return Err(OM_CODEC_ENCODE_FAILED);
     return Ok(std::move(packets));
+  }
+
+  auto requestKeyframe() -> OMError override {
+    if (!initialized_) return OM_COMMON_NOT_INITIALIZED;
+    force_keyframe_ = true;
+    return OM_SUCCESS;
   }
 
   auto updateBitrate(const RateControlParams& params) -> OMError override {
@@ -1393,6 +1401,7 @@ private:
     frames_since_key_ = 0;
     frame_num_ = 0;
     idr_pic_id_ = 0;
+    force_keyframe_ = false;
     current_recon_ = 0;
     rc_changed_ = false;
   }
@@ -2407,6 +2416,7 @@ private:
   bool have_reference_ = false;
   int current_recon_ = 0; // index of the reconstructed reference in recon_
   uint32_t frames_since_key_ = 0;
+  bool force_keyframe_ = false;
   uint32_t frame_num_ = 0;
   uint32_t idr_pic_id_ = 0;
 
