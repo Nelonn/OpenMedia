@@ -12,6 +12,8 @@
 #include <util/io_util.hpp>
 #include <vector>
 
+#include "enc_preset.hpp"
+
 namespace openmedia {
 
 class VpxDecoder final : public Decoder {
@@ -278,9 +280,15 @@ public:
 
     // Encoding speed. 0 is the slowest and is what the default leaves it at,
     // which is nowhere near real time; the realtime deadline only has an effect
-    // from about 5 upwards.
+    // from about 5 upwards. So real time gets the 5-9 band, with the 1-7 scale
+    // running the other way round through it -- 9 is libvpx's fastest step --
+    // and the middle of the scale landing on the 7 used here all along. The
+    // picture this buys is paid for in CPU, which a software encoder may not
+    // have: too high a preset shows up as dropped frames, not as worse video.
     const bool realtime = options.extra.getBool("low_latency", false);
-    const int64_t cpu_used = options.extra.getInt64("cpu_used", realtime ? 7 : 0);
+    const int64_t realtime_cpu_used =
+        enc_preset::scaleTo(enc_preset::requestedOr(options.extra, enc_preset::kBalanced), 9, 5);
+    const int64_t cpu_used = options.extra.getInt64("cpu_used", realtime ? realtime_cpu_used : 0);
     vpx_codec_control(&ctx_, VP8E_SET_CPUUSED, static_cast<int>(cpu_used));
     if (realtime) {
       // Skip blocks that did not change, which on a shared screen is most of

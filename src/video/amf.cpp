@@ -39,6 +39,7 @@
 
 #include "dx_h264.hpp"
 #include "dx_h265.hpp"
+#include "enc_preset.hpp"
 
 namespace openmedia {
 namespace {
@@ -547,6 +548,15 @@ struct EncoderIds {
   const wchar_t* frame_rate;
   const wchar_t* usage;
   amf_int64 usage_transcoding;
+  amf_int64 usage_low_latency;
+  // Where the other encoders have a range, AMF has four steps, and their
+  // values are per codec too: AVC numbers them 0-3 from balanced, HEVC and AV1
+  // count up from the best quality.
+  const wchar_t* quality_preset;
+  amf_int64 preset_speed;
+  amf_int64 preset_balanced;
+  amf_int64 preset_quality;
+  amf_int64 preset_high_quality;
   const wchar_t* rate_control;
   const wchar_t* target_bitrate;
   const wchar_t* peak_bitrate;
@@ -571,6 +581,12 @@ constexpr EncoderIds kEncoderAVC = {
     AMF_VIDEO_ENCODER_FRAMERATE,
     AMF_VIDEO_ENCODER_USAGE,
     AMF_VIDEO_ENCODER_USAGE_TRANSCODING,
+    AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY,
+    AMF_VIDEO_ENCODER_QUALITY_PRESET,
+    AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED,
+    AMF_VIDEO_ENCODER_QUALITY_PRESET_BALANCED,
+    AMF_VIDEO_ENCODER_QUALITY_PRESET_QUALITY,
+    AMF_VIDEO_ENCODER_QUALITY_PRESET_HIGH_QUALITY,
     AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
     AMF_VIDEO_ENCODER_TARGET_BITRATE,
     AMF_VIDEO_ENCODER_PEAK_BITRATE,
@@ -594,6 +610,12 @@ constexpr EncoderIds kEncoderHEVC = {
     AMF_VIDEO_ENCODER_HEVC_FRAMERATE,
     AMF_VIDEO_ENCODER_HEVC_USAGE,
     AMF_VIDEO_ENCODER_HEVC_USAGE_TRANSCODING,
+    AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY,
+    AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET,
+    AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_SPEED,
+    AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_BALANCED,
+    AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_QUALITY,
+    AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_HIGH_QUALITY,
     AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
     AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE,
     AMF_VIDEO_ENCODER_HEVC_PEAK_BITRATE,
@@ -617,6 +639,12 @@ constexpr EncoderIds kEncoderAV1 = {
     AMF_VIDEO_ENCODER_AV1_FRAMERATE,
     AMF_VIDEO_ENCODER_AV1_USAGE,
     AMF_VIDEO_ENCODER_AV1_USAGE_TRANSCODING,
+    AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY,
+    AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET,
+    AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_SPEED,
+    AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_BALANCED,
+    AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_QUALITY,
+    AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_HIGH_QUALITY,
     AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD,
     AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE,
     AMF_VIDEO_ENCODER_AV1_PEAK_BITRATE,
@@ -740,10 +768,17 @@ public:
       return OM_CODEC_HWACCEL_FAILED;
 
     const Rational framerate = options.format.video.framerate;
-    encoder_->SetProperty(ids_->usage, ids_->usage_transcoding);
+    // Usage is the coarse switch -- it rewrites every other encoder property
+    // from its own defaults -- so it is set first and everything else after.
+    // Low latency is what holds the encoder to a frame out per frame in, which
+    // is what makes the quality preset below safe to raise for a sender.
+    encoder_->SetProperty(ids_->usage, options.extra.getBool("low_latency", false)
+                                           ? ids_->usage_low_latency
+                                           : ids_->usage_transcoding);
     encoder_->SetProperty(ids_->frame_size, AMFConstructSize(static_cast<amf_int32>(width_), static_cast<amf_int32>(height_)));
     encoder_->SetProperty(ids_->frame_rate, AMFConstructRate(static_cast<amf_uint32>(framerate.num),
                                                              static_cast<amf_uint32>(framerate.den)));
+    applyQualityPreset(enc_preset::requested(options.extra));
     applyColor(options.video_format);
     applyRateControl(rateControl(options.rate_control, codec_id_));
 
@@ -849,6 +884,21 @@ private:
       context_ = nullptr;
     }
     initialized_ = false;
+  }
+
+  // Four steps take the 1-7 scale in pairs, with the top step on its own.
+  // HIGH_QUALITY is newer than the other three and a driver without it refuses
+  // the property, which would quietly leave the encoder on whatever the usage
+  // chose, so that one step falls back to QUALITY rather than to nothing.
+  void applyQualityPreset(std::optional<int32_t> preset) {
+    if (!preset) return;
+    const amf_int64 step = *preset <= 2   ? ids_->preset_speed
+                           : *preset <= 4 ? ids_->preset_balanced
+                           : *preset <= 6 ? ids_->preset_quality
+                                          : ids_->preset_high_quality;
+    if (encoder_->SetProperty(ids_->quality_preset, step) != AMF_OK && step == ids_->preset_high_quality) {
+      encoder_->SetProperty(ids_->quality_preset, ids_->preset_quality);
+    }
   }
 
   void applyRateControl(const RateControl& rc) {

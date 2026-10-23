@@ -11,6 +11,7 @@
 #include <queue>
 #include <variant>
 #include <vector>
+#include "enc_preset.hpp"
 #include "nv_common.hpp"
 #include "nv_loader.hpp"
 
@@ -104,12 +105,28 @@ public:
       default: return OM_CODEC_NOT_SUPPORTED;
     }
 
+    // A preset GUID only says how much work per frame; what that work is spent
+    // on is the tuning, and the two are chosen together. Low latency keeps the
+    // encoder frame-in frame-out -- no lookahead, no reordering -- so a sender
+    // can walk the preset up without paying for it in delay.
+    const NV_ENC_TUNING_INFO tuning = options.extra.getBool("low_latency", false)
+                                          ? NV_ENC_TUNING_INFO_LOW_LATENCY
+                                          : NV_ENC_TUNING_INFO_HIGH_QUALITY;
+    const GUID preset = presetGuid(enc_preset::requestedOr(options.extra, enc_preset::kBalanced));
+
     NV_ENC_PRESET_CONFIG preset_config = {};
     preset_config.version = NV_ENC_PRESET_CONFIG_VER;
     preset_config.presetCfg.version = NV_ENC_CONFIG_VER;
-    nvenc_.nvEncGetEncodePresetConfig(encoder_, init_params.encodeGUID, NV_ENC_PRESET_P4_GUID, &preset_config);
+    // The tuning has to be in the query as well, or the config that comes back
+    // is the one for latency-tolerant encoding and brings its B-frames with it.
+    if (nvenc_.nvEncGetEncodePresetConfigEx) {
+      nvenc_.nvEncGetEncodePresetConfigEx(encoder_, init_params.encodeGUID, preset, tuning, &preset_config);
+    } else {
+      nvenc_.nvEncGetEncodePresetConfig(encoder_, init_params.encodeGUID, preset, &preset_config);
+    }
     std::memcpy(&config, &preset_config.presetCfg, sizeof(config));
-    init_params.presetGUID = NV_ENC_PRESET_P4_GUID;
+    init_params.presetGUID = preset;
+    init_params.tuningInfo = tuning;
 
     // Set VUI for color space
     if (options.format.codec_id == OM_CODEC_H264) {
@@ -359,6 +376,20 @@ private:
     nvenc_.nvEncUnmapInputResource(encoder_, map.mappedResource);
     nvenc_.nvEncUnregisterResource(encoder_, reg.registeredResource);
     return res;
+  }
+
+  // The 1-7 scale is NVENC's own: P1 is the fastest preset, P7 the one that
+  // spends the most on the picture.
+  static auto presetGuid(int32_t preset) -> GUID {
+    switch (preset) {
+      case 1: return NV_ENC_PRESET_P1_GUID;
+      case 2: return NV_ENC_PRESET_P2_GUID;
+      case 3: return NV_ENC_PRESET_P3_GUID;
+      case 5: return NV_ENC_PRESET_P5_GUID;
+      case 6: return NV_ENC_PRESET_P6_GUID;
+      case 7: return NV_ENC_PRESET_P7_GUID;
+      default: return NV_ENC_PRESET_P4_GUID;
+    }
   }
 
   auto map_color_primaries(OMColorPrimaries p) -> uint32_t {

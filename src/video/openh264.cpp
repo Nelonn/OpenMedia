@@ -12,6 +12,8 @@
 #include <util/io_util.hpp>
 #include <vector>
 
+#include "enc_preset.hpp"
+
 namespace openmedia {
 
 using PFN_WelsCreateSVCEncoder = fn_ptr<int EXTAPI(ISVCEncoder**)>;
@@ -267,7 +269,13 @@ public:
     };
 
     param.iUsageType = static_cast<EUsageType>(extra.getInt32(OPENH264_ENC_USAGE_TYPE, CAMERA_VIDEO_REAL_TIME));
-    param.iComplexityMode = static_cast<ECOMPLEXITY_MODE>(extra.getInt32(OPENH264_ENC_COMPLEXITY, LOW_COMPLEXITY));
+    // Three complexity modes to put the 1-7 scale on, and software H.264 in
+    // real time cannot afford much of it: an absent preset keeps the lowest
+    // mode this encoder has always used, and only the top of the scale reaches
+    // HIGH. openh264.complexity still names a mode outright.
+    const int32_t complexity = enc_preset::scaleTo(enc_preset::requestedOr(extra, enc_preset::kFastest),
+                                                   LOW_COMPLEXITY, HIGH_COMPLEXITY);
+    param.iComplexityMode = static_cast<ECOMPLEXITY_MODE>(extra.getInt32(OPENH264_ENC_COMPLEXITY, complexity));
 
     set_int32(OPENH264_ENC_IDR_INTERVAL, param.uiIntraPeriod);
     set_int32(OPENH264_ENC_NUM_REF_FRAME, param.iNumRefFrame);
@@ -528,6 +536,7 @@ const CodecDescriptor CODEC_OPENH264 = {
         },
     },
     .options = {
+        CODEC_ENC_PRESET,
         OPENH264_ENC_USAGE_TYPE,
         OPENH264_ENC_COMPLEXITY,
         OPENH264_ENC_IDR_INTERVAL,

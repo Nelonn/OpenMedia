@@ -35,6 +35,7 @@
 #include <util/wmf.hpp>
 #include "dx_h264.hpp"
 #include "dx_h265.hpp"
+#include "enc_preset.hpp"
 #include "hw_common.hpp"
 
 #pragma comment(lib, "mfplat.lib")
@@ -284,6 +285,15 @@ class DX11Encoder final : public Encoder {
       gop = static_cast<uint32_t>(options.format.video.framerate.num /
                                   std::max(1, options.format.video.framerate.den)) * 2;
     if (gop > 0) set_u32(CODECAPI_AVEncMPVGOPSize, gop);
+
+    // How much the encoder may spend per frame, as Media Foundation states it:
+    // 0 is all speed, 100 all quality, and a driver that has nothing to spend
+    // it on ignores the hint. MF_LOW_LATENCY is set separately and still
+    // applies, so this buys a better picture rather than a deeper pipeline.
+    if (const auto preset = enc_preset::requested(options.extra)) {
+      set_u32(CODECAPI_AVEncCommonQualityVsSpeed,
+              static_cast<uint32_t>(enc_preset::scaleTo(*preset, 0, 100)));
+    }
   }
 
   static auto map_profile(OMCodecId codec, OMProfile profile, uint8_t bit_depth) -> uint32_t {

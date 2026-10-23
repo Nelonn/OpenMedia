@@ -13,6 +13,18 @@ constexpr Key CODEC_DEC_LOW_DELAY = "low_delay";
 // bool - Apply film grain synthesis on output frames (default true)
 constexpr Key CODEC_DEC_APPLY_FILM_GRAIN = "apply_film_grain";
 
+// Video encoders
+// int32 - Speed/quality trade-off as a 1-7 scale: 1 is the fastest, 7 spends
+// the most on the picture for the same bitrate, 4 is the middle. Absent leaves
+// each encoder on the default it had before this key existed, which is at or
+// below the middle. Each encoder maps the scale onto its own presets, so one
+// step is not the same amount of work everywhere; what holds across them is
+// the direction. The scale never buys quality with delay: an encoder asked for
+// low_latency still returns a frame per frame at every step, which is what
+// lets a real-time sender on a discrete GPU spend the headroom it has on the
+// picture
+constexpr Key CODEC_ENC_PRESET = "preset";
+
 // dav1d
 // int32 - Max frame delay (0 = auto, 1 = low latency). Overrides low_delay
 constexpr Key DAV1D_DEC_MAX_FRAME_DELAY = "dav1d.max_frame_delay";

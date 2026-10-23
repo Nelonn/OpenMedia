@@ -1,6 +1,7 @@
 #include "vaapi_codecs.hpp"
 
 #include "av1_quant.hpp"
+#include "enc_preset.hpp"
 #include "vaapi_common.hpp"
 
 #include <openmedia/codec_extra.hpp>
@@ -997,9 +998,15 @@ public:
     mastering_display_ = video.mastering_display.has_value ? video.mastering_display : input_format_.mastering_display;
     content_light_level_ = video.content_light_level.has_value ? video.content_light_level : input_format_.content_light_level;
 
+    // A driver states its own range, where 1 is the best quality and the top of
+    // the range is the fastest, so the 1-7 scale maps onto it backwards.
+    // vaapi.quality_level keeps naming a driver's level directly, and wins.
     quality_level_ = 0;
     if (const auto* value = options.extra.get(VAAPI_ENC_QUALITY_LEVEL)) {
       if (const auto n = value->getInt64()) quality_level_ = static_cast<uint32_t>(std::max<int64_t>(*n, 0));
+    } else if (const auto preset = enc_preset::requested(options.extra); preset && quality_range_ > 0) {
+      quality_level_ =
+          static_cast<uint32_t>(enc_preset::scaleTo(*preset, static_cast<int32_t>(quality_range_), 1));
     }
 
     gop_ = 0;
@@ -1018,9 +1025,9 @@ public:
     setupHeaders(options.format.level);
 
     log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO,
-        "[VAAPI] encoding {} {}x{} {}-bit, {}, {} rate control, key frame every {} frames, packed headers 0x{:x}",
+        "[VAAPI] encoding {} {}x{} {}-bit, {}, {} rate control, quality level {} of {}, key frame every {} frames, packed headers 0x{:x}",
         codecName(), width_, height_, bit_depth_, entrypoint_ == VAEntrypointEncSliceLP ? "low power" : "full",
-        rcName(rc_.va_mode), gop_, packed_headers_);
+        rcName(rc_.va_mode), quality_level_, quality_range_, gop_, packed_headers_);
     initialized_ = true;
     return OM_SUCCESS;
   }

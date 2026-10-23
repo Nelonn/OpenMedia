@@ -14,6 +14,8 @@
 #include <video/parser/h264_parser.hpp>
 #include <video/parser/h265_parser.hpp>
 
+#include "enc_preset.hpp"
+
 namespace openmedia {
 
 namespace {
@@ -1131,6 +1133,21 @@ public:
         if (err != noErr) {
           log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, std::format("Failed to set HEVC Main 10 profile: {}", static_cast<int32_t>(err)));
         }
+      }
+    }
+
+    // Real time is the shape of the session rather than a hint: the encoder
+    // gives a frame back per frame instead of filling a pipeline first.
+    VTSessionSetProperty(session_, kVTCompressionPropertyKey_RealTime,
+                         options.extra.getBool("low_latency", false) ? kCFBooleanTrue : kCFBooleanFalse);
+
+    // VideoToolbox publishes no preset scale, only which side of the trade-off
+    // to take, so the scale collapses to that: below the middle asks for speed,
+    // the middle and above ask for the picture. macOS 11 and newer.
+    if (const auto preset = enc_preset::requested(options.extra)) {
+      if (__builtin_available(macOS 11.0, *)) {
+        VTSessionSetProperty(session_, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                             *preset < enc_preset::kBalanced ? kCFBooleanTrue : kCFBooleanFalse);
       }
     }
 
