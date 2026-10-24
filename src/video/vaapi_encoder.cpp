@@ -23,6 +23,7 @@
 #include <tuple>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Encoding goes IDR/key frame, then P frames that each predict from the one
@@ -38,6 +39,11 @@
 namespace openmedia {
 
 namespace {
+
+// VA_TIMEOUT_INFINITE, spelled out: the macro arrived together with
+// vaSyncBuffer in VA-API 1.9, and the header this was built against may be
+// older than the libva found at run time.
+constexpr uint64_t kWaitForever = 0xffffffffffffffffull;
 
 // ---------------------------------------------------------------------------
 // Bitstream helpers
@@ -66,7 +72,10 @@ public:
     writer_.align();
   }
 
-  auto finish() -> PackedBits {
+  // Consumes the writer: the buffer is moved out from under it, so the only
+  // safe thing left to do with the object is destroy it. Rvalue-only says that
+  // in the type, which is why the callers spell out std::move.
+  auto finish() && -> PackedBits {
     PackedBits out;
     out.bits = writer_.bitPosition();
     writer_.align();
@@ -313,7 +322,7 @@ struct H264Headers {
     w.ue(0);                     // max_num_reorder_frames
     w.ue(max_num_ref_frames);    // max_dec_frame_buffering
     h.trailing();
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 
   auto pps() const -> PackedBits {
@@ -337,7 +346,7 @@ struct H264Headers {
       w.se(0);      // second_chroma_qp_index_offset
     }
     h.trailing();
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 
   // Everything up to slice_data(); CABAC alignment and the data itself are the
@@ -360,7 +369,7 @@ struct H264Headers {
     else w.bit(false);
     if (cabac && !idr) w.ue(0); // cabac_init_idc
     w.se(slice_qp_delta);
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 };
 
@@ -443,7 +452,7 @@ struct H265Headers {
     w.ue(0);      // vps_num_hrd_parameters
     w.bit(false); // vps_extension_flag
     h.trailing();
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 
   auto sps() const -> PackedBits {
@@ -503,7 +512,7 @@ struct H265Headers {
 
     w.bit(false); // sps_extension_present_flag
     h.trailing();
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 
   auto pps() const -> PackedBits {
@@ -536,7 +545,7 @@ struct H265Headers {
     w.bit(false);  // slice_segment_header_extension_present_flag
     w.bit(false);  // pps_extension_present_flag
     h.trailing();
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 
   // slice_type: 2 = I, 1 = P, 0 = B (a P frame in disguise for drivers that
@@ -570,7 +579,7 @@ struct H265Headers {
     // filter is on, so the slice says whether it filters across its edges.
     w.bit(false); // slice_loop_filter_across_slices_enabled_flag
     h.trailing(); // byte_alignment()
-    return annexB(h.finish());
+    return annexB(std::move(h).finish());
   }
 };
 
@@ -748,7 +757,7 @@ struct AV1Headers {
     w.bit(false);             // separate_uv_delta_q
     w.bit(false);             // film_grain_params_present
     h.trailing();
-    return obu(1, h.finish());
+    return obu(1, std::move(h).finish());
   }
 
   // uncompressed_header() for the two kinds of frame this encoder makes: a
@@ -824,7 +833,7 @@ struct AV1Headers {
       for (int i = 0; i < 7; ++i) w.bit(false); // is_global
     }
     h.trailing();
-    return obu(3, h.finish());
+    return obu(3, std::move(h).finish());
   }
 };
 
@@ -877,7 +886,7 @@ auto hdrSeiNal(bool hevc, const OMMasteringDisplayMetadata& md, const OMContentL
   }
   for (uint8_t b : payloads) w.bits(b, 8);
   h.trailing();
-  return annexB(h.finish()).bytes;
+  return annexB(std::move(h).finish()).bytes;
 }
 
 // OBU_METADATA for the same, in AV1's units (0.16 chromaticity in RGB order,
@@ -1042,11 +1051,11 @@ public:
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-    std::vector<Packet> packets;
     // One picture is kept in flight: this call submits its frame and collects
     // the one before, so the GPU encodes while the caller prepares the next.
     // An empty frame drains what is left.
     std::optional<InFlight> previous = std::exchange(in_flight_, std::nullopt);
+    std::vector<Packet> packets = std::exchange(pending_, {});
     const auto* pic = std::get_if<Picture>(&frame.data);
     bool submitted = true;
     if (pic && pic->width != 0) {
@@ -1058,7 +1067,13 @@ public:
     if (previous) {
       if (auto packet = collect(*previous)) packets.push_back(std::move(*packet));
     }
-    if (!submitted && packets.empty()) return Err(OM_CODEC_ENCODE_FAILED);
+    if (!submitted) {
+      // The frame was dropped, which the caller has to hear about. Whatever was
+      // collected alongside it waits for the next call instead of going with an
+      // error the caller may well treat as having returned nothing.
+      pending_ = std::move(packets);
+      return Err(OM_CODEC_ENCODE_FAILED);
+    }
     return Ok(std::move(packets));
   }
 
@@ -1364,14 +1379,14 @@ private:
     }
 
     // Room for an intra frame at a quality nobody asks of a hardware encoder.
-    const size_t coded_size = std::max<size_t>(1u << 20, static_cast<size_t>(surface_width_) * surface_height_ *
-                                                             (bit_depth_ > 8 ? 3 : 2));
+    coded_buffer_size_ = std::max<size_t>(1u << 20, static_cast<size_t>(surface_width_) * surface_height_ *
+                                                        (bit_depth_ > 8 ? 3 : 2));
     for (auto& buffer : coded_buffers_) {
-      status = libva.vaCreateBuffer(display_, context_, VAEncCodedBufferType, static_cast<unsigned int>(coded_size), 1,
-                                    nullptr, &buffer);
+      status = libva.vaCreateBuffer(display_, context_, VAEncCodedBufferType,
+                                    static_cast<unsigned int>(coded_buffer_size_), 1, nullptr, &buffer);
       if (status != VA_STATUS_SUCCESS) {
         buffer = VA_INVALID_ID;
-        return fail(OM_CODEC_OPEN_FAILED, "could not create a {} byte coded buffer: {}", coded_size,
+        return fail(OM_CODEC_OPEN_FAILED, "could not create a {} byte coded buffer: {}", coded_buffer_size_,
                     vaapi::describe(status));
       }
     }
@@ -1381,8 +1396,12 @@ private:
   void release() {
     auto& libva = LibVA::getInstance();
     if (libva.isLoaded() && display_) {
-      // Whatever was still being encoded has to finish before its buffers go.
-      if (in_flight_) libva.vaSyncSurface(display_, in_flight_->input);
+      // Whatever was still being encoded has to finish before its buffers go,
+      // and both the coded buffer and the input surface are about to.
+      if (in_flight_) {
+        if (libva.vaSyncBuffer) libva.vaSyncBuffer(display_, in_flight_->coded, kWaitForever);
+        libva.vaSyncSurface(display_, in_flight_->input);
+      }
       for (VABufferID buffer : coded_buffers_) {
         if (buffer != VA_INVALID_ID) libva.vaDestroyBuffer(display_, buffer);
       }
@@ -1391,8 +1410,10 @@ private:
       if (config_ != VA_INVALID_ID) libva.vaDestroyConfig(display_, config_);
     }
     in_flight_.reset();
+    pending_.clear();
     coded_buffers_[0] = coded_buffers_[1] = VA_INVALID_ID;
     coded_buffer_ = VA_INVALID_ID;
+    coded_buffer_size_ = 0;
     next_slot_ = 0;
     upload_image_ = {};
     upload_image_.image_id = VA_INVALID_ID;
@@ -1559,6 +1580,33 @@ private:
       fail(OM_CODEC_INVALID_PARAMS, "picture format does not match the encoder's input format");
       return false;
     }
+    // The session was configured for one size and the headers describe that
+    // size; a picture of any other is a caller's mistake, not something to
+    // encode with the difference left as whatever the surface held.
+    if (pic.width != width_ || pic.height != height_) {
+      fail(OM_CODEC_INVALID_PARAMS, "picture is {}x{}, the encoder was configured for {}x{}", pic.width, pic.height,
+           width_, height_);
+      return false;
+    }
+
+    const size_t bpp = high ? 2 : 1;
+    const uint32_t w = width_;
+    const uint32_t h = height_;
+    const uint32_t cw = (w + 1) / 2;
+    const uint32_t ch = (h + 1) / 2;
+
+    // A picture can reach here with planes that were never allocated, or with
+    // rows shorter than its format needs; either one would be read out of
+    // bounds below.
+    const size_t chroma_row = (nv12_input ? 2 : 1) * cw * bpp;
+    const size_t needed[3] = {w * bpp, chroma_row, chroma_row};
+    for (uint32_t plane = 0; plane < (nv12_input ? 2u : 3u); ++plane) {
+      if (!pic.planes.getData(plane) || pic.planes.getLinesize(plane) < needed[plane]) {
+        fail(OM_CODEC_INVALID_PARAMS, "picture plane {} is missing or its stride is shorter than {} bytes", plane,
+             needed[plane]);
+        return false;
+      }
+    }
 
     // Mapping the surface itself avoids a second copy; drivers that cannot
     // derive one get a linear image and vaPutImage.
@@ -1566,7 +1614,10 @@ private:
     image.image_id = VA_INVALID_ID;
     bool derived = false;
     if (derive_works_ && libva.vaDeriveImage(display_, surface, &image) == VA_STATUS_SUCCESS) {
-      if (image.format.fourcc == input_->fourcc()) {
+      // An image shorter or narrower than the surface cannot hold the padding
+      // the rows below write, so it is no better than having no derive at all.
+      if (image.format.fourcc == input_->fourcc() && static_cast<uint32_t>(image.width) >= surface_width_ &&
+          static_cast<uint32_t>(image.height) >= surface_height_) {
         derived = true;
       } else {
         libva.vaDestroyImage(display_, image.image_id);
@@ -1587,21 +1638,29 @@ private:
           fail(OM_CODEC_ENCODE_FAILED, "could not create an upload image");
           return false;
         }
+        // A driver may round the size up, which is harmless, but one that hands
+        // back less than was asked for would be written past its end.
+        if (static_cast<uint32_t>(upload_image_.width) < surface_width_ ||
+            static_cast<uint32_t>(upload_image_.height) < surface_height_) {
+          fail(OM_CODEC_ENCODE_FAILED, "the upload image is {}x{}, smaller than the {}x{} surface", upload_image_.width,
+               upload_image_.height, surface_width_, surface_height_);
+          libva.vaDestroyImage(display_, upload_image_.image_id);
+          upload_image_ = {};
+          upload_image_.image_id = VA_INVALID_ID;
+          return false;
+        }
       }
       image = upload_image_;
     }
 
     void* mapped = nullptr;
-    if (libva.vaMapBuffer(display_, image.buf, &mapped) != VA_STATUS_SUCCESS || !mapped) {
+    const VAStatus map = libva.vaMapBuffer(display_, image.buf, &mapped);
+    if (map != VA_STATUS_SUCCESS || !mapped) {
+      fail(OM_CODEC_ENCODE_FAILED, "could not map the input surface: {}", vaapi::describe(map));
       if (derived) libva.vaDestroyImage(display_, image.image_id);
       return false;
     }
     auto* base = static_cast<uint8_t*>(mapped);
-    const uint32_t w = std::min(pic.width, surface_width_);
-    const uint32_t h = std::min(pic.height, surface_height_);
-    const uint32_t cw = (w + 1) / 2;
-    const uint32_t ch = (h + 1) / 2;
-    const size_t bpp = high ? 2 : 1;
 
     uint8_t* dst_y = base + image.offsets[0];
     uint8_t* dst_uv = base + image.offsets[1];
@@ -1660,6 +1719,30 @@ private:
       }
     }
 
+    // The surface is aligned up to the codec's block size and H.264 and HEVC
+    // code all of it, cropping only in the headers, so whatever sits in the
+    // padding is encoded for real: it costs bitrate and reaches the visible
+    // edge through intra prediction and the deblocking filter. Repeating the
+    // last real sample and row is what leaves the least to code.
+    const auto padPlane = [](uint8_t* plane, size_t pitch, size_t unit, uint32_t units, uint32_t padded_units,
+                             uint32_t rows, uint32_t padded_rows) {
+      if (units == 0 || rows == 0) return;
+      if (units < padded_units) {
+        for (uint32_t row = 0; row < rows; ++row) {
+          uint8_t* line = plane + static_cast<size_t>(row) * pitch;
+          const uint8_t* last = line + (units - 1) * unit;
+          for (uint32_t u = units; u < padded_units; ++u) std::memcpy(line + u * unit, last, unit);
+        }
+      }
+      const uint8_t* last_row = plane + static_cast<size_t>(rows - 1) * pitch;
+      const size_t row_bytes = padded_units * unit;
+      for (uint32_t row = rows; row < padded_rows; ++row) {
+        std::memcpy(plane + static_cast<size_t>(row) * pitch, last_row, row_bytes);
+      }
+    };
+    padPlane(dst_y, image.pitches[0], bpp, w, surface_width_, h, surface_height_);
+    padPlane(dst_uv, image.pitches[1], 2 * bpp, cw, (surface_width_ + 1) / 2, ch, (surface_height_ + 1) / 2);
+
     libva.vaUnmapBuffer(display_, image.buf);
     if (derived) {
       libva.vaDestroyImage(display_, image.image_id);
@@ -1678,57 +1761,14 @@ private:
   // One picture
   // ---------------------------------------------------------------------------
 
-  // Parameter buffers of one picture, destroyed together.
-  class Buffers {
-  public:
-    Buffers(VADisplay display, VAContextID context) : display_(display), context_(context) {}
-    ~Buffers() {
-      auto& libva = LibVA::getInstance();
-      for (VABufferID id : ids_) libva.vaDestroyBuffer(display_, id);
-    }
-    Buffers(const Buffers&) = delete;
-    Buffers& operator=(const Buffers&) = delete;
+  // The picture's buffers go through vaapi::Submission, the same class the
+  // decoder uses: it keeps parameter and slice buffers apart, says which
+  // vaCreateBuffer failed, and always ends a picture it began.
+  static auto packed(vaapi::Submission& s, uint32_t type, const PackedBits& bits, bool emulation_bytes) -> bool {
+    return s.addPackedHeader(type, bits.bytes.data(), bits.bytes.size(), bits.bits, emulation_bytes);
+  }
 
-    auto add(VABufferType type, const void* data, size_t size) -> bool {
-      VABufferID id = VA_INVALID_ID;
-      if (LibVA::getInstance().vaCreateBuffer(display_, context_, type, static_cast<unsigned int>(size), 1,
-                                              const_cast<void*>(data), &id) != VA_STATUS_SUCCESS) {
-        ok_ = false;
-        return false;
-      }
-      ids_.push_back(id);
-      return true;
-    }
-
-    template<typename T>
-    auto misc(VAEncMiscParameterType type, const T& value) -> bool {
-      std::vector<uint8_t> data(sizeof(VAEncMiscParameterBuffer) + sizeof(T));
-      auto* header = reinterpret_cast<VAEncMiscParameterBuffer*>(data.data());
-      header->type = type;
-      std::memcpy(data.data() + sizeof(VAEncMiscParameterBuffer), &value, sizeof(T));
-      return add(VAEncMiscParameterBufferType, data.data(), data.size());
-    }
-
-    auto packed(uint32_t type, const PackedBits& bits, bool emulation_bytes) -> bool {
-      VAEncPackedHeaderParameterBuffer param = {};
-      param.type = type;
-      param.bit_length = static_cast<uint32_t>(bits.bits);
-      param.has_emulation_bytes = emulation_bytes ? 1 : 0;
-      return add(VAEncPackedHeaderParameterBufferType, &param, sizeof(param)) &&
-             add(VAEncPackedHeaderDataBufferType, bits.bytes.data(), bits.bytes.size());
-    }
-
-    auto ok() const -> bool { return ok_; }
-    auto ids() -> std::vector<VABufferID>& { return ids_; }
-
-  private:
-    VADisplay display_;
-    VAContextID context_;
-    std::vector<VABufferID> ids_;
-    bool ok_ = true;
-  };
-
-  void addRateControl(Buffers& buffers, bool reset) {
+  void addRateControl(vaapi::Submission& buffers, bool reset) {
     if (rc_.va_mode != VA_RC_CQP) {
       VAEncMiscParameterRateControl rc = {};
       rc.bits_per_second = rc_.bits_per_second;
@@ -1745,12 +1785,12 @@ private:
       // One packet per frame and a reference chain that stays intact: a
       // skipped frame would break both, so the rate control may not drop one.
       rc.rc_flags.bits.disable_frame_skip = 1;
-      buffers.misc(VAEncMiscParameterTypeRateControl, rc);
+      buffers.addMisc(VAEncMiscParameterTypeRateControl, rc);
       if (rc_.hasBitrate()) {
         VAEncMiscParameterHRD hrd = {};
         hrd.buffer_size = rc_.hrd_size;
         hrd.initial_buffer_fullness = rc_.hrd_initial;
-        buffers.misc(VAEncMiscParameterTypeHRD, hrd);
+        buffers.addMisc(VAEncMiscParameterTypeHRD, hrd);
       }
     }
     VAEncMiscParameterFrameRate fr = {};
@@ -1759,12 +1799,12 @@ private:
       // The field packs two 16-bit halves; a large rational goes in rounded.
       fr.framerate = static_cast<uint32_t>(std::lround(static_cast<double>(timing_.num) / timing_.den));
     }
-    buffers.misc(VAEncMiscParameterTypeFrameRate, fr);
+    buffers.addMisc(VAEncMiscParameterTypeFrameRate, fr);
 
     if (quality_level_ > 0 && quality_range_ > 0) {
       VAEncMiscParameterBufferQualityLevel quality = {};
       quality.quality_level = std::min(quality_level_, quality_range_);
-      buffers.misc(VAEncMiscParameterTypeQualityLevel, quality);
+      buffers.addMisc(VAEncMiscParameterTypeQualityLevel, quality);
     }
   }
 
@@ -1774,12 +1814,15 @@ private:
     VABufferID coded = VA_INVALID_ID;
     int64_t pts = 0;
     bool key = false;
+    // Set once the picture is in the driver's hands and the one before it turns
+    // out to have been truncated: this one predicts from a reconstruction a
+    // decoder cannot rebuild, so its bitstream is well formed and still wrong.
+    bool reference_lost = false;
     // A caller's VA-API surface has to outlive its encoding.
     std::shared_ptr<HardwarePicture> hold;
   };
 
   auto submit(const Frame& frame, const Picture& pic, bool key) -> bool {
-    auto& libva = LibVA::getInstance();
     const VASurfaceID input = inputSurface(pic);
     if (input == VA_INVALID_SURFACE) return false;
 
@@ -1793,7 +1836,7 @@ private:
       frame_num_ = 0;
     }
 
-    Buffers buffers(display_, context_);
+    vaapi::Submission buffers(display_, context_);
     bool built = false;
     switch (codec_id_) {
       case OM_CODEC_H264: built = buildH264(buffers, key, recon, reference); break;
@@ -1802,22 +1845,17 @@ private:
       case OM_CODEC_AV1: built = buildAV1(buffers, key, recon, reference); break;
       default: break;
     }
-    if (!built || !buffers.ok()) {
+    if (!built || buffers.failed()) {
       fail(OM_CODEC_ENCODE_FAILED, "could not create the parameter buffers");
       return false;
     }
 
-    VAStatus status = libva.vaBeginPicture(display_, context_, input);
+    // execute() waits for anything that did reach the hardware before it
+    // reports a failure, so the input surface and the coded buffer are free to
+    // be used again by the next picture either way.
+    const VAStatus status = buffers.execute(input);
     if (status != VA_STATUS_SUCCESS) {
-      fail(OM_CODEC_ENCODE_FAILED, "vaBeginPicture failed: {}", vaapi::describe(status));
-      return false;
-    }
-    auto& ids = buffers.ids();
-    const VAStatus render = libva.vaRenderPicture(display_, context_, ids.data(), static_cast<int>(ids.size()));
-    status = libva.vaEndPicture(display_, context_);
-    if (render != VA_STATUS_SUCCESS || status != VA_STATUS_SUCCESS) {
-      fail(OM_CODEC_ENCODE_FAILED, "submitting the picture failed: {}",
-           vaapi::describe(render != VA_STATUS_SUCCESS ? render : status));
+      fail(OM_CODEC_ENCODE_FAILED, "submitting the picture failed: {}", vaapi::describe(status));
       // The reference chain has a hole now; the next frame starts over.
       have_reference_ = false;
       return false;
@@ -1844,13 +1882,22 @@ private:
 
   auto collect(const InFlight& job) -> std::optional<Packet> {
     auto& libva = LibVA::getInstance();
-    VAStatus status = libva.vaSyncSurface(display_, job.input);
+    // The fence that belongs to the coded buffer, where libva has it. The one
+    // of the input surface covers it only by accident: whether the driver ties
+    // the two together is its own business.
+    VAStatus status = libva.vaSyncBuffer ? libva.vaSyncBuffer(display_, job.coded, kWaitForever)
+                                         : libva.vaSyncSurface(display_, job.input);
     if (status != VA_STATUS_SUCCESS) {
-      fail(OM_CODEC_ENCODE_FAILED, "vaSyncSurface failed: {}", vaapi::describe(status));
+      fail(OM_CODEC_ENCODE_FAILED, "waiting for the encoded picture failed: {}", vaapi::describe(status));
       return std::nullopt;
     }
+    // Nothing to read: this picture was already queued when its reference was
+    // found to be truncated, and the key frame that repairs the stream is the
+    // one after it. Syncing above is all that was needed, to free the buffer.
+    if (job.reference_lost) return std::nullopt;
 
     std::vector<uint8_t> coded;
+    bool truncated = false;
     void* mapped = nullptr;
     status = libva.vaMapBuffer(display_, job.coded, &mapped);
     if (status != VA_STATUS_SUCCESS || !mapped) {
@@ -1859,13 +1906,26 @@ private:
     }
     for (auto* segment = static_cast<VACodedBufferSegment*>(mapped); segment;
          segment = static_cast<VACodedBufferSegment*>(segment->next)) {
-      if (segment->status & VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK) {
-        log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING, "[VAAPI] coded buffer overflowed; the frame is truncated");
-      }
+      if (segment->status & VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK) truncated = true;
       const auto* data = static_cast<const uint8_t*>(segment->buf);
       if (data && segment->size) coded.insert(coded.end(), data, data + segment->size);
     }
     libva.vaUnmapBuffer(display_, job.coded);
+
+    // A truncated picture is not a picture: its reconstruction no longer
+    // matches what a decoder can build from the bitstream, so predicting from
+    // it would carry the damage through the rest of the GOP. Dropping the
+    // reference makes the next submission a key frame -- but the picture that
+    // followed this one is already queued and predicts from the reconstruction
+    // being dropped, so it has to go the same way.
+    if (truncated) {
+      log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING,
+          "[VAAPI] the {} byte coded buffer overflowed; dropping the picture and resuming from a key frame",
+          coded_buffer_size_);
+      have_reference_ = false;
+      if (in_flight_ && !in_flight_->key) in_flight_->reference_lost = true;
+      return std::nullopt;
+    }
     if (coded.empty()) {
       fail(OM_CODEC_ENCODE_FAILED, "the driver produced no data");
       return std::nullopt;
@@ -1902,7 +1962,7 @@ private:
     return (key ? rc_.qp_i : rc_.qp_p) - init_qp;
   }
 
-  auto buildH264(Buffers& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
+  auto buildH264(vaapi::Submission& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
     const auto& h = h264_;
     if (key) {
       ++idr_pic_id_;
@@ -1935,7 +1995,7 @@ private:
       seq.vui_fields.bits.motion_vectors_over_pic_boundaries_flag = 1;
       seq.num_units_in_tick = timing_.den;
       seq.time_scale = 2 * timing_.num;
-      b.add(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
+      b.addParam(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
     }
     if (key || rc_changed_) addRateControl(b, rc_changed_ && !key);
 
@@ -1972,21 +2032,21 @@ private:
     pic.pic_fields.bits.entropy_coding_mode_flag = h.cabac ? 1 : 0;
     pic.pic_fields.bits.transform_8x8_mode_flag = h.transform_8x8 ? 1 : 0;
     pic.pic_fields.bits.deblocking_filter_control_present_flag = 0;
-    b.add(VAEncPictureParameterBufferType, &pic, sizeof(pic));
+    b.addParam(VAEncPictureParameterBufferType, &pic, sizeof(pic));
 
     const int qp_delta = sliceQpDelta(key, h.init_qp);
     if (key && (packed_headers_ & VA_ENC_PACKED_HEADER_SEQUENCE)) {
       if (packed_headers_ & VA_ENC_PACKED_HEADER_PICTURE) {
-        b.packed(VAEncPackedHeaderSequence, h.sps(), true);
-        b.packed(VAEncPackedHeaderPicture, h.pps(), true);
+        packed(b, VAEncPackedHeaderSequence, h.sps(), true);
+        packed(b, VAEncPackedHeaderPicture, h.pps(), true);
       } else {
         PackedBits sets = h.sps();
         append(sets, h.pps());
-        b.packed(VAEncPackedHeaderSequence, sets, true);
+        packed(b, VAEncPackedHeaderSequence, sets, true);
       }
     }
     if (packed_headers_ & VA_ENC_PACKED_HEADER_SLICE) {
-      b.packed(VAEncPackedHeaderSlice, h.sliceHeader(key, frame_num, idr_pic_id_ & 0xffff, qp_delta), true);
+      packed(b, VAEncPackedHeaderSlice, h.sliceHeader(key, frame_num, idr_pic_id_ & 0xffff, qp_delta), true);
     }
 
     VAEncSliceParameterBufferH264 slice = {};
@@ -2005,11 +2065,11 @@ private:
     slice.cabac_init_idc = 0;
     slice.slice_qp_delta = static_cast<int8_t>(qp_delta);
     slice.disable_deblocking_filter_idc = 0;
-    b.add(VAEncSliceParameterBufferType, &slice, sizeof(slice));
+    b.addSliceParam(VAEncSliceParameterBufferType, &slice, sizeof(slice));
     return true;
   }
 
-  auto buildH265(Buffers& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
+  auto buildH265(vaapi::Submission& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
     const auto& h = h265_;
     if (key) {
       VAEncSequenceParameterBufferHEVC seq = {};
@@ -2037,7 +2097,7 @@ private:
       seq.max_transform_hierarchy_depth_inter = static_cast<uint8_t>(h.max_th_depth_inter);
       seq.max_transform_hierarchy_depth_intra = static_cast<uint8_t>(h.max_th_depth_intra);
       seq.vui_parameters_present_flag = 0;
-      b.add(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
+      b.addParam(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
     }
     if (key || rc_changed_) addRateControl(b, rc_changed_ && !key);
 
@@ -2073,22 +2133,22 @@ private:
     pf.transform_skip_enabled_flag = h.transform_skip;
     pf.cu_qp_delta_enabled_flag = h.cu_qp_delta;
     pf.pps_loop_filter_across_slices_enabled_flag = 1;
-    b.add(VAEncPictureParameterBufferType, &pic, sizeof(pic));
+    b.addParam(VAEncPictureParameterBufferType, &pic, sizeof(pic));
 
     const int qp_delta = sliceQpDelta(key, h.init_qp);
     if (key && (packed_headers_ & VA_ENC_PACKED_HEADER_SEQUENCE)) {
       PackedBits sets = h.vps();
       append(sets, h.sps());
       if (packed_headers_ & VA_ENC_PACKED_HEADER_PICTURE) {
-        b.packed(VAEncPackedHeaderSequence, sets, true);
-        b.packed(VAEncPackedHeaderPicture, h.pps(), true);
+        packed(b, VAEncPackedHeaderSequence, sets, true);
+        packed(b, VAEncPackedHeaderPicture, h.pps(), true);
       } else {
         append(sets, h.pps());
-        b.packed(VAEncPackedHeaderSequence, sets, true);
+        packed(b, VAEncPackedHeaderSequence, sets, true);
       }
     }
     if (packed_headers_ & VA_ENC_PACKED_HEADER_SLICE) {
-      b.packed(VAEncPackedHeaderSlice, h.sliceHeader(key, static_cast<uint32_t>(poc), slice_type, qp_delta), true);
+      packed(b, VAEncPackedHeaderSlice, h.sliceHeader(key, static_cast<uint32_t>(poc), slice_type, qp_delta), true);
     }
 
     const uint32_t ctu = 1u << hevc_ctu_log2_;
@@ -2113,11 +2173,11 @@ private:
     fl.slice_sao_luma_flag = h.sao;
     fl.slice_sao_chroma_flag = h.sao;
     fl.collocated_from_l0_flag = 1;
-    b.add(VAEncSliceParameterBufferType, &slice, sizeof(slice));
+    b.addSliceParam(VAEncSliceParameterBufferType, &slice, sizeof(slice));
     return true;
   }
 
-  auto buildVP9(Buffers& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
+  auto buildVP9(vaapi::Submission& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
     if (key) {
       VAEncSequenceParameterBufferVP9 seq = {};
       seq.max_frame_width = width_;
@@ -2125,7 +2185,7 @@ private:
       seq.kf_auto = 0;
       seq.bits_per_second = rc_.hasBitrate() ? rc_.bits_per_second : 0;
       seq.intra_period = gop_;
-      b.add(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
+      b.addParam(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
     }
     if (key || rc_changed_) addRateControl(b, rc_changed_ && !key);
 
@@ -2155,11 +2215,11 @@ private:
     pic.sharpness_level = 4;
     const uint32_t tile_columns = (width_ + 4095) / 4096;
     pic.log2_tile_columns = tile_columns == 1 ? 0 : static_cast<uint8_t>(std::bit_width(tile_columns - 1));
-    b.add(VAEncPictureParameterBufferType, &pic, sizeof(pic));
+    b.addParam(VAEncPictureParameterBufferType, &pic, sizeof(pic));
     return true;
   }
 
-  auto buildAV1(Buffers& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
+  auto buildAV1(vaapi::Submission& b, bool key, VASurfaceID recon, VASurfaceID reference) -> bool {
     const auto& h = av1_;
     PackedBits sequence;
     if (key) {
@@ -2177,7 +2237,7 @@ private:
       seq.seq_fields.bits.subsampling_x = 1;
       seq.seq_fields.bits.subsampling_y = 1;
       seq.order_hint_bits_minus_1 = AV1Headers::kOrderHintBits - 1;
-      b.add(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
+      b.addParam(VAEncSequenceParameterBufferType, &seq, sizeof(seq));
     }
     if (key || rc_changed_) addRateControl(b, rc_changed_ && !key);
 
@@ -2229,31 +2289,37 @@ private:
       static constexpr int8_t kDefaultRefDeltas[8] = {1, 0, 0, 0, -1, 0, -1, -1};
       pic.ref_deltas[i] = kDefaultRefDeltas[i];
     }
-    if (rc_.va_mode != VA_RC_CQP) {
-      // The driver picks the quantiser, loop filter and CDEF strengths and
-      // writes them into the frame header at these places.
-      pic.min_base_qindex = static_cast<uint8_t>(std::clamp<uint32_t>(rc_.min_qp ? rc_.min_qp : 1, 1, 255));
-      pic.max_base_qindex = static_cast<uint8_t>(std::clamp<uint32_t>(rc_.max_qp ? rc_.max_qp : 255, 1, 255));
+    if (packed_headers_ & VA_ENC_PACKED_HEADER_PICTURE) {
+      // Where in the frame header below the driver finds the fields it may
+      // rewrite, and how long that header is. ffmpeg fills these in whatever
+      // the rate control is, because a driver patches the OBU size even when
+      // the quantiser is the encoder's own.
       pic.bit_offset_qindex = layout.qindex;
       pic.bit_offset_loopfilter_params = layout.loop_filter;
       pic.bit_offset_cdef_params = layout.cdef;
       pic.size_in_bits_cdef_params = layout.cdef_size;
       pic.size_in_bits_frame_hdr_obu = static_cast<uint32_t>(frame_header.bits);
-      pic.byte_offset_frame_hdr_obu_size = static_cast<uint32_t>((key ? sequence.bytes.size() : 0) + 1);
+      const size_t before = key && (packed_headers_ & VA_ENC_PACKED_HEADER_SEQUENCE) ? sequence.bytes.size() : 0;
+      pic.byte_offset_frame_hdr_obu_size = static_cast<uint32_t>(before + 1);
     }
-    b.add(VAEncPictureParameterBufferType, &pic, sizeof(pic));
+    if (rc_.va_mode != VA_RC_CQP) {
+      // The driver picks the quantiser; these bound what it may pick.
+      pic.min_base_qindex = static_cast<uint8_t>(std::clamp<uint32_t>(rc_.min_qp ? rc_.min_qp : 1, 1, 255));
+      pic.max_base_qindex = static_cast<uint8_t>(std::clamp<uint32_t>(rc_.max_qp ? rc_.max_qp : 255, 1, 255));
+    }
+    b.addParam(VAEncPictureParameterBufferType, &pic, sizeof(pic));
 
     if (packed_headers_ & VA_ENC_PACKED_HEADER_SEQUENCE && key) {
-      b.packed(VAEncPackedHeaderSequence, sequence, false);
+      packed(b, VAEncPackedHeaderSequence, sequence, false);
     }
     if (packed_headers_ & VA_ENC_PACKED_HEADER_PICTURE) {
-      b.packed(VAEncPackedHeaderPicture, frame_header, false);
+      packed(b, VAEncPackedHeaderPicture, frame_header, false);
     }
 
     VAEncTileGroupBufferAV1 tg = {};
     tg.tg_start = 0;
     tg.tg_end = static_cast<uint8_t>(h.tiles.cols * h.tiles.rows - 1);
-    b.add(VAEncSliceParameterBufferType, &tg, sizeof(tg));
+    b.addSliceParam(VAEncSliceParameterBufferType, &tg, sizeof(tg));
     return true;
   }
 
@@ -2395,8 +2461,11 @@ private:
   VAContextID context_ = VA_INVALID_ID;
   VABufferID coded_buffers_[2] = {VA_INVALID_ID, VA_INVALID_ID};
   VABufferID coded_buffer_ = VA_INVALID_ID; // where the picture being built writes to
+  size_t coded_buffer_size_ = 0;
   int next_slot_ = 0;                       // input surface / coded buffer of the next picture
   std::optional<InFlight> in_flight_;
+  // Packets collected on a call that went on to fail, handed out by the next.
+  std::vector<Packet> pending_;
   uint32_t quality_range_ = 0;
   uint32_t quality_level_ = 0;
   std::shared_ptr<vaapi::SurfacePool> recon_;

@@ -352,6 +352,35 @@ public:
     return create(VASliceDataBufferType, data, data_size, 1, slices_);
   }
 
+  // A slice of an encoder, which has parameters but no data: the driver is the
+  // one producing the slice data.
+  auto addSliceParam(VABufferType type, const void* data, size_t size) -> bool {
+    return create(type, data, size, 1, slices_);
+  }
+
+  // One VAEncMiscParameterBuffer carrying `value`.
+  template<typename T>
+  auto addMisc(VAEncMiscParameterType type, const T& value) -> bool {
+    std::vector<uint8_t> data(sizeof(VAEncMiscParameterBuffer) + sizeof(T));
+    auto* header = reinterpret_cast<VAEncMiscParameterBuffer*>(data.data());
+    header->type = type;
+    std::memcpy(data.data() + sizeof(VAEncMiscParameterBuffer), &value, sizeof(T));
+    return addParam(VAEncMiscParameterBufferType, data.data(), data.size());
+  }
+
+  // A header the codec wrote itself, as the parameter/data pair the driver
+  // expects. `bit_length` may end mid-byte, which is how a packed slice header
+  // tells the driver where to carry on.
+  auto addPackedHeader(uint32_t type, const uint8_t* bytes, size_t byte_count, size_t bit_length,
+                       bool has_emulation_bytes) -> bool {
+    VAEncPackedHeaderParameterBuffer param = {};
+    param.type = type;
+    param.bit_length = static_cast<uint32_t>(bit_length);
+    param.has_emulation_bytes = has_emulation_bytes ? 1 : 0;
+    return addParam(VAEncPackedHeaderParameterBufferType, &param, sizeof(param)) &&
+           addParam(VAEncPackedHeaderDataBufferType, bytes, byte_count);
+  }
+
   auto failed() const -> bool { return failed_; }
 
   // vaBeginPicture/vaRenderPicture/vaEndPicture on `target`. A picture that
@@ -371,7 +400,14 @@ public:
     }
     status = libva.vaEndPicture(display_, context_);
     destroy();
-    return render != VA_STATUS_SUCCESS ? render : status;
+    const VAStatus result = render != VA_STATUS_SUCCESS ? render : status;
+    if (result != VA_STATUS_SUCCESS) {
+      // Part of the picture may have reached the hardware before the error.
+      // Waiting for it here is what lets the caller reuse `target`, and the
+      // buffers the picture pointed at, without racing the driver.
+      libva.vaSyncSurface(display_, target);
+    }
+    return result;
   }
 
 private:

@@ -33,6 +33,10 @@ public:
   PFN<VAStatus(VADisplay, VAContextID, VABufferID*, int)> vaRenderPicture = nullptr;
   PFN<VAStatus(VADisplay, VAContextID)> vaEndPicture = nullptr;
   PFN<VAStatus(VADisplay, VASurfaceID)> vaSyncSurface = nullptr;
+  // VA-API 1.9 and newer. The fence of an encoder's coded buffer, which the
+  // fence of the input surface does not cover on every driver; null on older
+  // libva, where syncing the input surface is all there is.
+  PFN<VAStatus(VADisplay, VABufferID, uint64_t)> vaSyncBuffer = nullptr;
   PFN<VAStatus(VADisplay, VAProfile*, int*)> vaQueryConfigProfiles = nullptr;
   PFN<VAStatus(VADisplay, VAProfile, VAEntrypoint*, int*)> vaQueryConfigEntrypoints = nullptr;
   PFN<VAStatus(VADisplay, VAProfile, VAEntrypoint, VAConfigAttrib*, int)> vaGetConfigAttributes = nullptr;

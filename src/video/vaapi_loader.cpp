@@ -46,6 +46,7 @@ auto LibVA::load() -> bool {
   vaRenderPicture = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAContextID, VABufferID*, int)>>("vaRenderPicture");
   vaEndPicture = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAContextID)>>("vaEndPicture");
   vaSyncSurface = libva_.getProcAddress<PFN<VAStatus(VADisplay, VASurfaceID)>>("vaSyncSurface");
+  vaSyncBuffer = libva_.getProcAddress<PFN<VAStatus(VADisplay, VABufferID, uint64_t)>>("vaSyncBuffer");
   vaQueryConfigProfiles = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAProfile*, int*)>>("vaQueryConfigProfiles");
   vaQueryConfigEntrypoints = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAProfile, VAEntrypoint*, int*)>>("vaQueryConfigEntrypoints");
   vaGetConfigAttributes = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAProfile, VAEntrypoint, VAConfigAttrib*, int)>>("vaGetConfigAttributes");
@@ -64,6 +65,8 @@ auto LibVA::load() -> bool {
 
   // Everything the codecs call unconditionally. The coded buffer of an encoder
   // is read through vaMapBuffer as well; libva has no separate entry point.
+  // vaSyncBuffer is not in the list: it arrived in VA-API 1.9 and the codecs
+  // fall back to syncing the surface without it.
   if (!vaInitialize || !vaTerminate || !vaErrorStr || !vaCreateConfig || !vaDestroyConfig || !vaCreateSurfaces ||
       !vaDestroySurfaces || !vaCreateContext || !vaDestroyContext || !vaCreateBuffer || !vaDestroyBuffer ||
       !vaMapBuffer || !vaUnmapBuffer || !vaBeginPicture || !vaRenderPicture || !vaEndPicture || !vaSyncSurface ||
