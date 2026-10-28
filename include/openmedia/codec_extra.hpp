@@ -25,6 +25,10 @@ constexpr Key CODEC_DEC_APPLY_FILM_GRAIN = "apply_film_grain";
 // picture
 constexpr Key CODEC_ENC_PRESET = "preset";
 
+// VideoToolbox encoder: refuse a software component when the requested profile
+// is unavailable in hardware. Native CVPixelBuffer input works with either.
+constexpr Key VIDEOTOOLBOX_ENC_REQUIRE_HARDWARE = "videotoolbox.require_hardware";
+
 // dav1d
 // int32 - Max frame delay (0 = auto, 1 = low latency). Overrides low_delay
 constexpr Key DAV1D_DEC_MAX_FRAME_DELAY = "dav1d.max_frame_delay";

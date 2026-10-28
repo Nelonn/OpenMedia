@@ -336,6 +336,7 @@ enum class HWDeviceType : uint8_t {
   AMF,
   CUDA,
   QSV,
+  VIDEOTOOLBOX,
 };
 
 struct OPENMEDIA_ABI HWDevice {

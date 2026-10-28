@@ -1,6 +1,11 @@
 #pragma once
 
 #include <charconv>
+#if defined(__APPLE__)
+#include <xlocale.h>
+#include <cctype>
+#include <cerrno>
+#endif
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -313,9 +318,23 @@ public:
       case 4: return std::get<double>(data_);
       case 5: {
         const auto& s = std::get<std::string>(data_);
+#if defined(__APPLE__)
+        // libc++'s floating-point from_chars is unavailable before macOS 26.
+        // A C locale keeps dictionary numbers independent of the UI locale.
+        static locale_t numeric_locale = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+        if (!numeric_locale || s.empty() || s.front() == '+' || std::isspace(static_cast<unsigned char>(s.front()))) return std::nullopt;
+        char* end = nullptr;
+        const int previous_errno = errno;
+        errno = 0;
+        const double result = strtod_l(s.c_str(), &end, numeric_locale);
+        const bool valid = end != s.c_str() && errno != ERANGE;
+        errno = previous_errno;
+        if (valid) return result;
+#else
         double result {};
         auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), result);
         if (ec == std::errc {}) return result;
+#endif
         return std::nullopt;
       }
       case 6: return std::get<Rational>(data_).toDouble();
