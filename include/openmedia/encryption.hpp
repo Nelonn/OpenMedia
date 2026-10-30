@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <openmedia/macro.h>
 #include <openmedia/media.h>
 #include <vector>
@@ -44,6 +45,11 @@ struct OPENMEDIA_ABI SampleEncryption {
 
   // The key the licence has to supply, as a `cenc` KID.
   uint8_t key_id[16] = {};
+
+  // HLS SAMPLE-AES key URI for the segment that produced this packet. A
+  // container KID may be zero across a playlist's key rotation, so the
+  // playlist URI is the key selector when HLS supplies one.
+  std::string key_uri;
 
   // Left-aligned and zero-padded, so AES-CTR can take it as the initial counter
   // block and AES-CBC as the IV. `iv_size` is what the container carried, 8 or 16.

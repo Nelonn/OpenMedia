@@ -89,6 +89,8 @@ class SegmentDemuxer final : public SegmentedDemuxer {
     bool needs_init = true;
     bool finished = false;
     uint64_t read_ordinal = 0; // the media segment the reader is on
+    // The HLS key belonging to the segment currently held by reader.
+    std::string sample_key_uri;
 
     // The initialization section openInit() was last given, so that a playlist
     // replacing it part-way through is noticed and the reader rebuilt against the
@@ -479,6 +481,7 @@ public:
     stream->streaming = false;
     stream->pulling.reset();
     stream->last_read_ns = INT64_MIN;
+    stream->sample_key_uri.clear();
     stream->reader->flushSegments();
 
     const SegmentIndex& index = stream->index();
@@ -567,6 +570,11 @@ public:
                              ? earliest->public_tracks[reader_track]
                              : -1;
     if (value.stream_index < 0) return Err(OM_FORMAT_STREAM_NOT_FOUND);
+    if (value.encryption && !earliest->sample_key_uri.empty()) {
+      auto encryption = std::make_shared<SampleEncryption>(*value.encryption);
+      encryption->key_uri = earliest->sample_key_uri;
+      value.encryption = std::move(encryption);
+    }
     return Ok(std::move(value));
   }
 
@@ -603,6 +611,7 @@ public:
       stream.streaming = false;
       stream.pulling.reset();
       stream.last_read_ns = INT64_MIN;
+      stream.sample_key_uri.clear();
       stream.read_ordinal = index.ordinalForTime(nsToScale(target_ns, index.timescale()));
     }
 
@@ -753,6 +762,7 @@ private:
       return opened;
     }
     stream.streaming = true;
+    stream.sample_key_uri.clear();
     if (arrived.empty()) return OM_SUCCESS;
     const OMError fed = stream.reader->feedSegment(arrived);
     // Left mid-segment with no way on, the stream would wait for the rest of a
@@ -979,6 +989,7 @@ private:
       stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()),
                                         segment->discontinuity);
       const OMError pushed = stream.reader->pushSegment(std::move(bytes));
+      stream.sample_key_uri = segment->encryption ? segment->encryption->uri : std::string();
       ++stream.read_ordinal;
       if (pushed != OM_SUCCESS && pushed != OM_FORMAT_NO_STREAMS) return pushed;
 
@@ -1249,6 +1260,7 @@ private:
       stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()),
                                         segment->discontinuity);
       const OMError error = stream.reader->pushSegment(std::move(plain).unwrap());
+      stream.sample_key_uri = segment->encryption ? segment->encryption->uri : std::string();
       ++stream.read_ordinal;
       if (error == OM_SUCCESS) return OM_SUCCESS;
       if (error != OM_FORMAT_NO_STREAMS) return error;
