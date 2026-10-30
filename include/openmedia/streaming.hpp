@@ -70,9 +70,9 @@ struct OPENMEDIA_ABI SegmentEncryption {
 
   // Whether the cipher covers the whole segment, which is what `AES-128` means and
   // what StreamOptions::decrypt answers for. False for the sample-level schemes
-  // (`SAMPLE-AES`, `SAMPLE-AES-CTR`), where the container has to be parsed before
-  // anything can be deciphered: those are reported, through keys() and
-  // OM_FORMAT_ENCRYPTED, but not yet read.
+  // (`SAMPLE-AES`, `SAMPLE-AES-CTR`), where the container is parsed as-is and
+  // individual packets report SampleEncryption for the caller to handle. A reader
+  // that cannot report sample protection returns OM_FORMAT_ENCRYPTED.
   bool whole_segment = true;
 };
 

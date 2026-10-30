@@ -853,10 +853,9 @@ private:
   auto decryptSegment(const Segment& segment, std::vector<uint8_t> bytes)
       -> Result<std::vector<uint8_t>, OMError> {
     if (!segment.encryption) return Ok(std::move(bytes));
-    // A sample-level scheme leaves the container readable, and each packet carries
-    // its own protection; nothing here applies to it, and a reader that does not
-    // report it is better stopped than believed.
-    if (!segment.encryption->whole_segment) return Err(OM_FORMAT_ENCRYPTED);
+    // SAMPLE-AES protects samples inside a readable container. Its packet-level
+    // encryption is reported by the reader; only AES-128 needs whole-segment work.
+    if (!segment.encryption->whole_segment) return Ok(std::move(bytes));
     if (!options_.decrypt) return Err(OM_FORMAT_ENCRYPTED);
 
     auto plain = options_.decrypt(*segment.encryption, bytes);
@@ -864,6 +863,16 @@ private:
     std::vector<uint8_t> out = std::move(plain).unwrap();
     if (out.empty()) return Err(OM_FORMAT_ENCRYPTED);
     return Ok(std::move(out));
+  }
+
+  // HLS declares SAMPLE-AES in the playlist, but a TS or ADTS reader cannot
+  // describe protected samples. Do not hand their ciphertext to a decoder.
+  static auto reportsSampleEncryption(const Segment& segment, const SegmentReader& reader) -> bool {
+    if (!segment.encryption || segment.encryption->whole_segment) return true;
+    const auto& tracks = reader.tracks();
+    return !tracks.empty() && std::all_of(tracks.begin(), tracks.end(), [](const Track& track) {
+      return track.metadata.getBool(ENCRYPTED);
+    });
   }
 
   // --- Priming a stream from its own media --------------------------------------
@@ -965,6 +974,7 @@ private:
       const OMError opened = probe.self_contained ? stream.reader->openInit(bytes)
                                                   : stream.reader->openInit({});
       if (opened != OM_SUCCESS) return opened;
+      if (!reportsSampleEncryption(*segment, *stream.reader)) return OM_FORMAT_ENCRYPTED;
 
       stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()),
                                         segment->discontinuity);
@@ -1235,6 +1245,7 @@ private:
         return error;
       }
 
+      if (!reportsSampleEncryption(*segment, *stream.reader)) return OM_FORMAT_ENCRYPTED;
       stream.reader->expectSegmentStart(scaleToNs(segment->time, index.timescale()),
                                         segment->discontinuity);
       const OMError error = stream.reader->pushSegment(std::move(plain).unwrap());
