@@ -2,6 +2,7 @@
 #include <jpeglib.h>
 #include <setjmp.h>
 #include <codecs.hpp>
+#include <openmedia/log.hpp>
 #include <openmedia/video.hpp>
 #include <vector>
 
@@ -16,7 +17,7 @@ static void jpeg_error_exit(j_common_ptr cinfo) {
   auto* err = reinterpret_cast<JPEGErrorManager*>(cinfo->err);
   char msg_buf[JMSG_LENGTH_MAX];
   (*cinfo->err->format_message)(cinfo, msg_buf);
-  fprintf(stderr, "[JPEGDecoder] libjpeg error: %s\n", msg_buf);
+  log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "libjpeg error: {}", msg_buf);
   longjmp(err->setjmp_buffer, 1);
 }
 
@@ -46,7 +47,7 @@ public:
       if (msg_level >= 0) return;
       char msg_buf[JMSG_LENGTH_MAX];
       (*cinfo->err->format_message)(cinfo, msg_buf);
-      fprintf(stderr, "[JPEGDecoder] libjpeg warning: %s\n", msg_buf);
+      log(OM_CATEGORY_DECODER, OM_LEVEL_WARNING, "libjpeg warning: {}", msg_buf);
     };
     jpeg_create_decompress(&cinfo_);
   }

@@ -369,8 +369,6 @@ private:
       size_t total_samples = static_cast<size_t>(av_frame->nb_samples) * av_frame->ch_layout.nb_channels;
       size_t buffer_size = total_samples * static_cast<size_t>(bytes_per_sample);
 
-      // samples.allocate() above already took a pooled buffer of this size;
-      // taking a second one here would churn the pool for nothing.
       if (buffer_size > 0 && samples.buffer && samples.buffer->bytes().size() >= buffer_size) {
         uint8_t* dst_ptr = samples.buffer->bytes().data();
 
@@ -382,20 +380,8 @@ private:
               samples.planes.setData(i, dst_ptr + i * plane_samples, static_cast<uint32_t>(plane_samples));
             }
           }
-        } else {
-          size_t frame_samples = static_cast<size_t>(av_frame->nb_samples) * bytes_per_sample;
-          size_t channel_step = static_cast<size_t>(bytes_per_sample);
-
-          for (int i = 0; i < av_frame->ch_layout.nb_channels && i < 8; ++i) {
-            if (av_frame->data[0]) {
-              uint8_t* src = av_frame->data[0] + i * channel_step;
-              uint8_t* dst = dst_ptr + i * frame_samples;
-              for (int s = 0; s < av_frame->nb_samples; ++s) {
-                memcpy(dst + s * channel_step, src + s * av_frame->ch_layout.nb_channels * channel_step, channel_step);
-              }
-              samples.planes.setData(i, dst, static_cast<uint32_t>(frame_samples));
-            }
-          }
+        } else if (av_frame->data[0]) {
+          memcpy(dst_ptr, av_frame->data[0], buffer_size);
         }
       }
 

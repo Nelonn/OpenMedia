@@ -58,7 +58,7 @@ private:
   std::mutex load_mutex_;
 };
 
-static auto avErrorToOmError(int err) -> OMError {
+inline auto avErrorToOmError(int err) -> OMError {
   if (err >= 0) return OM_SUCCESS;
 
   if (err == AVERROR_EOF) return OM_IO_END_OF_STREAM;

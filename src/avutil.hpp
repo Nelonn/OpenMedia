@@ -98,7 +98,7 @@ template <> void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const;
 template <typename T>
 using AVPtr = std::unique_ptr<T, AVDeleter<T>>;
 
-static auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {
+inline auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {
   switch (id) {
     case AV_CODEC_ID_H264: return OM_CODEC_H264;
     case AV_CODEC_ID_HEVC: return OM_CODEC_H265;

@@ -135,24 +135,7 @@ inline void store_u24_le(uint8_t* p, uint32_t v) noexcept {
   p[2] = static_cast<uint8_t>(v >> 16);
 }
 
-static auto read_leb128(const uint8_t* data, size_t size, size_t* len) -> uint32_t {
-  uint32_t value = 0;
-  for (size_t i = 0; i < 8 && i < size; i++) {
-    value |= static_cast<uint32_t>(data[i] & 0x7F) << (i * 7);
-    if (!(data[i] & 0x80)) {
-      if (len) {
-        *len = i + 1;
-      }
-      return value;
-    }
-  }
-  if (len) {
-    *len = 0;
-  }
-  return 0;
-}
-
-static void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, ptrdiff_t stride) {
+inline void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, ptrdiff_t stride) {
   for (size_t y = 0; y < height; y++) {
     memcpy(dst, src, width);
     dst += width;
@@ -160,7 +143,7 @@ static void copyPlane(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t
   }
 }
 
-static void copyPlane(uint8_t* dst, ptrdiff_t dst_stride, const uint8_t* src, ptrdiff_t src_stride, uint32_t row_bytes, uint32_t height) {
+inline void copyPlane(uint8_t* dst, ptrdiff_t dst_stride, const uint8_t* src, ptrdiff_t src_stride, uint32_t row_bytes, uint32_t height) {
   for (size_t y = 0; y < height; y++) {
     memcpy(dst, src, row_bytes);
     dst += dst_stride;
@@ -244,8 +227,7 @@ public:
 
   auto size() const -> size_t { return static_cast<size_t>(stream_size_); }
 
-  /** True when reads are served straight out of memory, so view() is usable. */
-  auto isInMemory() const -> bool { return !memory_.empty(); }
+
 
   auto read(size_t pos, void* dst, size_t n) -> bool;
 
@@ -260,13 +242,6 @@ public:
     return memory_.subspan(pos, n);
   }
 
-  auto readBuf(size_t pos, size_t size) -> std::vector<uint8_t> {
-    std::vector<uint8_t> buf(size);
-    if (!read(pos, buf.data(), size)) {
-      buf.clear();
-    }
-    return buf;
-  }
 };
 
 } // namespace openmedia

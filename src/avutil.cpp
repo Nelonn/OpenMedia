@@ -1,6 +1,6 @@
 #include "avutil.hpp"
 
-#include <openmedia/log.hpp>
+#include <util/c_log.hpp>
 
 namespace openmedia {
 
@@ -56,19 +56,11 @@ auto LibAVUtil::load() -> bool {
     return false;
   }
 
-  av_log_set_callback([](void* userdata, int level, const char* format, va_list ap) {
-    if (!format) return;
-    va_list args_copy;
-    va_copy(args_copy, ap);
-    int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
-    va_end(args_copy);
-    if (required_size <= 0) {
-      return;
-    }
-    std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
-    std::vsnprintf(buffer.data(), buffer.size(), format, ap);
-    std::string_view message(buffer.data(), static_cast<size_t>(required_size) - 1);
-    OMLogLevel om_level;
+  av_log_set_callback([](void*, int level, const char* format, va_list ap) {
+    // FFmpeg leaves filtering to its default callback, so replacing that one means
+    // honouring its default level here; below it the codecs trace every NAL unit.
+    if (!format || level > AV_LOG_INFO) return;
+    OMLogLevel om_level = OM_LEVEL_INFO;
     switch (level) {
       case AV_LOG_PANIC:
       case AV_LOG_FATAL:
@@ -80,16 +72,10 @@ auto LibAVUtil::load() -> bool {
       case AV_LOG_WARNING:
         om_level = OM_LEVEL_WARNING;
         break;
-      case AV_LOG_INFO:
-        om_level = OM_LEVEL_INFO;
-        break;
-      case AV_LOG_VERBOSE:
-      case AV_LOG_DEBUG:
       default:
-        om_level = OM_LEVEL_VERBOSE;
         break;
     }
-    log(OM_CATEGORY_NONE, om_level, message);
+    logPrintf(OM_CATEGORY_NONE, om_level, format, ap);
   });
 
   loaded_ = true;

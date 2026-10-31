@@ -11,6 +11,7 @@
 #include <openmedia/io.hpp>
 #include <openmedia/metadata_keys.hpp>
 #include <optional>
+#include <utility>
 #include <util/io_util.hpp>
 #include <util/timescale.hpp>
 #include <vector>
@@ -325,10 +326,7 @@ public:
         if (isPartlyDelivered(stream, ordinal)) return OM_COMMON_INVALID_ARGUMENT;
         // Full is not unwanted: dropping these silently would leave the caller
         // waiting forever for a segment it believes it delivered.
-        if (options_.max_buffered_bytes != 0 &&
-            stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
-          return OM_COMMON_OVERFLOW;
-        }
+        if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
         stream.hold(ordinal, std::move(bytes), /*complete=*/true);
         // These may be the bytes a stream with no initialization section was
         // waiting on to describe itself.
@@ -378,10 +376,7 @@ public:
         // segment is accumulated and deciphered once it is whole -- which is what
         // holding it does, and is why it is checked before the streaming branch.
         if (segment->encryption) {
-          if (options_.max_buffered_bytes != 0 &&
-              stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
-            return OM_COMMON_OVERFLOW;
-          }
+          if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
           stream.appendHeld(ordinal, bytes, last);
           return OM_SUCCESS;
         }
@@ -405,10 +400,7 @@ public:
         }
         // Not reached yet, so the pieces accumulate; the reader picks up however
         // much has turned up once this track gets there.
-        if (options_.max_buffered_bytes != 0 &&
-            stream.buffered_bytes + bytes.size() > options_.max_buffered_bytes) {
-          return OM_COMMON_OVERFLOW;
-        }
+        if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
         stream.appendHeld(ordinal, bytes, last);
         if (stream.needs_init) settleInitsIfComplete();
         return OM_SUCCESS;
@@ -688,22 +680,22 @@ private:
     return stream.public_tracks.empty() ? -1 : stream.public_tracks.front();
   }
 
-  auto streamOfTrack(int32_t track_index) -> Stream* {
-    for (Stream& stream : streams_) {
-      for (const int32_t index : stream.public_tracks) {
-        if (index == track_index) return &stream;
+  auto fitsBudget(const Stream& stream, size_t more) const -> bool {
+    return options_.max_buffered_bytes == 0 ||
+           stream.buffered_bytes + more <= options_.max_buffered_bytes;
+  }
+
+  auto streamOfTrack(int32_t track_index) const -> const Stream* {
+    for (const Stream& stream : streams_) {
+      if (std::ranges::find(stream.public_tracks, track_index) != stream.public_tracks.end()) {
+        return &stream;
       }
     }
     return nullptr;
   }
 
-  auto streamOfTrack(int32_t track_index) const -> const Stream* {
-    for (const Stream& stream : streams_) {
-      for (const int32_t index : stream.public_tracks) {
-        if (index == track_index) return &stream;
-      }
-    }
-    return nullptr;
+  auto streamOfTrack(int32_t track_index) -> Stream* {
+    return const_cast<Stream*>(std::as_const(*this).streamOfTrack(track_index));
   }
 
   auto pendingStartNs(const Stream& stream) const -> int64_t {
@@ -1343,16 +1335,24 @@ public:
 
 } // namespace
 
+namespace {
+
+auto openRequestedFile(const SegmentRequest& request) -> Result<std::unique_ptr<InputStream>, OMError> {
+  auto input = InputStream::createFileStream(urlToLocalPath(request.url));
+  if (!input || !input->isValid()) return Err(OM_IO_OPEN_FAILED);
+  if (request.offset != 0 && !input->seek(request.offset, Whence::BEG)) {
+    return Err(OM_IO_SEEK_FAILED);
+  }
+  return Ok(std::move(input));
+}
+
+} // namespace
+
 auto fileStreamFetch() -> StreamFetchFn {
   return [](const SegmentRequest& request) -> Result<std::unique_ptr<InputStream>, OMError> {
-    const std::string path = urlToLocalPath(request.url);
-    auto input = InputStream::createFileStream(path);
-    if (!input || !input->isValid()) return Err(OM_IO_OPEN_FAILED);
-
-    if (request.offset != 0 && !input->seek(request.offset, Whence::BEG)) {
-      return Err(OM_IO_SEEK_FAILED);
-    }
-    if (request.length < 0) return Ok(std::move(input));
+    auto opened = openRequestedFile(request);
+    if (opened.isErr() || request.length < 0) return opened;
+    std::unique_ptr<InputStream> input = std::move(opened).unwrap();
     return Ok(std::unique_ptr<InputStream>(
         std::make_unique<RangeStream>(std::move(input), request.length)));
   };
@@ -1360,13 +1360,9 @@ auto fileStreamFetch() -> StreamFetchFn {
 
 auto fileFetch() -> FetchFn {
   return [](const SegmentRequest& request) -> Result<std::vector<uint8_t>, OMError> {
-    const std::string path = urlToLocalPath(request.url);
-    auto input = InputStream::createFileStream(path);
-    if (!input || !input->isValid()) return Err(OM_IO_OPEN_FAILED);
-
-    if (request.offset != 0 && !input->seek(request.offset, Whence::BEG)) {
-      return Err(OM_IO_SEEK_FAILED);
-    }
+    auto opened = openRequestedFile(request);
+    if (opened.isErr()) return Err(std::move(opened).unwrapErr());
+    const std::unique_ptr<InputStream> input = std::move(opened).unwrap();
     if (request.length < 0) return Ok(readAll(*input));
 
     // Read out in a loop: one read() is allowed to return less than it was asked

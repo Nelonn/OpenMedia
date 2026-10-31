@@ -414,12 +414,6 @@ private:
   bool initialized_ = false;
 };
 
-// Helper for freeing AVIO context
-static void avio_context_free_fn(AVIOContext*& ctx) {
-  LibAVFormat::getInstance().avio_context_free(&ctx);
-  ctx = nullptr;
-}
-
 // ============================================================================
 // FFmpeg Muxer Implementation
 // ============================================================================

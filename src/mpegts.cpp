@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cstring>
-#include <deque>
 #include <numeric>
 #include <openmedia/codec_defs.h>
 #include <openmedia/log.hpp>
 #include <util/bit_reader.hpp>
+#include <util/fifo.hpp>
 #include <util/timescale.hpp>
 #include <video/parser/h264_types.hpp>
+#include <video/parser/start_code.hpp>
 #include <video/parser/h265_parser.hpp>
 
 namespace openmedia {
@@ -62,17 +63,17 @@ auto readTimestamp(const uint8_t* bytes) -> int64_t {
 // or an RBSP minds.
 template <typename Fn>
 void forEachNal(std::span<const uint8_t> bytes, Fn&& fn) {
+  video_parser::StartCodeScanner scanner;
   size_t start = 0;
   bool open = false;
-  size_t i = 0;
-  while (i + 2 < bytes.size()) {
-    if (bytes[i] != 0 || bytes[i + 1] != 0 || bytes[i + 2] != 1) {
-      ++i;
-      continue;
-    }
-    if (open && i > start) fn(bytes.subspan(start, i - start));
-    i += 3;
-    start = i;
+  size_t at = 0;
+  while (at < bytes.size()) {
+    bool found = false;
+    at += scanner.next(bytes.data() + at, bytes.size() - at, found);
+    // The scanner starts out as though two zeros came before the buffer.
+    if (!found || at < 3) continue;
+    if (open && at - 3 > start) fn(bytes.subspan(start, at - 3 - start));
+    start = at;
     open = true;
   }
   if (open && start < bytes.size()) fn(bytes.subspan(start));
@@ -165,7 +166,7 @@ struct ElementaryStream {
   // frame after it, and no stream's packet can go before the others have one to
   // compare against -- or a segment read as it arrives hands out video ahead of the
   // audio belonging in front of it.
-  std::deque<Packet> staged;
+  Fifo<Packet> staged;
   size_t timed = 0;       // leading entries of `staged` whose duration is settled
   int64_t video_step = 0; // the last frame interval seen, for the frame ending a segment
 };
@@ -181,7 +182,7 @@ class MpegTsReader final : public SegmentReader {
 
   // Ready to be read, in decode order. A segment arriving in pieces adds to this as
   // it goes, so it is drained from the front rather than indexed.
-  std::deque<Packet> packets_;
+  Fifo<Packet> packets_;
   // How many this segment handed over. A segment read as it arrived has had its
   // packets taken already, so an empty queue at its end says nothing.
   size_t released_ = 0;
@@ -537,11 +538,17 @@ private:
 
   // --- PES ------------------------------------------------------------------
 
+  // Cleared rather than moved out, so a stream's assembly buffer settles at the size of
+  // its largest PES packet instead of growing from nothing for every frame.
   void emitPes(ElementaryStream& stream) {
-    std::vector<uint8_t> pes = std::move(stream.pes);
+    parsePes(stream);
     stream.pes.clear();
     stream.collecting = false;
     stream.declared = 0;
+  }
+
+  void parsePes(ElementaryStream& stream) {
+    const std::vector<uint8_t>& pes = stream.pes;
     if (pes.size() < 9 || stream.track < 0) return;
     if (pes[0] != 0x00 || pes[1] != 0x00 || pes[2] != 0x01) return;
 
@@ -661,14 +668,14 @@ private:
         if (type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR) keyframe = true;
         if (type == h264::NAL_UNIT_TYPE_SPS || type == h264::NAL_UNIT_TYPE_PPS) {
           if (type == h264::NAL_UNIT_TYPE_SPS && sps_nal.empty()) sps_nal = nal;
-          appendAnnexB(parameter_sets, nal);
+          if (!stream.described) appendAnnexB(parameter_sets, nal);
         }
         return;
       }
       if (isHevcIrap(type)) keyframe = true;
       if (type == 32 || type == 33 || type == 34) { // VPS, SPS, PPS
         if (type == 33 && sps_nal.empty()) sps_nal = nal;
-        appendAnnexB(parameter_sets, nal);
+        if (!stream.described) appendAnnexB(parameter_sets, nal);
       }
     });
 

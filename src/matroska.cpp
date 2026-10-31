@@ -822,27 +822,30 @@ private:
     const mkvparser::Block::Frame& frame =
         current_block_->GetFrame(current_frame_index_++);
 
-    std::vector<uint8_t> raw(static_cast<size_t>(frame.len));
-    if (frame.Read(mkv_reader_.get(), raw.data()) < 0)
-      return Err(OM_FORMAT_PARSE_FAILED);
-
-    std::vector<uint8_t> converted;
-    FilteredBitstream filtered;
-    std::span<const uint8_t> payload(raw);
-
-    if (auto it = bsf_.find(current_stream_index_); it != bsf_.end()) {
-      if (current_is_keyframe_) {
-        converted = it->second->convert(payload, true);
-        payload = converted;
-      } else {
-        filtered = it->second->filter(std::move(raw));
-        payload = filtered.bytes;
-      }
-    }
+    const auto bsf = bsf_.find(current_stream_index_);
+    const BitStreamFilter* filter = bsf != bsf_.end() ? bsf->second.get() : nullptr;
+    const std::span<const uint8_t> prefix = (filter && current_is_keyframe_)
+                                                ? filter->keyframePrefix()
+                                                : std::span<const uint8_t> {};
 
     Packet pkt;
-    pkt.allocate(payload.size());
-    std::memcpy(pkt.bytes.data(), payload.data(), payload.size());
+    pkt.allocate(prefix.size() + static_cast<size_t>(frame.len));
+    if (frame.Read(mkv_reader_.get(), pkt.bytes.data() + prefix.size()) < 0)
+      return Err(OM_FORMAT_PARSE_FAILED);
+
+    if (filter) {
+      const std::span<uint8_t> payload = pkt.bytes.subspan(prefix.size());
+      if (const auto filtered_size = filter->filterInPlace(payload)) {
+        pkt.bytes = pkt.bytes.first(prefix.size() + *filtered_size);
+      } else if (const auto filtered = filter->filter(payload); !filtered.bytes.empty()) {
+        Packet reframed;
+        reframed.allocate(prefix.size() + filtered.bytes.size());
+        std::memcpy(reframed.bytes.data() + prefix.size(), filtered.bytes.data(), filtered.bytes.size());
+        pkt.buffer = std::move(reframed.buffer);
+        pkt.bytes = reframed.bytes;
+      }
+    }
+    if (!prefix.empty()) std::memcpy(pkt.bytes.data(), prefix.data(), prefix.size());
 
     pkt.pts = current_timestamp_tc_;
     pkt.dts = current_timestamp_tc_;

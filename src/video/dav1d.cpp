@@ -5,6 +5,7 @@
 #include <openmedia/codec_extra.hpp>
 #include <openmedia/video.hpp>
 #include <vector>
+#include <util/c_log.hpp>
 #include <util/io_util.hpp>
 
 namespace openmedia {
@@ -27,18 +28,7 @@ struct Dav1dPictureDeleter {
 };
 
 static void dav1d_log_callback(void* cookie, const char* format, va_list ap) {
-  if (!format) return;
-  va_list args_copy;
-  va_copy(args_copy, ap);
-  int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
-  va_end(args_copy);
-  if (required_size <= 0) {
-    return;
-  }
-  std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
-  std::vsnprintf(buffer.data(), buffer.size(), format, ap);
-  std::string_view message(buffer.data(), static_cast<size_t>(required_size));
-  log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
+  if (format) logPrintf(OM_CATEGORY_DECODER, OM_LEVEL_INFO, format, ap);
 }
 
 class Dav1dDecoder final : public Decoder {

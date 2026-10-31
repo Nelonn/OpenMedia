@@ -1,6 +1,5 @@
 #pragma once
 
-#include <deque>
 #include <functional>
 #include <openmedia/audio.hpp>
 #include <openmedia/codec_defs.h>
@@ -62,12 +61,16 @@ struct OPENMEDIA_ABI ReceivedFrame {
 };
 
 class OPENMEDIA_ABI Decoder {
-  std::deque<Frame> pending_frames_;
+  std::vector<Frame> pending_frames_;
+  size_t next_pending_ = 0;
   bool end_of_stream_sent_ = false;
+
+  auto hasPendingFrames() const noexcept -> bool { return next_pending_ < pending_frames_.size(); }
 
 protected:
   void resetReceiveState() {
     pending_frames_.clear();
+    next_pending_ = 0;
     end_of_stream_sent_ = false;
   }
 
@@ -79,32 +82,28 @@ public:
   virtual auto getInfo() -> std::optional<DecodingInfo> = 0;
 
   virtual auto sendPacket(const Packet& packet) -> OMError {
-    if (!pending_frames_.empty()) return OM_CODEC_NEED_MORE_DATA;
+    if (hasPendingFrames()) return OM_CODEC_NEED_MORE_DATA;
     end_of_stream_sent_ = false;
     auto result = decode(packet);
     if (result.isErr()) return result.unwrapErr();
-    for (auto& frame : result.unwrap()) {
-      pending_frames_.push_back(std::move(frame));
-    }
+    pending_frames_ = std::move(result).unwrap();
+    next_pending_ = 0;
     return OM_SUCCESS;
   }
 
   virtual auto sendEndOfStream() -> OMError {
-    if (!pending_frames_.empty()) return OM_CODEC_NEED_MORE_DATA;
+    if (hasPendingFrames()) return OM_CODEC_NEED_MORE_DATA;
     auto result = decode(Packet {});
     if (result.isErr()) return result.unwrapErr();
-    for (auto& frame : result.unwrap()) {
-      pending_frames_.push_back(std::move(frame));
-    }
+    pending_frames_ = std::move(result).unwrap();
+    next_pending_ = 0;
     end_of_stream_sent_ = true;
     return OM_SUCCESS;
   }
 
   virtual auto receiveFrame() -> Result<ReceivedFrame, OMError> {
-    if (!pending_frames_.empty()) {
-      auto frame = std::move(pending_frames_.front());
-      pending_frames_.pop_front();
-      return Ok(ReceivedFrame::frameReady(std::move(frame)));
+    if (hasPendingFrames()) {
+      return Ok(ReceivedFrame::frameReady(std::move(pending_frames_[next_pending_++])));
     }
     if (end_of_stream_sent_) return Ok(ReceivedFrame::endOfStream());
     return Ok(ReceivedFrame::needInput());

@@ -163,11 +163,6 @@ public:
     drained_.notify_all();
   }
 
-  auto inFlight() const -> size_t {
-    const std::lock_guard lock(mutex_);
-    return in_flight_.size();
-  }
-
 private:
   // How much of a segment being read in pieces is held between the two threads.
   // Enough that the demux thread always has something to get on with, and not so

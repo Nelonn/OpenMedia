@@ -150,7 +150,7 @@ struct OPENMEDIA_ABI OMCrop {
 
 namespace openmedia {
 
-static auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> uint32_t {
+inline auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> uint32_t {
   switch (fmt) {
     case OM_FORMAT_GRAY8:
     case OM_FORMAT_YUV420P:
@@ -194,7 +194,7 @@ static auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> u
   }
 }
 
-static auto getNumPlanes(OMPixelFormat fmt) noexcept -> uint32_t {
+inline auto getNumPlanes(OMPixelFormat fmt) noexcept -> uint32_t {
   switch (fmt) {
     // Packed RGB / grayscale
     case OM_FORMAT_R8G8B8A8:
@@ -244,7 +244,7 @@ static auto getNumPlanes(OMPixelFormat fmt) noexcept -> uint32_t {
   }
 }
 
-static auto getPlaneDimensions(OMPixelFormat format, uint32_t plane_idx, uint32_t width, uint32_t height) noexcept -> std::pair<uint32_t, uint32_t> {
+inline auto getPlaneDimensions(OMPixelFormat format, uint32_t plane_idx, uint32_t width, uint32_t height) noexcept -> std::pair<uint32_t, uint32_t> {
   if (plane_idx >= getNumPlanes(format))
     return {0, 0};
 
@@ -404,18 +404,15 @@ struct OPENMEDIA_ABI Picture {
   }
 
   void allocate() {
-    int num_planes = getNumPlanes(format);
-    size_t total_size = 0;
-    std::vector<size_t> plane_sizes(num_planes);
-    std::vector<uint32_t> plane_strides(num_planes);
+    const uint32_t num_planes = getNumPlanes(format);
+    const auto plane_layout = [this](uint32_t plane) -> std::pair<uint32_t, size_t> {
+      const auto dims = getPlaneDimensions(plane);
+      const uint32_t stride = getPlaneInfo(plane, dims.first).second;
+      return {stride, static_cast<size_t>(stride) * dims.second};
+    };
 
-    for (int i = 0; i < num_planes; ++i) {
-      auto dims = getPlaneDimensions(i);
-      auto info = getPlaneInfo(i, dims.first);
-      plane_strides[i] = info.second;
-      plane_sizes[i] = static_cast<size_t>(info.second) * dims.second;
-      total_size += plane_sizes[i];
-    }
+    size_t total_size = 0;
+    for (uint32_t i = 0; i < num_planes; ++i) total_size += plane_layout(i).second;
 
     HostPicture& host_picture = buffer.emplace<HostPicture>();
     host_picture.buffer = BufferPool::getInstance().get(total_size);
@@ -423,13 +420,15 @@ struct OPENMEDIA_ABI Picture {
     uint8_t* raw_ptr = host_picture.buffer->bytes().data();
     size_t offset = 0;
     planes.count = 0;
-    for (int i = 0; i < num_planes; ++i) {
-      planes.setData(i, raw_ptr + offset, plane_strides[i]);
-      offset += plane_sizes[i];
+    for (uint32_t i = 0; i < num_planes; ++i) {
+      const auto [stride, size] = plane_layout(i);
+      planes.setData(i, raw_ptr + offset, stride);
+      offset += size;
     }
   }
 
   void unref() noexcept {
+    buffer.emplace<HostPicture>();
     planes = PlaneSpan<4> {};
   }
 

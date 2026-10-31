@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <cstring>
-#include <deque>
 #include <optional>
 #include <string_view>
+#include <util/fifo.hpp>
 #include <util/timescale.hpp>
 
 namespace openmedia {
@@ -64,7 +64,7 @@ auto readTimestamp(std::span<const uint8_t> tag) -> std::optional<uint64_t> {
 class AdtsReader final : public SegmentReader {
   std::vector<Track> tracks_;
   Dictionary metadata_;
-  std::deque<Packet> packets_;
+  Fifo<Packet> packets_;
   std::vector<uint8_t> carry_;
   bool segment_open_ = false;
   int64_t expected_start_ns_ = 0;

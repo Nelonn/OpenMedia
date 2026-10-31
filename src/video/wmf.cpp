@@ -8,7 +8,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 #include <codecs.hpp>
-#include <iostream>
+#include <openmedia/log.hpp>
 #include <openmedia/video.hpp>
 #include <util/wmf.hpp>
 #include <vector>
@@ -25,7 +25,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace openmedia {
 
-constexpr Rational MF_TIMEBASE = {1, 10000000};
 
 class WMFVideoDecoder final : public Decoder {
   ComPtr<IMFTransform> decoder_;
@@ -40,13 +39,13 @@ public:
   WMFVideoDecoder() {
     HRESULT hr_co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr_co) && hr_co != RPC_E_CHANGED_MODE) {
-      std::cerr << "CoInitializeEx failed: " << hr_co << std::endl;
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "CoInitializeEx failed: {}", static_cast<long>(hr_co));
       return;
     }
 
     HRESULT hr_mf = MFStartup(MF_VERSION);
     if (FAILED(hr_mf)) {
-      std::cerr << "MFStartup failed: " << hr_mf << std::endl;
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "MFStartup failed: {}", static_cast<long>(hr_mf));
       return;
     }
     mf_started_ = true;
@@ -100,7 +99,7 @@ public:
     HRESULT hr = FindDecoder(&decoder_, codec);
     if (FAILED(hr)) {
       _com_error err(hr);
-      std::cerr << "Failed to find decoder: " << err.ErrorMessage() << std::endl;
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "Failed to find decoder: {}", static_cast<long>(err.Error()));
       return OM_CODEC_OPEN_FAILED;
     }
 
@@ -123,7 +122,7 @@ public:
     hr = decoder_->SetInputType(0, input_type.Get(), 0);
     if (FAILED(hr)) {
       _com_error err(hr);
-      std::cerr << "SetInputType failed: " << err.ErrorMessage() << std::endl;
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "SetInputType failed: {}", static_cast<long>(err.Error()));
       return OM_CODEC_OPEN_FAILED;
     }
 

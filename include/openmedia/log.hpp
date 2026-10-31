@@ -41,7 +41,7 @@ OPENMEDIA_ABI
 void log(OMLogCategory category, OMLogLevel level, std::string_view message);
 
 template <typename... Args>
-static void log(OMLogCategory category, OMLogLevel level, std::format_string<Args...> fmt, Args&&... args) {
+void log(OMLogCategory category, OMLogLevel level, std::format_string<Args...> fmt, Args&&... args) {
   std::string message = std::format(fmt, std::forward<Args>(args)...);
   log(category, level, std::string_view(message));
 }

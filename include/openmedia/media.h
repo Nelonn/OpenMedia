@@ -22,11 +22,11 @@ typedef struct OMRational {
   int32_t den = 0;
 } OMRational;
 
-static double OMRational_toDouble(OMRational v) {
+static inline double OMRational_toDouble(OMRational v) {
   return v.den != 0 ? (double)v.num / (double)v.den : 0.0;
 }
 
-static float OMRational_toFloat(OMRational v) {
+static inline float OMRational_toFloat(OMRational v) {
   return v.den != 0 ? (float)v.num / (float)v.den : 0.0f;
 }
 

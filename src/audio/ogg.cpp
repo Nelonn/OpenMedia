@@ -14,6 +14,7 @@
 #include <string_view>
 #include <util/bit_reader.hpp>
 #include <util/demuxer_base.hpp>
+#include <util/fifo.hpp>
 #include <util/io_util.hpp>
 #include <util/vorbis_comment.hpp>
 #include <util/xiph.hpp>
@@ -359,7 +360,8 @@ class OggDemuxer final : public BaseDemuxer {
   // libogg is handed &Stream::state by address, so the container must not
   // relocate its elements as further streams are discovered.
   std::deque<Stream> streams_;
-  std::deque<Packet> buffered_packets_;
+  Fifo<Packet> buffered_packets_;
+  std::vector<Packet> page_packets_;
   size_t pending_headers_ = 0;
   // Offset of the next byte ogg_sync_pageout will hand back. libogg reports no
   // position of its own, and a seek cannot be built without one.
@@ -642,7 +644,7 @@ private:
     ogg_packet op;
     while (!stream.header_complete && ogg_stream_packetout(&stream.state, &op) == 1) {
       const int32_t count = stream.header_packets++;
-      Packet& pkt = buffered_packets_.emplace_back(makePacket(op, stream.track_index, 0));
+      Packet& pkt = buffered_packets_.push_back(makePacket(op, stream.track_index, 0));
       pkt.pts = pkt.dts = 0;
 
       if (count == 0) {
@@ -691,7 +693,8 @@ private:
   // page is also what lets a seek land with exact timestamps without having to
   // know what the position was before it.
   void drainPage(Stream& stream, const Page& info) {
-    std::vector<Packet> packets;
+    std::vector<Packet>& packets = page_packets_;
+    packets.clear();
     int64_t total = 0;
 
     ogg_packet op;
@@ -744,8 +747,7 @@ private:
       });
       if (begin != packets.end()) stream.discard_until = 0;
     }
-    buffered_packets_.insert(buffered_packets_.end(), std::make_move_iterator(begin),
-                             std::make_move_iterator(packets.end()));
+    buffered_packets_.append(begin, packets.end());
   }
 
   // ---- seeking ---------------------------------------------------------------

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <openmedia/macro.h>
 #include <span>
 #include <unordered_map>
@@ -24,19 +25,22 @@ public:
 // while bytes() always exposes exactly the number of bytes the caller asked
 // for -- callers rely on bytes().size() as the payload size.
 class OPENMEDIA_ABI PooledBuffer : public Buffer {
-  std::vector<uint8_t> storage_;
+  std::unique_ptr<uint8_t[]> storage_;
+  size_t capacity_ = 0;
   size_t size_ = 0;
 
 public:
+  // Left uninitialised: a recycled block holds stale bytes anyway, and zeroing a 4K
+  // picture only to overwrite it costs a pass over 12 MiB.
   PooledBuffer(size_t capacity, size_t size)
-      : storage_(capacity), size_(size) {}
+      : storage_(std::make_unique_for_overwrite<uint8_t[]>(capacity)), capacity_(capacity), size_(size) {}
 
   explicit PooledBuffer(size_t size)
       : PooledBuffer(size, size) {}
 
-  auto bytes() -> std::span<uint8_t> override { return {storage_.data(), size_}; }
+  auto bytes() -> std::span<uint8_t> override { return {storage_.get(), size_}; }
 
-  auto capacity() const noexcept -> size_t { return storage_.size(); }
+  auto capacity() const noexcept -> size_t { return capacity_; }
 
   // Re-target a recycled block at a new logical size. Contents are not cleared.
   auto rebind(size_t size) noexcept -> void { size_ = size; }
@@ -79,6 +83,8 @@ public:
   static constexpr size_t DEFAULT_MAX_BYTES = 64ull << 20;
   static constexpr Clock::duration DEFAULT_MAX_IDLE = std::chrono::seconds(2);
   static constexpr Clock::duration SWEEP_INTERVAL = std::chrono::milliseconds(250);
+  static constexpr size_t CONTROL_BLOCK_SIZE = 128;
+  static constexpr size_t MAX_CONTROL_BLOCKS = 64;
 
 private:
   struct SizeClass {
@@ -97,6 +103,34 @@ private:
     size_t max_bytes = DEFAULT_MAX_BYTES;
     Clock::duration max_idle = DEFAULT_MAX_IDLE;
     Clock::time_point last_sweep {};
+    std::vector<void*> control_blocks;
+
+    ~State() {
+      for (void* block : control_blocks) ::operator delete(block);
+    }
+
+    auto takeControlBlock() -> void* {
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!control_blocks.empty()) {
+          void* block = control_blocks.back();
+          control_blocks.pop_back();
+          return block;
+        }
+      }
+      return ::operator new(CONTROL_BLOCK_SIZE);
+    }
+
+    auto returnControlBlock(void* block) -> void {
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (control_blocks.size() < MAX_CONTROL_BLOCKS) {
+          control_blocks.push_back(block);
+          return;
+        }
+      }
+      ::operator delete(block);
+    }
 
     // Caller holds the lock.
     auto sweep(Clock::time_point now, bool force) -> void {
@@ -136,6 +170,35 @@ private:
 
       cached_bytes += capacity;
       size_class.idle.push_back(std::move(buffer));
+    }
+  };
+
+  // Every buffer handed out needs a shared_ptr control block, and recycling the buffer
+  // but not this would still cost one heap allocation per packet.
+  template<typename T>
+  struct ControlBlockAllocator {
+    using value_type = T;
+
+    std::shared_ptr<State> state;
+
+    explicit ControlBlockAllocator(std::shared_ptr<State> owner) noexcept
+        : state(std::move(owner)) {}
+
+    template<typename U>
+    ControlBlockAllocator(const ControlBlockAllocator<U>& other) noexcept
+        : state(other.state) {}
+
+    auto allocate(size_t count) -> T* {
+      static_assert(sizeof(T) <= CONTROL_BLOCK_SIZE && alignof(T) <= alignof(std::max_align_t));
+      if (count != 1) throw std::bad_alloc();
+      return static_cast<T*>(state->takeControlBlock());
+    }
+
+    void deallocate(T* block, size_t) noexcept { state->returnControlBlock(block); }
+
+    template<typename U>
+    auto operator==(const ControlBlockAllocator<U>& other) const noexcept -> bool {
+      return state == other.state;
     }
   };
 
@@ -197,9 +260,10 @@ public:
       buffer = std::make_unique<PooledBuffer>(capacity, size);
     }
 
-    return std::shared_ptr<PooledBuffer>(buffer.release(), [state = state_](PooledBuffer* b) {
-      state->release(std::unique_ptr<PooledBuffer>(b));
-    });
+    return std::shared_ptr<PooledBuffer>(
+        buffer.release(),
+        [state = state_](PooledBuffer* b) { state->release(std::unique_ptr<PooledBuffer>(b)); },
+        ControlBlockAllocator<PooledBuffer>(state_));
   }
 
   void trim() {

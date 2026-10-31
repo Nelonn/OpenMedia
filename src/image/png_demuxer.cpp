@@ -64,9 +64,6 @@ public:
       return OM_IO_NOT_ENOUGH_DATA;
     }
 
-    uint32_t chunk_length = (chunk_header[0] << 24) | (chunk_header[1] << 16) |
-                            (chunk_header[2] << 8) | chunk_header[3];
-
     if (memcmp(chunk_header + 4, "IHDR", 4) != 0) {
       return OM_FORMAT_PARSE_FAILED;
     }

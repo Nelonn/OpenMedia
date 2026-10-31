@@ -64,16 +64,9 @@ struct OPENMEDIA_ABI AudioSamples {
 
     uint8_t* raw_ptr = buffer->bytes().data();
     planes.count = 0;
-    if (format.planar) {
-      size_t plane_samples = static_cast<size_t>(nb_samples) * bps;
-      for (uint32_t i = 0; i < format.channels && i < 8; ++i) {
-        planes.setData(i, raw_ptr + i * plane_samples, static_cast<uint32_t>(plane_samples));
-      }
-    } else {
-      size_t plane_size = static_cast<size_t>(nb_samples) * bps;
-      for (uint32_t i = 0; i < format.channels && i < 8; ++i) {
-        planes.setData(i, raw_ptr + i * plane_size, static_cast<uint32_t>(plane_size));
-      }
+    const size_t plane_size = static_cast<size_t>(nb_samples) * bps;
+    for (uint32_t i = 0; i < format.channels && i < 8; ++i) {
+      planes.setData(i, raw_ptr + i * plane_size, static_cast<uint32_t>(plane_size));
     }
   }
 

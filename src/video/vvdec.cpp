@@ -2,8 +2,8 @@
 #include <algorithm>
 #include <codecs.hpp>
 #include <iostream>
-#include <iostream>
 #include <openmedia/video.hpp>
+#include <util/c_log.hpp>
 #include <util/io_util.hpp>
 #include <vector>
 
@@ -34,16 +34,7 @@ struct VvdecAccessUnitDeleter {
 };
 
 static void vvdec_log_callback(void* opaque, int level, const char* format, va_list ap) {
-  if (!opaque || !format) return;
-  va_list args_copy;
-  va_copy(args_copy, ap);
-  int required_size = std::vsnprintf(nullptr, 0, format, args_copy);
-  va_end(args_copy);
-  if (required_size <= 0) return;
-  std::vector<char> buffer(static_cast<size_t>(required_size) + 1);
-  std::vsnprintf(buffer.data(), buffer.size(), format, ap);
-  std::string_view message(buffer.data(), static_cast<size_t>(required_size));
-  log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, message);
+  if (opaque && format) logPrintf(OM_CATEGORY_DECODER, OM_LEVEL_INFO, format, ap);
 }
 
 class VvdecDecoder final : public Decoder {
@@ -52,7 +43,6 @@ class VvdecDecoder final : public Decoder {
   std::unique_ptr<vvdecAccessUnit, VvdecAccessUnitDeleter> access_unit_;
   bool initialized_ = false;
   VideoFormat output_format_ = {};
-  bool extradata_sent_ = false;
   std::vector<uint8_t> extradata_;
 
 public:

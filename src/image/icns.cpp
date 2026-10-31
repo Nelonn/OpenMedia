@@ -65,14 +65,6 @@ static constexpr uint32_t OST_ICH_HASH = FOURCC('i', 'c', 'h', '#'); // 48x48
 static constexpr uint32_t OST_ICM_HASH = FOURCC('i', 'c', 'm', '#'); // 16x12
 static constexpr uint32_t OST_ICON = FOURCC('I', 'C', 'O', 'N');     // 32x32 no mask
 
-// Non-image metadata types (skip)
-static constexpr uint32_t OST_TOC = FOURCC('T', 'O', 'C', ' ');
-static constexpr uint32_t OST_ICNV = FOURCC('i', 'c', 'n', 'V');
-static constexpr uint32_t OST_NAME = FOURCC('n', 'a', 'm', 'e');
-static constexpr uint32_t OST_INFO = FOURCC('i', 'n', 'f', 'o');
-static constexpr uint32_t OST_SBTP = FOURCC('s', 'b', 't', 'p');
-static constexpr uint32_t OST_SLCT = FOURCC('s', 'l', 'c', 't');
-
 // PNG magic
 static constexpr uint8_t PNG_SIG[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
 
@@ -117,35 +109,6 @@ static void mac8bppColor(uint8_t idx, uint8_t& r, uint8_t& g, uint8_t& b) {
     uint8_t v = static_cast<uint8_t>(255 - step * (255 / 39));
     r = g = b = v;
   }
-}
-
-// Decompress one channel of PackBits-encoded data.
-// Returns false if the output buffer is not exactly filled.
-static auto packbitsDecompress(
-    const uint8_t* src, size_t src_len,
-    uint8_t* dst, size_t dst_len) -> bool {
-  size_t si = 0, di = 0;
-  while (si < src_len && di < dst_len) {
-    uint8_t n = src[si++];
-    if (n < 0x80) {
-      // Literal run: copy (n+1) bytes verbatim
-      size_t count = static_cast<size_t>(n) + 1;
-      if (si + count > src_len) return false;
-      if (di + count > dst_len) count = dst_len - di; // clamp
-      memcpy(dst + di, src + si, count);
-      si += (static_cast<size_t>(n) + 1); // always advance full run in source
-      di += count;
-    } else {
-      // Repeat run: repeat next byte (n - 0x80 + 3) times
-      size_t count = static_cast<size_t>(n) - 0x80 + 3;
-      if (si >= src_len) return false;
-      uint8_t val = src[si++];
-      size_t to_write = std::min(count, dst_len - di);
-      memset(dst + di, val, to_write);
-      di += count; // track even if clamped, for dst_len check
-    }
-  }
-  return (di >= dst_len);
 }
 
 static auto isPNG(const uint8_t* data, size_t len) -> bool {

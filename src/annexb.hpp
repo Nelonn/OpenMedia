@@ -9,57 +9,26 @@ namespace openmedia {
 class AnnexBBitStreamFilter : public BitStreamFilter {
 public:
   static constexpr uint8_t START_CODE_LONG[4] = {0x00, 0x00, 0x00, 0x01};
-  static constexpr uint8_t START_CODE_SHORT[3] = {0x00, 0x00, 0x01};
 
   explicit AnnexBBitStreamFilter(uint8_t nal_length_size = 0,
                                  uint8_t fallback_nal_length_size = 0,
                                  uint8_t start_code_length = 4)
       : nal_length_size_(validLengthSize(nal_length_size)), fallback_nal_length_size_(validLengthSize(fallback_nal_length_size)), start_code_length_(start_code_length == 3 ? 3 : 4) {}
 
-  void setNalLengthSize(uint8_t nal_length_size) noexcept {
-    nal_length_size_ = validLengthSize(nal_length_size);
-  }
-
-  auto nalLengthSize() const noexcept -> uint8_t { return nal_length_size_; }
-
-  void setFallbackNalLengthSize(uint8_t nal_length_size) noexcept {
-    fallback_nal_length_size_ = validLengthSize(nal_length_size);
-  }
-
-  void parseAvcCExtradata(std::span<const uint8_t> extradata) noexcept {
-    if (extradata.size() >= 7 && extradata[0] == 1) {
-      nal_length_size_ = static_cast<uint8_t>((extradata[4] & 0x03u) + 1);
-    }
-  }
-
-  auto filter(BitStreamFilterInput input) const -> FilteredBitstream override {
+  auto filter(std::span<const uint8_t> input) const -> FilteredBitstream override {
     // The leading bytes alone cannot tell the two layouts apart: a 4-byte NAL
     // length of 256..511 is 00 00 01 xx, which reads as a start code followed
     // by a NAL header. Walking the length prefixes settles it, because that
     // only lands exactly on the end of the packet for a real length-prefixed
     // one; the Annex-B guess is what is left when no length size fits.
-    const uint8_t length_size = lengthPrefixSizeOf(input.bytes);
+    const uint8_t length_size = lengthPrefixSizeOf(input);
+    if (length_size == 0) return {input, {}};
 
-    if (length_size == 0) {
-      if (input.ownsBytes()) return makeFilteredBitstream(std::move(input.storage), input.bytes.size(), false);
-      return makeFilteredBitstream(input.bytes);
-    }
-
-    auto mutable_bytes = input.mutableBytes();
-    if (!mutable_bytes.empty()) {
-      if (auto size = rewriteLengthPrefixedInPlace(mutable_bytes, length_size, start_code_length_)) {
-        return makeFilteredBitstream(std::move(input.storage), *size, true);
-      }
-    }
-
-    auto converted = convertLengthPrefixed(input.bytes, length_size, start_code_length_);
-
-    if (converted.empty()) {
-      if (input.ownsBytes()) return makeFilteredBitstream(std::move(input.storage), input.bytes.size(), false);
-      return makeFilteredBitstream(input.bytes);
-    }
-    const size_t converted_size = converted.size();
-    return makeFilteredBitstream(std::move(converted), converted_size, false, true);
+    FilteredBitstream out;
+    out.storage = convertLengthPrefixed(input, length_size, start_code_length_);
+    out.bytes = out.storage;
+    if (out.bytes.empty()) out.bytes = input;
+    return out;
   }
 
   // In-place rewriting only works when each length prefix is exactly as wide
@@ -67,7 +36,7 @@ public:
   // payload, which is what the copying path in filter() is for.
   auto filterInPlace(std::span<uint8_t> bytes) const -> std::optional<size_t> override {
     const uint8_t length_size = lengthPrefixSizeOf(bytes);
-    if (length_size == 0) return bytes.size(); // already Annex-B, nothing to do
+    if (length_size == 0) return bytes.size();
     return rewriteLengthPrefixedInPlace(bytes, length_size, start_code_length_);
   }
 
@@ -179,17 +148,6 @@ public:
     return annexb_extra_;
   }
 
-  auto convert(std::span<const uint8_t> input, bool is_keyframe) const -> std::vector<uint8_t> override {
-    auto filtered = filter(input);
-    auto bytes = filtered.bytes;
-    if (!is_keyframe || annexb_extra_.empty()) return {bytes.begin(), bytes.end()};
-
-    std::vector<uint8_t> out;
-    out.reserve(annexb_extra_.size() + bytes.size());
-    out.insert(out.end(), annexb_extra_.begin(), annexb_extra_.end());
-    out.insert(out.end(), bytes.begin(), bytes.end());
-    return out;
-  }
 };
 
 inline auto isAnnexBBitstream(std::span<const uint8_t> data) noexcept -> bool {

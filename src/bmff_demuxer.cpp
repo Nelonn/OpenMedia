@@ -313,10 +313,6 @@ static auto dtsProfile(uint32_t fmt) -> std::optional<OMProfile> {
   }
 }
 
-static auto isDtsVariant(uint32_t fmt) -> bool {
-  return dtsProfile(fmt).has_value();
-}
-
 // --- Descriptive metadata (iTunes-style `ilst`, and QuickTime `udta`) -------
 
 // The `data` box states how to read its payload. Only the forms that actually
