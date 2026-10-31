@@ -14,12 +14,12 @@ namespace openmedia {
 template<class Sink>
 class BasicBitWriter {
   Sink sink_;
-  uint64_t acc_ = 0; // low `fill_` bits are pending, higher bits are stale
+  uint64_t acc_ = 0;  // low `fill_` bits are pending, higher bits are stale
   uint32_t fill_ = 0; // invariant between calls: fill_ < 32
 
 public:
   template<class Target>
-    requires std::constructible_from<Sink, Target&&>
+  requires std::constructible_from<Sink, Target&&>
   explicit BasicBitWriter(Target&& target) noexcept : sink_(std::forward<Target>(target)) {}
 
   // Writes the low `n` bits of `v`, n in [0, 32]. `v` must fit in `n` bits.

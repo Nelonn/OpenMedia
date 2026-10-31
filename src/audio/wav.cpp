@@ -44,7 +44,7 @@ auto wavFormatTag(OMCodecId codec_id) -> uint16_t {
   }
 }
 
-}
+} // namespace
 
 class WAVMuxer final : public BaseMuxer {
   uint64_t data_size_ = 0;

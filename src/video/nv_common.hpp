@@ -7,22 +7,22 @@
 namespace openmedia {
 
 class CudaHardwarePictureImpl : public CudaHardwarePicture {
-    OMCudaPicture om_pic_;
+  OMCudaPicture om_pic_;
 public:
-    explicit CudaHardwarePictureImpl() {
-        om_pic_.data = 0;
-        om_pic_.pitch = 0;
-    }
+  explicit CudaHardwarePictureImpl() {
+    om_pic_.data = 0;
+    om_pic_.pitch = 0;
+  }
 
-    void updateOM() {
-        om_pic_.data = data;
-        om_pic_.pitch = pitch;
-    }
+  void updateOM() {
+    om_pic_.data = data;
+    om_pic_.pitch = pitch;
+  }
 
-    auto getOMPicture() -> OMCudaPicture* override { 
-        updateOM();
-        return &om_pic_; 
-    }
+  auto getOMPicture() -> OMCudaPicture* override {
+    updateOM();
+    return &om_pic_;
+  }
 };
 
 

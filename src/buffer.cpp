@@ -7,4 +7,4 @@ auto BufferPool::getInstance() -> BufferPool& {
   return instance;
 }
 
-}
+} // namespace openmedia

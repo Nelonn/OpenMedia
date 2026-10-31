@@ -108,7 +108,7 @@ public:
     input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     input_type->SetGUID(MF_MT_SUBTYPE, codec);
     MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE,
-                         options.format.video.framerate.num, options.format.video.framerate.den);
+                        options.format.video.framerate.num, options.format.video.framerate.den);
     MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, options.format.video.width, options.format.video.height);
 
     //if (!options.extradata.empty()) {

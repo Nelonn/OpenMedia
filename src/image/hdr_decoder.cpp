@@ -201,13 +201,13 @@ public:
 };
 
 const CodecDescriptor CODEC_RGBE = {
-  .codec_id = OM_CODEC_RGBE,
-  .type = OM_MEDIA_IMAGE,
-  .name = "rgbe",
-  .long_name = "RGBE (Radiance HDR) decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<RGBEDecoder>(); },
+    .codec_id = OM_CODEC_RGBE,
+    .type = OM_MEDIA_IMAGE,
+    .name = "rgbe",
+    .long_name = "RGBE (Radiance HDR) decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<RGBEDecoder>(); },
 };
 
 } // namespace openmedia

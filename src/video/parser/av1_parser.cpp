@@ -468,7 +468,7 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
     if (h.show_existing_frame) {
       h.frame_to_show_map_idx = static_cast<uint8_t>(r.f(3));
       if (seq_.decoder_model_info_present_flag && !seq_.timing_info.equal_picture_interval)
-        r.f(seq_.frame_presentation_time_length); // temporal_point_info
+        r.f(seq_.frame_presentation_time_length);          // temporal_point_info
       if (seq_.frame_id_numbers_present_flag) r.f(id_len); // display_frame_id
 
       const auto& slot = ref_slots_[h.frame_to_show_map_idx];
@@ -755,8 +755,10 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
       ti.tile_cols = i;
       ti.tile_cols_log2 = tileLog2(1, ti.tile_cols);
 
-      if (min_log2_tiles > 0) max_tile_area_sb = (sb_rows * sb_cols) >> (min_log2_tiles + 1);
-      else max_tile_area_sb = sb_rows * sb_cols;
+      if (min_log2_tiles > 0)
+        max_tile_area_sb = (sb_rows * sb_cols) >> (min_log2_tiles + 1);
+      else
+        max_tile_area_sb = sb_rows * sb_cols;
       const uint32_t max_tile_height_sb =
           std::max(widest_tile_sb ? max_tile_area_sb / widest_tile_sb : 1u, 1u);
 

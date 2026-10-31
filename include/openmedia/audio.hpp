@@ -6,12 +6,12 @@
 #include <openmedia/buffer.hpp>
 
 OM_ENUM(OMSampleFormat, uint8_t) {
-  OM_SAMPLE_UNKNOWN = 0,
-  OM_SAMPLE_U8,
-  OM_SAMPLE_S16,
-  OM_SAMPLE_S32,
-  OM_SAMPLE_F32,
-  OM_SAMPLE_F64,
+    OM_SAMPLE_UNKNOWN = 0,
+    OM_SAMPLE_U8,
+    OM_SAMPLE_S16,
+    OM_SAMPLE_S32,
+    OM_SAMPLE_F32,
+    OM_SAMPLE_F64,
 };
 
 namespace openmedia {

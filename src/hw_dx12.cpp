@@ -252,7 +252,7 @@ void HWD3D12Picture_delete(OMDX12Picture* picture) {
     }
     free(picture->reference_frames.ppTexture2Ds);
   }
-  if (picture->reference_frames.pSubresources) free((void*)picture->reference_frames.pSubresources);
+  if (picture->reference_frames.pSubresources) free((void*) picture->reference_frames.pSubresources);
   picture->~OMDX12Picture();
   free(picture);
 }

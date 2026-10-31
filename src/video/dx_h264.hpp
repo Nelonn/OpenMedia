@@ -600,16 +600,18 @@ inline void fillQMatrix(const h264::SPS& sps, const h264::PPS& pps, DXVA_Qmatrix
   }
   static constexpr int z4[] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
   static constexpr int z8[] = {
-      0, 1, 8,16, 9, 2, 3,10, 17,24,32,25,18,11, 4, 5,
-      12,19,26,33,40,48,41,34, 27,20,13, 6, 7,14,21,28,
-      35,42,49,56,57,50,43,36, 29,22,15,23,30,37,44,51,
-      58,59,52,45,38,31,39,46, 53,60,61,54,47,55,62,63};
-  for (int i = 0; i < 6; ++i) for (int j = 0; j < 16; ++j) {
-    qmatrix.bScalingLists4x4[i][j] = static_cast<UCHAR>(pps.ScalingList4x4[i][z4[j]]);
-  }
-  for (int i = 0; i < 2; ++i) for (int j = 0; j < 64; ++j) {
-    qmatrix.bScalingLists8x8[i][j] = static_cast<UCHAR>(pps.ScalingList8x8[i][z8[j]]);
-  }
+      0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+      12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+      35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+      58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
+  for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 16; ++j) {
+      qmatrix.bScalingLists4x4[i][j] = static_cast<UCHAR>(pps.ScalingList4x4[i][z4[j]]);
+    }
+  for (int i = 0; i < 2; ++i)
+    for (int j = 0; j < 64; ++j) {
+      qmatrix.bScalingLists8x8[i][j] = static_cast<UCHAR>(pps.ScalingList8x8[i][z8[j]]);
+    }
 }
 
 inline void fillPicParams(const h264::SPS& sps,

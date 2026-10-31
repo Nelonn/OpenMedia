@@ -223,13 +223,13 @@ public:
 };
 
 const CodecDescriptor CODEC_TGA = {
-  .codec_id = OM_CODEC_TGA,
-  .type = OM_MEDIA_IMAGE,
-  .name = "tga",
-  .long_name = "TGA image decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<TGADecoder>(); },
+    .codec_id = OM_CODEC_TGA,
+    .type = OM_MEDIA_IMAGE,
+    .name = "tga",
+    .long_name = "TGA image decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<TGADecoder>(); },
 };
 
 } // namespace openmedia

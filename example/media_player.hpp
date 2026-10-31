@@ -103,7 +103,7 @@ inline auto hostFrame(const Picture& pic) -> VideoFrame {
 
 // Feeds `packets` through `decoder` and hands each decoded frame to `on_frame`
 // until the stream ends (returns true) or the pipeline stops (returns false).
-template <typename OnFrame>
+template<typename OnFrame>
 auto decodeStream(Decoder& decoder, PacketQueue& packets, std::stop_token stop,
                   const char* what, OnFrame&& on_frame) -> bool {
   // false: the consumer is gone, stop decoding.

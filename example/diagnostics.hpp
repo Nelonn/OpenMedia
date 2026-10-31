@@ -161,7 +161,7 @@ inline auto mediaTypeName(OMMediaType type) -> const char* {
 // logging both shows whether HDR metadata survived. Logs only on change.
 class ColorReporter {
 public:
-  template <typename Desc> // VideoFormat or Picture: same field names
+  template<typename Desc> // VideoFormat or Picture: same field names
   void report(const char* source, const Desc& d) {
     const uint64_t key = (uint64_t(d.color_space) << 40) | (uint64_t(d.transfer_char) << 32) |
                          (uint64_t(d.color_primaries) << 24) | (uint64_t(d.color_range) << 16) |

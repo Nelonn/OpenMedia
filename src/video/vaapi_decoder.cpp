@@ -41,9 +41,70 @@ constexpr size_t kHardwareOutputSlack = 8;
 // in coded order, VA-API wants them in raster order.
 constexpr uint8_t kZigzag4x4[16] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
 constexpr uint8_t kZigzag8x8[64] = {
-    0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,  12, 19, 26, 33, 40, 48,
-    41, 34, 27, 20, 13, 6,  7,  14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23,
-    30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    0,
+    1,
+    8,
+    16,
+    9,
+    2,
+    3,
+    10,
+    17,
+    24,
+    32,
+    25,
+    18,
+    11,
+    4,
+    5,
+    12,
+    19,
+    26,
+    33,
+    40,
+    48,
+    41,
+    34,
+    27,
+    20,
+    13,
+    6,
+    7,
+    14,
+    21,
+    28,
+    35,
+    42,
+    49,
+    56,
+    57,
+    50,
+    43,
+    36,
+    29,
+    22,
+    15,
+    23,
+    30,
+    37,
+    44,
+    51,
+    58,
+    59,
+    52,
+    45,
+    38,
+    31,
+    39,
+    46,
+    53,
+    60,
+    61,
+    54,
+    47,
+    55,
+    62,
+    63,
 };
 
 auto profileName(VAProfile profile) -> std::string_view {
@@ -748,7 +809,7 @@ private:
     pic.CurrPic.flags = 0;
     if (is_reference) {
       pic.CurrPic.flags = (is_idr && head.long_term_reference_flag) ? VA_PICTURE_H264_LONG_TERM_REFERENCE
-                                                                      : VA_PICTURE_H264_SHORT_TERM_REFERENCE;
+                                                                    : VA_PICTURE_H264_SHORT_TERM_REFERENCE;
     }
     pic.CurrPic.TopFieldOrderCnt = order.top;
     pic.CurrPic.BottomFieldOrderCnt = order.bottom;
@@ -880,7 +941,7 @@ private:
     // num_ref_idx_active may exceed what exists early on; only a modification naming a missing
     // picture means a reference was lost.
     const auto& refs = h264_dpb_.pictures();
-    const auto fill = [&](const h264_dpb::RefList& list, VAPictureH264 (&into)[32]) {
+    const auto fill = [&](const h264_dpb::RefList& list, VAPictureH264(&into)[32]) {
       for (size_t i = 0; i < list.size() && i < 32; ++i) {
         if (list[i] >= 0) into[i] = vaH264Picture(refs[static_cast<size_t>(list[i])]);
       }

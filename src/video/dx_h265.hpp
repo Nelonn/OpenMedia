@@ -77,7 +77,10 @@ inline auto activeStRefPicSet(const Sps& sps, const SliceHeader& sh) -> const St
 
 // `foll` is a picture this one may not predict from but a later one still can;
 // it is in the set only so that it is not thrown away.
-enum class RefList : uint8_t { st_curr_before, st_curr_after, lt_curr, foll };
+enum class RefList : uint8_t { st_curr_before,
+                               st_curr_after,
+                               lt_curr,
+                               foll };
 
 struct WantedPicture {
   int32_t poc = 0;

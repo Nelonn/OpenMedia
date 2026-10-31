@@ -31,4 +31,4 @@ extern const FormatDescriptor FORMAT_DDS;
 extern const FormatDescriptor FORMAT_HDR;
 extern const FormatDescriptor FORMAT_DNG;
 
-}
+} // namespace openmedia

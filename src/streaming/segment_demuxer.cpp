@@ -530,7 +530,7 @@ public:
   }
 
   auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
-    (void)mode; // segment granularity is all a manifest offers; see below
+    (void) mode; // segment granularity is all a manifest offers; see below
     if (streams_.empty()) return OM_COMMON_NOT_INITIALIZED;
     if (timestamp < 0) return OM_COMMON_INVALID_ARGUMENT;
     if (stream_idx >= static_cast<int32_t>(tracks_.size())) return OM_FORMAT_STREAM_NOT_FOUND;
@@ -599,10 +599,10 @@ private:
     // Only when on offer: dropping every audio track because none is French leaves silence.
     for (const OMMediaType type : {OM_MEDIA_AUDIO, OM_MEDIA_SUBTITLE}) {
       const bool offered = std::any_of(chosen.begin(), chosen.end(),
-                                      [&](const SegmentTrack* track) {
-                                        return track->type == type &&
-                                               sameLanguage(track->language, options_.language);
-                                      });
+                                       [&](const SegmentTrack* track) {
+                                         return track->type == type &&
+                                                sameLanguage(track->language, options_.language);
+                                       });
       if (!offered) continue;
       chosen.erase(std::remove_if(chosen.begin(), chosen.end(),
                                   [&](const SegmentTrack* track) {

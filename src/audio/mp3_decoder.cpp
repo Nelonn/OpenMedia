@@ -73,13 +73,13 @@ public:
 };
 
 const CodecDescriptor CODEC_MP3 = {
-  .codec_id = OM_CODEC_MP3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "mp3",
-  .long_name = "MP3",
-  .vendor = "minimp3",
-  .flags = NONE,
-  .decoder_factory = []{ return std::make_unique<MP3Decoder>(); },
+    .codec_id = OM_CODEC_MP3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "mp3",
+    .long_name = "MP3",
+    .vendor = "minimp3",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<MP3Decoder>(); },
 };
 
 } // namespace openmedia

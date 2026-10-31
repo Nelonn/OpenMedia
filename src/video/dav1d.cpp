@@ -40,9 +40,7 @@ class Dav1dDecoder final : public Decoder {
   static auto wrapPacket(const Packet& packet, Dav1dData& data) -> int {
     if (packet.buffer) {
       auto* ref = new std::shared_ptr<Buffer>(packet.buffer);
-      int res = dav1d_data_wrap(&data, packet.bytes.data(), packet.bytes.size(),
-                                [](const uint8_t*, void* cookie) { delete static_cast<std::shared_ptr<Buffer>*>(cookie); },
-                                ref);
+      int res = dav1d_data_wrap(&data, packet.bytes.data(), packet.bytes.size(), [](const uint8_t*, void* cookie) { delete static_cast<std::shared_ptr<Buffer>*>(cookie); }, ref);
       if (res < 0) delete ref;
       return res;
     }
@@ -59,11 +57,14 @@ class Dav1dDecoder final : public Decoder {
     switch (layout) {
       case DAV1D_PIXEL_LAYOUT_I400: return deep ? OM_FORMAT_GRAY16 : OM_FORMAT_GRAY8;
       case DAV1D_PIXEL_LAYOUT_I420:
-        return !deep ? OM_FORMAT_YUV420P : bpc <= 10 ? OM_FORMAT_YUV420P10 : OM_FORMAT_YUV420P12;
+        return !deep ? OM_FORMAT_YUV420P : bpc <= 10 ? OM_FORMAT_YUV420P10
+                                                     : OM_FORMAT_YUV420P12;
       case DAV1D_PIXEL_LAYOUT_I422:
-        return !deep ? OM_FORMAT_YUV422P : bpc <= 10 ? OM_FORMAT_YUV422P10 : OM_FORMAT_YUV422P12;
+        return !deep ? OM_FORMAT_YUV422P : bpc <= 10 ? OM_FORMAT_YUV422P10
+                                                     : OM_FORMAT_YUV422P12;
       case DAV1D_PIXEL_LAYOUT_I444:
-        return !deep ? OM_FORMAT_YUV444P : bpc <= 10 ? OM_FORMAT_YUV444P10 : OM_FORMAT_YUV444P12;
+        return !deep ? OM_FORMAT_YUV444P : bpc <= 10 ? OM_FORMAT_YUV444P10
+                                                     : OM_FORMAT_YUV444P12;
     }
     return OM_FORMAT_UNKNOWN;
   }

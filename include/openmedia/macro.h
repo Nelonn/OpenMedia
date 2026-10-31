@@ -17,5 +17,5 @@
 #endif
 
 #define OM_ENUM(name, type) \
-  typedef type name;               \
+  typedef type name;        \
   enum name##_

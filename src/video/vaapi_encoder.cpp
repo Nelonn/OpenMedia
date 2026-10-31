@@ -135,14 +135,31 @@ struct StreamShape {
 
 // Table A-1 (MaxMBPS, MaxFS, MaxBR in kbit/s).
 auto guessH264Level(const StreamShape& s) -> uint8_t {
-  struct Level { uint8_t idc; uint32_t mbps; uint32_t fs; uint32_t br; };
+  struct Level {
+    uint8_t idc;
+    uint32_t mbps;
+    uint32_t fs;
+    uint32_t br;
+  };
   static constexpr Level kLevels[] = {
-      {10, 1485, 99, 64},          {11, 3000, 396, 192},        {12, 6000, 396, 384},
-      {13, 11880, 396, 768},       {20, 11880, 396, 2000},      {21, 19800, 792, 4000},
-      {22, 20250, 1620, 4000},     {30, 40500, 1620, 10000},    {31, 108000, 3600, 14000},
-      {32, 216000, 5120, 20000},   {40, 245760, 8192, 20000},   {41, 245760, 8192, 50000},
-      {42, 522240, 8704, 50000},   {50, 589824, 22080, 135000}, {51, 983040, 36864, 240000},
-      {52, 2073600, 36864, 240000}, {60, 4177920, 139264, 240000}, {61, 8355840, 139264, 480000},
+      {10, 1485, 99, 64},
+      {11, 3000, 396, 192},
+      {12, 6000, 396, 384},
+      {13, 11880, 396, 768},
+      {20, 11880, 396, 2000},
+      {21, 19800, 792, 4000},
+      {22, 20250, 1620, 4000},
+      {30, 40500, 1620, 10000},
+      {31, 108000, 3600, 14000},
+      {32, 216000, 5120, 20000},
+      {40, 245760, 8192, 20000},
+      {41, 245760, 8192, 50000},
+      {42, 522240, 8704, 50000},
+      {50, 589824, 22080, 135000},
+      {51, 983040, 36864, 240000},
+      {52, 2073600, 36864, 240000},
+      {60, 4177920, 139264, 240000},
+      {61, 8355840, 139264, 480000},
       {62, 16711680, 139264, 800000},
   };
   const uint64_t w = (s.width + 15) / 16;
@@ -161,14 +178,25 @@ auto guessH264Level(const StreamShape& s) -> uint8_t {
 // Table A.8 (MaxLumaPs, MaxLumaSr, main tier MaxBR in kbit/s); level_idc is
 // 30 times the level number.
 auto guessH265Level(const StreamShape& s) -> uint8_t {
-  struct Level { uint8_t idc; uint64_t ps; uint64_t sr; uint64_t br; };
+  struct Level {
+    uint8_t idc;
+    uint64_t ps;
+    uint64_t sr;
+    uint64_t br;
+  };
   static constexpr Level kLevels[] = {
-      {30, 36864, 552960, 128},           {60, 122880, 3686400, 1500},
-      {63, 245760, 7372800, 3000},        {90, 552960, 16588800, 6000},
-      {93, 983040, 33177600, 10000},      {120, 2228224, 66846720, 12000},
-      {123, 2228224, 133693440, 20000},   {150, 8912896, 267386880, 25000},
-      {153, 8912896, 534773760, 40000},   {156, 8912896, 1069547520, 60000},
-      {180, 35651584, 1069547520, 60000}, {183, 35651584, 2139095040, 120000},
+      {30, 36864, 552960, 128},
+      {60, 122880, 3686400, 1500},
+      {63, 245760, 7372800, 3000},
+      {90, 552960, 16588800, 6000},
+      {93, 983040, 33177600, 10000},
+      {120, 2228224, 66846720, 12000},
+      {123, 2228224, 133693440, 20000},
+      {150, 8912896, 267386880, 25000},
+      {153, 8912896, 534773760, 40000},
+      {156, 8912896, 1069547520, 60000},
+      {180, 35651584, 1069547520, 60000},
+      {183, 35651584, 2139095040, 120000},
       {186, 35651584, 4278190080, 240000},
   };
   const uint64_t ps = static_cast<uint64_t>(s.width) * s.height;
@@ -186,14 +214,27 @@ auto guessH265Level(const StreamShape& s) -> uint8_t {
 // Annex A.3 (seq_level_idx, MaxPicSize, MaxHSize, MaxVSize, MaxDisplayRate,
 // main tier MaxBitrate in Mbit/s).
 auto guessAV1Level(const StreamShape& s) -> uint8_t {
-  struct Level { uint8_t idx; uint64_t pic; uint32_t hsize; uint32_t vsize; uint64_t rate; double mbps; };
+  struct Level {
+    uint8_t idx;
+    uint64_t pic;
+    uint32_t hsize;
+    uint32_t vsize;
+    uint64_t rate;
+    double mbps;
+  };
   static constexpr Level kLevels[] = {
-      {0, 147456, 2048, 1152, 4423680, 1.5},          {1, 278784, 2816, 1584, 8363520, 3.0},
-      {4, 665856, 4352, 2448, 19975680, 6.0},         {5, 1065024, 5504, 3096, 31950720, 10.0},
-      {8, 2359296, 6144, 3456, 70778880, 12.0},       {9, 2359296, 6144, 3456, 141557760, 20.0},
-      {12, 8912896, 8192, 4352, 267386880, 30.0},     {13, 8912896, 8192, 4352, 534773760, 40.0},
-      {14, 8912896, 8192, 4352, 1069547520, 60.0},    {16, 35651584, 16384, 8704, 1069547520, 60.0},
-      {17, 35651584, 16384, 8704, 2139095040, 100.0}, {18, 35651584, 16384, 8704, 4278190080, 160.0},
+      {0, 147456, 2048, 1152, 4423680, 1.5},
+      {1, 278784, 2816, 1584, 8363520, 3.0},
+      {4, 665856, 4352, 2448, 19975680, 6.0},
+      {5, 1065024, 5504, 3096, 31950720, 10.0},
+      {8, 2359296, 6144, 3456, 70778880, 12.0},
+      {9, 2359296, 6144, 3456, 141557760, 20.0},
+      {12, 8912896, 8192, 4352, 267386880, 30.0},
+      {13, 8912896, 8192, 4352, 534773760, 40.0},
+      {14, 8912896, 8192, 4352, 1069547520, 60.0},
+      {16, 35651584, 16384, 8704, 1069547520, 60.0},
+      {17, 35651584, 16384, 8704, 2139095040, 100.0},
+      {18, 35651584, 16384, 8704, 4278190080, 160.0},
   };
   const uint64_t pic = static_cast<uint64_t>(s.width) * s.height;
   const double rate = static_cast<double>(pic) * s.fps;
@@ -234,7 +275,7 @@ struct H264Headers {
   uint8_t level_idc = 40;
   uint32_t width_mbs = 0;
   uint32_t height_mbs = 0;
-  uint32_t crop_right = 0;  // in chroma sample pairs, as frame_crop_*_offset
+  uint32_t crop_right = 0; // in chroma sample pairs, as frame_crop_*_offset
   uint32_t crop_bottom = 0;
   uint32_t bit_depth = 8;
   uint32_t max_num_ref_frames = 1;
@@ -276,7 +317,7 @@ struct H264Headers {
     w.bit(crop);
     if (crop) w.ue(0).ue(crop_right).ue(0).ue(crop_bottom);
 
-    w.bit(true); // vui_parameters_present_flag
+    w.bit(true);  // vui_parameters_present_flag
     w.bit(false); // aspect_ratio_info_present_flag
     w.bit(false); // overscan_info_present_flag
     const bool signal = colour.described() || colour.range_known;
@@ -290,12 +331,12 @@ struct H264Headers {
     w.bit(false); // chroma_loc_info_present_flag
     w.bit(true);  // timing_info_present_flag
     w.bits(timing.den, 32).bits(2 * timing.num, 32);
-    w.bit(true); // fixed_frame_rate_flag
-    w.bit(false); // nal_hrd_parameters_present_flag
-    w.bit(false); // vcl_hrd_parameters_present_flag
-    w.bit(false); // pic_struct_present_flag
-    w.bit(true);  // bitstream_restriction_flag
-    w.bit(true);  // motion_vectors_over_pic_boundaries_flag
+    w.bit(true);                 // fixed_frame_rate_flag
+    w.bit(false);                // nal_hrd_parameters_present_flag
+    w.bit(false);                // vcl_hrd_parameters_present_flag
+    w.bit(false);                // pic_struct_present_flag
+    w.bit(true);                 // bitstream_restriction_flag
+    w.bit(true);                 // motion_vectors_over_pic_boundaries_flag
     w.ue(0).ue(0).ue(15).ue(15); // max_bytes_per_pic_denom .. log2_max_mv_length_vertical
     w.ue(0);                     // max_num_reorder_frames
     w.ue(max_num_ref_frames);    // max_dec_frame_buffering
@@ -309,15 +350,15 @@ struct H264Headers {
     w.bits(0, 1).bits(3, 2).bits(8, 5); // PPS
     w.ue(0).ue(0);
     w.bit(cabac);
-    w.bit(false); // bottom_field_pic_order_in_frame_present_flag
-    w.ue(0);      // num_slice_groups_minus1
-    w.ue(0).ue(0); // num_ref_idx_l0/l1_default_active_minus1
+    w.bit(false);            // bottom_field_pic_order_in_frame_present_flag
+    w.ue(0);                 // num_slice_groups_minus1
+    w.ue(0).ue(0);           // num_ref_idx_l0/l1_default_active_minus1
     w.bit(false).bits(0, 2); // weighted_pred_flag, weighted_bipred_idc
     w.se(init_qp - 26);
     w.se(0).se(0); // pic_init_qs_minus26, chroma_qp_index_offset
-    w.bit(false); // deblocking_filter_control_present_flag
-    w.bit(false); // constrained_intra_pred_flag
-    w.bit(false); // redundant_pic_cnt_present_flag
+    w.bit(false);  // deblocking_filter_control_present_flag
+    w.bit(false);  // constrained_intra_pred_flag
+    w.bit(false);  // redundant_pic_cnt_present_flag
     if (highProfile()) {
       w.bit(transform_8x8);
       w.bit(false); // pic_scaling_matrix_present_flag
@@ -333,9 +374,9 @@ struct H264Headers {
     HeaderWriter h;
     auto& w = h.w();
     w.bits(0, 1).bits(idr ? 3 : 2, 2).bits(idr ? 5 : 1, 5);
-    w.ue(0);            // first_mb_in_slice
-    w.ue(idr ? 7 : 5);  // slice_type: all I / all P
-    w.ue(0);            // pic_parameter_set_id
+    w.ue(0);           // first_mb_in_slice
+    w.ue(idr ? 7 : 5); // slice_type: all I / all P
+    w.ue(0);           // pic_parameter_set_id
     w.bits(frame_num & ((1u << (kLog2MaxFrameNumMinus4 + 4)) - 1), kLog2MaxFrameNumMinus4 + 4);
     if (idr) w.ue(idr_pic_id);
     if (!idr) {
@@ -343,8 +384,10 @@ struct H264Headers {
       w.bit(false); // ref_pic_list_modification_flag_l0
     }
     // dec_ref_pic_marking(): the sliding window does all there is to do.
-    if (idr) w.bit(false).bit(false);
-    else w.bit(false);
+    if (idr)
+      w.bit(false).bit(false);
+    else
+      w.bit(false);
     if (cabac && !idr) w.ue(0); // cabac_init_idc
     w.se(slice_qp_delta);
     return annexB(std::move(h).finish());
@@ -356,7 +399,7 @@ struct H264Headers {
 struct H265Headers {
   uint8_t profile_idc = 1;
   uint8_t level_idc = 120;
-  uint32_t width = 0;  // pic_width_in_luma_samples
+  uint32_t width = 0; // pic_width_in_luma_samples
   uint32_t height = 0;
   uint32_t crop_right = 0; // conformance window, chroma units
   uint32_t crop_bottom = 0;
@@ -385,18 +428,18 @@ struct H265Headers {
   }
 
   void profileTierLevel(BitWriter& w) const {
-    w.bits(0, 2);    // general_profile_space
-    w.bit(false);    // general_tier_flag
+    w.bits(0, 2); // general_profile_space
+    w.bit(false); // general_tier_flag
     w.bits(profile_idc, 5);
     for (uint32_t j = 0; j < 32; ++j) {
       // Main 10 decoders take Main streams too, and say so.
       const bool compatible = j == profile_idc || (profile_idc == 1 && j == 2);
       w.bit(compatible);
     }
-    w.bit(true);  // general_progressive_source_flag
-    w.bit(false); // general_interlaced_source_flag
-    w.bit(true);  // general_non_packed_constraint_flag
-    w.bit(true);  // general_frame_only_constraint_flag
+    w.bit(true);               // general_progressive_source_flag
+    w.bit(false);              // general_interlaced_source_flag
+    w.bit(true);               // general_non_packed_constraint_flag
+    w.bit(true);               // general_frame_only_constraint_flag
     w.bits(0, 32).bits(0, 11); // general_reserved_zero_43bits
     w.bit(false);              // general_inbld_flag
     w.bits(level_idc, 8);
@@ -412,11 +455,11 @@ struct H265Headers {
     HeaderWriter h;
     auto& w = h.w();
     nalHeader(w, 32);
-    w.bits(0, 4);           // vps_video_parameter_set_id
-    w.bit(true).bit(true);  // base layer internal / available
-    w.bits(0, 6);           // vps_max_layers_minus1
-    w.bits(0, 3);           // vps_max_sub_layers_minus1
-    w.bit(true);            // vps_temporal_id_nesting_flag
+    w.bits(0, 4);          // vps_video_parameter_set_id
+    w.bit(true).bit(true); // base layer internal / available
+    w.bits(0, 6);          // vps_max_layers_minus1
+    w.bits(0, 3);          // vps_max_sub_layers_minus1
+    w.bit(true);           // vps_temporal_id_nesting_flag
     w.bits(0xffff, 16);
     profileTierLevel(w);
     w.bit(false); // vps_sub_layer_ordering_info_present_flag
@@ -507,19 +550,19 @@ struct H265Headers {
     w.bit(transform_skip);
     w.bit(cu_qp_delta);
     if (cu_qp_delta) w.ue(diff_cu_qp_delta_depth);
-    w.se(0).se(0); // pps_cb_qp_offset, pps_cr_qp_offset
-    w.bit(false);  // pps_slice_chroma_qp_offsets_present_flag
+    w.se(0).se(0);           // pps_cb_qp_offset, pps_cr_qp_offset
+    w.bit(false);            // pps_slice_chroma_qp_offsets_present_flag
     w.bit(false).bit(false); // weighted_pred_flag, weighted_bipred_flag
-    w.bit(false);  // transquant_bypass_enabled_flag
-    w.bit(false);  // tiles_enabled_flag
-    w.bit(false);  // entropy_coding_sync_enabled_flag
-    w.bit(true);   // pps_loop_filter_across_slices_enabled_flag
-    w.bit(false);  // deblocking_filter_control_present_flag
-    w.bit(false);  // pps_scaling_list_data_present_flag
-    w.bit(false);  // lists_modification_present_flag
-    w.ue(0);       // log2_parallel_merge_level_minus2
-    w.bit(false);  // slice_segment_header_extension_present_flag
-    w.bit(false);  // pps_extension_present_flag
+    w.bit(false);            // transquant_bypass_enabled_flag
+    w.bit(false);            // tiles_enabled_flag
+    w.bit(false);            // entropy_coding_sync_enabled_flag
+    w.bit(true);             // pps_loop_filter_across_slices_enabled_flag
+    w.bit(false);            // deblocking_filter_control_present_flag
+    w.bit(false);            // pps_scaling_list_data_present_flag
+    w.bit(false);            // lists_modification_present_flag
+    w.ue(0);                 // log2_parallel_merge_level_minus2
+    w.bit(false);            // slice_segment_header_extension_present_flag
+    w.bit(false);            // pps_extension_present_flag
     h.trailing();
     return annexB(std::move(h).finish());
   }
@@ -531,24 +574,24 @@ struct H265Headers {
     auto& w = h.w();
     const uint32_t nal_type = idr ? 19 /* IDR_W_RADL */ : 1 /* TRAIL_R */;
     nalHeader(w, nal_type);
-    w.bit(true); // first_slice_segment_in_pic_flag
+    w.bit(true);           // first_slice_segment_in_pic_flag
     if (idr) w.bit(false); // no_output_of_prior_pics_flag
-    w.ue(0);     // slice_pic_parameter_set_id
+    w.ue(0);               // slice_pic_parameter_set_id
     w.ue(static_cast<uint32_t>(slice_type));
     if (!idr) {
       w.bits(poc & ((1u << (kLog2MaxPocLsbMinus4 + 4)) - 1), kLog2MaxPocLsbMinus4 + 4);
       w.bit(false); // short_term_ref_pic_set_sps_flag
       // st_ref_pic_set(0): the previous picture, one before this one.
-      w.ue(1).ue(0);          // num_negative_pics, num_positive_pics
-      w.ue(0).bit(true);      // delta_poc_s0_minus1, used_by_curr_pic_s0_flag
+      w.ue(1).ue(0);                 // num_negative_pics, num_positive_pics
+      w.ue(0).bit(true);             // delta_poc_s0_minus1, used_by_curr_pic_s0_flag
       if (temporal_mvp) w.bit(true); // slice_temporal_mvp_enabled_flag
     }
     if (sao) w.bit(true).bit(true); // slice_sao_luma_flag, slice_sao_chroma_flag
     if (slice_type != 2) {
-      w.bit(false); // num_ref_idx_active_override_flag
-      if (slice_type == 0) w.bit(false); // mvd_l1_zero_flag
+      w.bit(false);                                     // num_ref_idx_active_override_flag
+      if (slice_type == 0) w.bit(false);                // mvd_l1_zero_flag
       if (temporal_mvp && slice_type == 0) w.bit(true); // collocated_from_l0_flag
-      w.ue(0);      // five_minus_max_num_merge_cand
+      w.ue(0);                                          // five_minus_max_num_merge_cand
     }
     w.se(slice_qp_delta);
     // pps_loop_filter_across_slices_enabled_flag is set and the deblocking
@@ -697,9 +740,11 @@ struct AV1Headers {
     w.bits(level_idx, 5);
     if (level_idx > 7) w.bit(false); // seq_tier[0]
     const uint32_t width_bits = static_cast<uint32_t>(std::bit_width(width - 1)) > 0
-                                    ? static_cast<uint32_t>(std::bit_width(width - 1)) : 1u;
+                                    ? static_cast<uint32_t>(std::bit_width(width - 1))
+                                    : 1u;
     const uint32_t height_bits = static_cast<uint32_t>(std::bit_width(height - 1)) > 0
-                                     ? static_cast<uint32_t>(std::bit_width(height - 1)) : 1u;
+                                     ? static_cast<uint32_t>(std::bit_width(height - 1))
+                                     : 1u;
     w.bits(width_bits - 1, 4).bits(height_bits - 1, 4);
     w.bits(width - 1, width_bits).bits(height - 1, height_bits);
     w.bit(false); // frame_id_numbers_present_flag
@@ -738,17 +783,17 @@ struct AV1Headers {
     HeaderWriter h;
     auto& w = h.w();
     const size_t base = 8u * (1u + obu_size_bytes);
-    w.bit(false);                  // show_existing_frame
-    w.bits(key ? 0 : 1, 2);        // frame_type
-    w.bit(true);                   // show_frame
-    if (!key) w.bit(false);        // error_resilient_mode (implied for shown key frames)
-    w.bit(false);                  // disable_cdf_update
-    w.bit(false);                  // frame_size_override_flag
+    w.bit(false);           // show_existing_frame
+    w.bits(key ? 0 : 1, 2); // frame_type
+    w.bit(true);            // show_frame
+    if (!key) w.bit(false); // error_resilient_mode (implied for shown key frames)
+    w.bit(false);           // disable_cdf_update
+    w.bit(false);           // frame_size_override_flag
     w.bits(order_hint & ((1u << kOrderHintBits) - 1), kOrderHintBits);
-    if (!key) w.bits(0, 3);        // primary_ref_frame: slot 0 through LAST
-    if (!key) w.bits(0x01, 8);     // refresh_frame_flags
+    if (!key) w.bits(0, 3);    // primary_ref_frame: slot 0 through LAST
+    if (!key) w.bits(0x01, 8); // refresh_frame_flags
     if (!key) {
-      w.bit(false); // frame_refs_short_signaling
+      w.bit(false);                             // frame_refs_short_signaling
       for (int i = 0; i < 7; ++i) w.bits(0, 3); // ref_frame_idx: all slot 0
     }
     w.bit(false); // render_and_frame_size_different_flag
@@ -761,7 +806,7 @@ struct AV1Headers {
     w.bit(false); // disable_frame_end_update_cdf
 
     // tile_info()
-    w.bit(true); // uniform_tile_spacing_flag
+    w.bit(true);                                                 // uniform_tile_spacing_flag
     if (tiles.min_log2_cols < tiles.max_log2_cols) w.bit(false); // cols_log2 stays at the minimum
     if (tiles.min_log2_rows < tiles.max_log2_rows) w.bit(false);
     if (tiles.cols_log2 > 0 || tiles.rows_log2 > 0) {
@@ -772,18 +817,18 @@ struct AV1Headers {
     // quantization_params()
     layout.qindex = static_cast<uint32_t>(base + h.position());
     w.bits(base_q_idx, 8);
-    w.bit(false);             // DeltaQYDc coded
-    w.bit(false).bit(false);  // DeltaQUDc, DeltaQUAc coded
-    w.bit(false);             // using_qmatrix
-    w.bit(false);             // segmentation_enabled
+    w.bit(false);                     // DeltaQYDc coded
+    w.bit(false).bit(false);          // DeltaQUDc, DeltaQUAc coded
+    w.bit(false);                     // using_qmatrix
+    w.bit(false);                     // segmentation_enabled
     if (base_q_idx > 0) w.bit(false); // delta_q_present
 
     // loop_filter_params(); the driver rewrites it when it controls rate.
     layout.loop_filter = static_cast<uint32_t>(base + h.position());
     w.bits(filters.level[0], 6).bits(filters.level[1], 6);
     if (filters.level[0] || filters.level[1]) w.bits(filters.level[2], 6).bits(filters.level[3], 6);
-    w.bits(0, 3);  // loop_filter_sharpness
-    w.bit(false);  // loop_filter_delta_enabled
+    w.bits(0, 3); // loop_filter_sharpness
+    w.bit(false); // loop_filter_delta_enabled
 
     if (enable_cdef) {
       layout.cdef = static_cast<uint32_t>(base + h.position());
@@ -796,7 +841,7 @@ struct AV1Headers {
       layout.cdef_size = static_cast<uint32_t>(base + h.position()) - layout.cdef;
     }
 
-    w.bit(tx_mode_select); // tx_mode_select
+    w.bit(tx_mode_select);  // tx_mode_select
     if (!key) w.bit(false); // reference_select
     w.bit(false);           // reduced_tx_set
     if (!key) {
@@ -902,8 +947,8 @@ struct RateControl {
   uint32_t va_mode = VA_RC_CQP;
   uint32_t bits_per_second = 0; // peak for VBR
   uint32_t target_percentage = 100;
-  uint32_t quality = 0;         // ICQ / QVBR quality factor
-  int qp_i = 26;                // CQP, codec-native scale
+  uint32_t quality = 0; // ICQ / QVBR quality factor
+  int qp_i = 26;        // CQP, codec-native scale
   int qp_p = 28;
   uint32_t min_qp = 0;
   uint32_t max_qp = 0;
@@ -2378,7 +2423,7 @@ private:
   VABufferID coded_buffers_[2] = {VA_INVALID_ID, VA_INVALID_ID};
   VABufferID coded_buffer_ = VA_INVALID_ID; // where the picture being built writes to
   size_t coded_buffer_size_ = 0;
-  int next_slot_ = 0;                       // input surface / coded buffer of the next picture
+  int next_slot_ = 0; // input surface / coded buffer of the next picture
   std::optional<InFlight> in_flight_;
   // Packets collected on a call that went on to fail, handed out by the next.
   std::vector<Packet> pending_;

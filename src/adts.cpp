@@ -22,13 +22,11 @@ constexpr size_t MAX_ID3_SIZE = 1u << 20;
 auto id3Size(std::span<const uint8_t> bytes) -> size_t {
   if (bytes.size() < 10 || std::memcmp(bytes.data(), "ID3", 3) != 0) return 0;
   if ((bytes[6] | bytes[7] | bytes[8] | bytes[9]) & 0x80) return 0;
-  return 10 + (static_cast<size_t>(bytes[6]) << 21) + (static_cast<size_t>(bytes[7]) << 14)
-            + (static_cast<size_t>(bytes[8]) << 7) + bytes[9] + ((bytes[5] & 0x10) ? 10 : 0);
+  return 10 + (static_cast<size_t>(bytes[6]) << 21) + (static_cast<size_t>(bytes[7]) << 14) + (static_cast<size_t>(bytes[8]) << 7) + bytes[9] + ((bytes[5] & 0x10) ? 10 : 0);
 }
 
 auto adtsHeader(std::span<const uint8_t> bytes) -> bool {
-  return bytes.size() >= 7 && bytes[0] == 0xFF && (bytes[1] & 0xF6) == 0xF0
-         && ((bytes[2] >> 2) & 0x0F) < std::size(SAMPLE_RATES);
+  return bytes.size() >= 7 && bytes[0] == 0xFF && (bytes[1] & 0xF6) == 0xF0 && ((bytes[2] >> 2) & 0x0F) < std::size(SAMPLE_RATES);
 }
 
 auto readTimestamp(std::span<const uint8_t> tag) -> std::optional<uint64_t> {
@@ -39,18 +37,12 @@ auto readTimestamp(std::span<const uint8_t> tag) -> std::optional<uint64_t> {
   const size_t end = std::min(tag.size(), id3Size(tag));
   while (at + 10 <= end && tag[at] != 0) {
     size_t size = version == 4
-                      ? (static_cast<size_t>(tag[at + 4] & 0x7F) << 21)
-                            | (static_cast<size_t>(tag[at + 5] & 0x7F) << 14)
-                            | (static_cast<size_t>(tag[at + 6] & 0x7F) << 7)
-                            | (tag[at + 7] & 0x7F)
-                      : (static_cast<size_t>(tag[at + 4]) << 24)
-                            | (static_cast<size_t>(tag[at + 5]) << 16)
-                            | (static_cast<size_t>(tag[at + 6]) << 8) | tag[at + 7];
+                      ? (static_cast<size_t>(tag[at + 4] & 0x7F) << 21) | (static_cast<size_t>(tag[at + 5] & 0x7F) << 14) | (static_cast<size_t>(tag[at + 6] & 0x7F) << 7) | (tag[at + 7] & 0x7F)
+                      : (static_cast<size_t>(tag[at + 4]) << 24) | (static_cast<size_t>(tag[at + 5]) << 16) | (static_cast<size_t>(tag[at + 6]) << 8) | tag[at + 7];
     if (size > end - at - 10) break;
     if (std::memcmp(tag.data() + at, "PRIV", 4) == 0 && size >= TIMESTAMP_OWNER.size() + 1 + 8) {
       const uint8_t* payload = tag.data() + at + 10;
-      if (std::memcmp(payload, TIMESTAMP_OWNER.data(), TIMESTAMP_OWNER.size()) == 0
-          && payload[TIMESTAMP_OWNER.size()] == 0) {
+      if (std::memcmp(payload, TIMESTAMP_OWNER.data(), TIMESTAMP_OWNER.size()) == 0 && payload[TIMESTAMP_OWNER.size()] == 0) {
         uint64_t ticks = 0;
         for (size_t i = 0; i < 8; ++i) ticks = (ticks << 8) | payload[TIMESTAMP_OWNER.size() + 1 + i];
         return ticks & TIMESTAMP_MASK;
@@ -128,8 +120,7 @@ public:
         ++at; // resynchronise past padding or a damaged frame
         continue;
       }
-      const size_t frame_size = ((static_cast<size_t>(available[3]) & 3) << 11)
-                                | (static_cast<size_t>(available[4]) << 3) | (available[5] >> 5);
+      const size_t frame_size = ((static_cast<size_t>(available[3]) & 3) << 11) | (static_cast<size_t>(available[4]) << 3) | (available[5] >> 5);
       const size_t header_size = (available[1] & 1) ? 7 : 9;
       if (frame_size <= header_size) {
         // A frame shorter than its own header leaves no way to find the next one, so
@@ -170,8 +161,7 @@ public:
             anchor_timestamp_ = segment_timestamp_;
             anchor_ns_ = expected_start_ns_;
           }
-          start_ns = anchor_ns_ + static_cast<int64_t>((*segment_timestamp_ - *anchor_timestamp_)
-                                                   & TIMESTAMP_MASK) * INT64_C(1'000'000'000) / 90000;
+          start_ns = anchor_ns_ + static_cast<int64_t>((*segment_timestamp_ - *anchor_timestamp_) & TIMESTAMP_MASK) * INT64_C(1'000'000'000) / 90000;
         }
         cursor_ = nsToScale(start_ns, sample_rate_);
         clock_set_ = true;

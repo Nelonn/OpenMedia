@@ -304,9 +304,12 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
   } else if (sps.pic_order_cnt_type == 1) {
     const int max_frame_num = 1 << (sps.log2_max_frame_num_minus4 + 4);
     int frame_num_offset = 0;
-    if (is_idr) frame_num_offset = 0;
-    else if (state_.prev_frame_num > slice.frame_num) frame_num_offset = state_.prev_frame_num_offset + max_frame_num;
-    else frame_num_offset = state_.prev_frame_num_offset;
+    if (is_idr)
+      frame_num_offset = 0;
+    else if (state_.prev_frame_num > slice.frame_num)
+      frame_num_offset = state_.prev_frame_num_offset + max_frame_num;
+    else
+      frame_num_offset = state_.prev_frame_num_offset;
 
     int abs_frame_num = 0;
     if (sps.num_ref_frames_in_pic_order_cnt_cycle > 0) abs_frame_num = frame_num_offset + slice.frame_num;
@@ -332,14 +335,20 @@ auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t
   } else if (sps.pic_order_cnt_type == 2) {
     const int max_frame_num = 1 << (sps.log2_max_frame_num_minus4 + 4);
     int frame_num_offset = 0;
-    if (is_idr) frame_num_offset = 0;
-    else if (state_.prev_frame_num > slice.frame_num) frame_num_offset = state_.prev_frame_num_offset + max_frame_num;
-    else frame_num_offset = state_.prev_frame_num_offset;
+    if (is_idr)
+      frame_num_offset = 0;
+    else if (state_.prev_frame_num > slice.frame_num)
+      frame_num_offset = state_.prev_frame_num_offset + max_frame_num;
+    else
+      frame_num_offset = state_.prev_frame_num_offset;
 
     const int abs_frame_num = frame_num_offset + slice.frame_num;
-    if (is_idr) poc = 0;
-    else if (current_.nal.idc == 0) poc = 2 * abs_frame_num - 1;
-    else poc = 2 * abs_frame_num;
+    if (is_idr)
+      poc = 0;
+    else if (current_.nal.idc == 0)
+      poc = 2 * abs_frame_num - 1;
+    else
+      poc = 2 * abs_frame_num;
     if (slice.mmco5) poc = 0;
 
     state_.prev_frame_num = slice.mmco5 ? 0 : slice.frame_num;

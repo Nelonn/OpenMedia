@@ -228,7 +228,6 @@ public:
   auto size() const -> size_t { return static_cast<size_t>(stream_size_); }
 
 
-
   auto read(size_t pos, void* dst, size_t n) -> bool;
 
   auto read(size_t pos, std::span<uint8_t> dst) -> bool {
@@ -241,7 +240,6 @@ public:
     if (memory_.empty() || n > memory_.size() || pos > memory_.size() - n) return {};
     return memory_.subspan(pos, n);
   }
-
 };
 
 } // namespace openmedia

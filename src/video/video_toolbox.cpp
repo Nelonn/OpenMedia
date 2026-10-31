@@ -149,7 +149,7 @@ void forEachAnnexBNal(std::span<const uint8_t> bytes, Fn&& fn) {
 
     const size_t nal_start = start + prefix;
     size_t next = nextStartCode(bytes, nal_start);
-    
+
     if (next > nal_start) {
       fn(bytes.subspan(nal_start, next - nal_start));
     }
@@ -342,7 +342,7 @@ auto createFormatDescription(OMCodecId codec_id,
           OM_LEVEL_ERROR,
           std::format("VideoToolbox H.264 parameter-set format creation failed: {}", static_cast<int32_t>(status)));
     } else {
-        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("VideoToolbox H.264: Not enough parameter sets found ({})", parameter_sets.sets.size()));
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("VideoToolbox H.264: Not enough parameter sets found ({})", parameter_sets.sets.size()));
     }
   }
 
@@ -375,7 +375,7 @@ auto createFormatDescription(OMCodecId codec_id,
           OM_LEVEL_ERROR,
           std::format("VideoToolbox HEVC parameter-set format creation failed: {}", static_cast<int32_t>(status)));
     } else {
-        log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("VideoToolbox HEVC: Not enough parameter sets found ({})", parameter_sets.sets.size()));
+      log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, std::format("VideoToolbox HEVC: Not enough parameter sets found ({})", parameter_sets.sets.size()));
     }
   }
 
@@ -399,13 +399,12 @@ auto createFormatDescription(OMCodecId codec_id,
 
 auto makeOutputAttributes(bool hardware_output) -> CFPtr<CFDictionaryRef> {
   int32_t formats[] = {
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
-    kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
-    kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange
-  };
+      kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+      kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+      kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+      kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+      kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
+      kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange};
   constexpr size_t num_formats = sizeof(formats) / sizeof(formats[0]);
   std::vector<CFNumberRef> numbers;
   numbers.reserve(num_formats);
@@ -727,7 +726,7 @@ public:
 
     const auto width = static_cast<uint32_t>(CVPixelBufferGetWidth(pixel_buffer));
     const auto height = static_cast<uint32_t>(CVPixelBufferGetHeight(pixel_buffer));
-    
+
     OMPixelFormat om_format = cv_om_format;
     if (!hardware_output_ && cv_om_format == OM_FORMAT_P010 && (output_format_.format == OM_FORMAT_P012 || output_format_.format == OM_FORMAT_P016)) {
       om_format = output_format_.format;
@@ -747,7 +746,7 @@ public:
     if (picture.color_range == OM_COLOR_RANGE_UNSPECIFIED) picture.color_range = OM_COLOR_RANGE_MPEG;
     if (cv_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
         cv_format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange) {
-        picture.color_range = OM_COLOR_RANGE_JPEG;
+      picture.color_range = OM_COLOR_RANGE_JPEG;
     }
     picture.is_keyframe = timing_ptr ? timing_ptr->is_keyframe : false;
 
@@ -810,9 +809,9 @@ public:
 
     Frame frame = {};
     if (CMTIME_IS_VALID(pts)) {
-        frame.pts = static_cast<uint64_t>(CMTimeGetSeconds(pts) * timescale_);
+      frame.pts = static_cast<uint64_t>(CMTimeGetSeconds(pts) * timescale_);
     } else {
-        frame.pts = timing_ptr && timing_ptr->pts >= 0 ? static_cast<uint64_t>(timing_ptr->pts) : 0;
+      frame.pts = timing_ptr && timing_ptr->pts >= 0 ? static_cast<uint64_t>(timing_ptr->pts) : 0;
     }
     frame.dts = frame.pts; // VideoToolbox handles reordering, so we return frames in presentation order
     frame.data = std::move(picture);
@@ -948,7 +947,7 @@ auto h264CMSampleBufferToAnnexB(CMSampleBufferRef avcc_sample_buffer, bool is_ke
   if (block_buffer == nullptr) {
     return false;
   }
-  
+
   size_t block_buffer_size = CMBlockBufferGetDataLength(block_buffer);
   std::vector<uint8_t> tmp(block_buffer_size);
   code = CMBlockBufferCopyDataBytes(block_buffer, 0, block_buffer_size, tmp.data());
@@ -960,7 +959,7 @@ auto h264CMSampleBufferToAnnexB(CMSampleBufferRef avcc_sample_buffer, bool is_ke
   while (offset + nalu_header_size <= block_buffer_size) {
     uint32_t nalu_size = 0;
     for (int i = 0; i < nalu_header_size; ++i) {
-        nalu_size = (nalu_size << 8) | tmp[offset + i];
+      nalu_size = (nalu_size << 8) | tmp[offset + i];
     }
     offset += nalu_header_size;
     if (offset + nalu_size > block_buffer_size) break;
@@ -1006,7 +1005,7 @@ auto hevcCMSampleBufferToAnnexB(CMSampleBufferRef hvcc_sample_buffer, bool is_ke
   if (block_buffer == nullptr) {
     return false;
   }
-  
+
   size_t block_buffer_size = CMBlockBufferGetDataLength(block_buffer);
   std::vector<uint8_t> tmp(block_buffer_size);
   code = CMBlockBufferCopyDataBytes(block_buffer, 0, block_buffer_size, tmp.data());
@@ -1018,7 +1017,7 @@ auto hevcCMSampleBufferToAnnexB(CMSampleBufferRef hvcc_sample_buffer, bool is_ke
   while (offset + nalu_header_size <= block_buffer_size) {
     uint32_t nalu_size = 0;
     for (int i = 0; i < nalu_header_size; ++i) {
-        nalu_size = (nalu_size << 8) | tmp[offset + i];
+      nalu_size = (nalu_size << 8) | tmp[offset + i];
     }
     offset += nalu_header_size;
     if (offset + nalu_size > block_buffer_size) break;
@@ -1056,24 +1055,24 @@ void compressionCallback(void* compression_output_ref_con,
   if (status != noErr || !sample_buffer || (info_flags & kVTEncodeInfo_FrameDropped)) return;
 
   {
-      std::lock_guard<std::mutex> lock(context->mutex);
-      if (context->extradata.empty()) {
-          CMVideoFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sample_buffer);
-          if (desc) {
-              CFDictionaryRef extensions = CMFormatDescriptionGetExtensions(desc);
-              if (extensions) {
-                CFTypeRef atoms = CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
-                if (atoms && CFGetTypeID(atoms) == CFDictionaryGetTypeID()) {
-                  CFStringRef key = context->codec_id == OM_CODEC_H264 ? CFSTR("avcC") : CFSTR("hvcC");
-                  CFTypeRef atom = CFDictionaryGetValue(static_cast<CFDictionaryRef>(atoms), key);
-                  if (atom && CFGetTypeID(atom) == CFDataGetTypeID()) {
-                    auto data = static_cast<CFDataRef>(atom);
-                    context->extradata.assign(CFDataGetBytePtr(data), CFDataGetBytePtr(data) + CFDataGetLength(data));
-                  }
-                }
-              }
+    std::lock_guard<std::mutex> lock(context->mutex);
+    if (context->extradata.empty()) {
+      CMVideoFormatDescriptionRef desc = CMSampleBufferGetFormatDescription(sample_buffer);
+      if (desc) {
+        CFDictionaryRef extensions = CMFormatDescriptionGetExtensions(desc);
+        if (extensions) {
+          CFTypeRef atoms = CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
+          if (atoms && CFGetTypeID(atoms) == CFDictionaryGetTypeID()) {
+            CFStringRef key = context->codec_id == OM_CODEC_H264 ? CFSTR("avcC") : CFSTR("hvcC");
+            CFTypeRef atom = CFDictionaryGetValue(static_cast<CFDictionaryRef>(atoms), key);
+            if (atom && CFGetTypeID(atom) == CFDataGetTypeID()) {
+              auto data = static_cast<CFDataRef>(atom);
+              context->extradata.assign(CFDataGetBytePtr(data), CFDataGetBytePtr(data) + CFDataGetLength(data));
+            }
           }
+        }
       }
+    }
   }
 
   bool is_keyframe = false;
@@ -1086,17 +1085,17 @@ void compressionCallback(void* compression_output_ref_con,
   std::vector<uint8_t> annexb;
   bool ok = false;
   if (context->codec_id == OM_CODEC_H264) {
-      ok = h264CMSampleBufferToAnnexB(sample_buffer, is_keyframe, annexb);
+    ok = h264CMSampleBufferToAnnexB(sample_buffer, is_keyframe, annexb);
   } else if (context->codec_id == OM_CODEC_H265) {
-      ok = hevcCMSampleBufferToAnnexB(sample_buffer, is_keyframe, annexb);
+    ok = hevcCMSampleBufferToAnnexB(sample_buffer, is_keyframe, annexb);
   } else {
-      // For ProRes, we can probably just use the raw data
-      CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(sample_buffer);
-      if (block_buffer) {
-          size_t length = CMBlockBufferGetDataLength(block_buffer);
-          annexb.resize(length);
-          ok = CMBlockBufferCopyDataBytes(block_buffer, 0, length, annexb.data()) == noErr;
-      }
+    // For ProRes, we can probably just use the raw data
+    CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(sample_buffer);
+    if (block_buffer) {
+      size_t length = CMBlockBufferGetDataLength(block_buffer);
+      annexb.resize(length);
+      ok = CMBlockBufferCopyDataBytes(block_buffer, 0, length, annexb.data()) == noErr;
+    }
   }
 
   if (!ok) {
@@ -1188,7 +1187,7 @@ public:
     };
     OSStatus status = create_session(specification.get());
     if (status != noErr || !session_) {
-        return OM_CODEC_OPEN_FAILED;
+      return OM_CODEC_OPEN_FAILED;
     }
 
     if (codec_id_ == OM_CODEC_H265) {
@@ -1312,11 +1311,11 @@ public:
     EncodingInfo info = {};
     std::vector<uint8_t> extra;
     {
-        std::lock_guard<std::mutex> lock(callback_context_.mutex);
-        extra = callback_context_.extradata;
+      std::lock_guard<std::mutex> lock(callback_context_.mutex);
+      extra = callback_context_.extradata;
     }
     if (extradata_.empty() && !extra.empty()) {
-        extradata_ = std::move(extra);
+      extradata_ = std::move(extra);
     }
     info.extradata = extradata_;
     info.mastering_display = input_format_.mastering_display;
@@ -1347,13 +1346,13 @@ public:
 
     OSType cv_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     if (picture->format == OM_FORMAT_NV12) {
-        cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+      cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     } else if (picture->format == OM_FORMAT_P010 || picture->format == OM_FORMAT_P012 || picture->format == OM_FORMAT_P016) {
-        cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+      cv_format = (picture->color_range == OM_COLOR_RANGE_JPEG) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
     } else if (picture->format == OM_FORMAT_YUV422P16) {
-        cv_format = kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange;
+      cv_format = kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange;
     } else if (picture->format == OM_FORMAT_YUV444P16) {
-        cv_format = kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange;
+      cv_format = kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange;
     } else if (picture->format == OM_FORMAT_B8G8R8A8) {
       cv_format = kCVPixelFormatType_32BGRA;
     } else {
@@ -1435,14 +1434,14 @@ public:
     std::vector<Packet> packets;
     CFMutableDictionaryRef frame_properties = nullptr;
     if (force_keyframe_) {
-        frame_properties = CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
-                                                     &kCFTypeDictionaryKeyCallBacks,
-                                                     &kCFTypeDictionaryValueCallBacks);
-        if (!frame_properties) {
-            CFRelease(pixel_buffer);
-            return Err(OM_COMMON_OUT_OF_MEMORY);
-        }
-        CFDictionarySetValue(frame_properties, kVTEncodeFrameOptionKey_ForceKeyFrame, kCFBooleanTrue);
+      frame_properties = CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
+                                                   &kCFTypeDictionaryKeyCallBacks,
+                                                   &kCFTypeDictionaryValueCallBacks);
+      if (!frame_properties) {
+        CFRelease(pixel_buffer);
+        return Err(OM_COMMON_OUT_OF_MEMORY);
+      }
+      CFDictionarySetValue(frame_properties, kVTEncodeFrameOptionKey_ForceKeyFrame, kCFBooleanTrue);
     }
     uintptr_t source_id = 0;
     if (hardware) {
@@ -1463,19 +1462,19 @@ public:
     force_keyframe_ = false;
 
     {
-        std::lock_guard<std::mutex> lock(callback_context_.mutex);
-        packets = std::move(callback_context_.packets);
-        callback_context_.packets.clear();
-        if (callback_context_.error != OM_SUCCESS) return Err(callback_context_.error);
+      std::lock_guard<std::mutex> lock(callback_context_.mutex);
+      packets = std::move(callback_context_.packets);
+      callback_context_.packets.clear();
+      if (callback_context_.error != OM_SUCCESS) return Err(callback_context_.error);
     }
 
     std::vector<uint8_t> extra;
     {
-        std::lock_guard<std::mutex> lock(callback_context_.mutex);
-        extra = callback_context_.extradata;
+      std::lock_guard<std::mutex> lock(callback_context_.mutex);
+      extra = callback_context_.extradata;
     }
     if (extradata_.empty() && !extra.empty()) {
-        extradata_ = std::move(extra);
+      extradata_ = std::move(extra);
     }
 
     return Ok(std::move(packets));
@@ -1502,38 +1501,38 @@ public:
     int64_t max_bitrate = 0;
 
     switch (rc.getMode()) {
-        case RateControlMode::CBR:
-            target_bitrate = std::get<CbrParams>(rc.params).bitrate.target_bitrate;
-            max_bitrate = std::get<CbrParams>(rc.params).bitrate.max_bitrate.value_or(target_bitrate);
-            break;
-        case RateControlMode::VBR:
-            target_bitrate = std::get<VbrParams>(rc.params).bitrate.target_bitrate;
-            max_bitrate = std::get<VbrParams>(rc.params).bitrate.max_bitrate.value_or(target_bitrate * 2);
-            break;
-        case RateControlMode::ABR:
-            target_bitrate = std::get<AbrParams>(rc.params).target_bitrate;
-            break;
-        default:
-            break;
+      case RateControlMode::CBR:
+        target_bitrate = std::get<CbrParams>(rc.params).bitrate.target_bitrate;
+        max_bitrate = std::get<CbrParams>(rc.params).bitrate.max_bitrate.value_or(target_bitrate);
+        break;
+      case RateControlMode::VBR:
+        target_bitrate = std::get<VbrParams>(rc.params).bitrate.target_bitrate;
+        max_bitrate = std::get<VbrParams>(rc.params).bitrate.max_bitrate.value_or(target_bitrate * 2);
+        break;
+      case RateControlMode::ABR:
+        target_bitrate = std::get<AbrParams>(rc.params).target_bitrate;
+        break;
+      default:
+        break;
     }
 
     if (target_bitrate > 0) {
-        CFNumberRef br = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &target_bitrate);
-        VTSessionSetProperty(session_, kVTCompressionPropertyKey_AverageBitRate, br);
-        CFRelease(br);
+      CFNumberRef br = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &target_bitrate);
+      VTSessionSetProperty(session_, kVTCompressionPropertyKey_AverageBitRate, br);
+      CFRelease(br);
     }
 
     if (max_bitrate > 0) {
-        int64_t bytes_per_second = max_bitrate / 8;
-        CFNumberRef limit_bytes = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &bytes_per_second);
-        double one = 1.0;
-        CFNumberRef limit_duration = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &one);
-        const void* values[] = { limit_bytes, limit_duration };
-        CFArrayRef limits = CFArrayCreate(kCFAllocatorDefault, values, 2, &kCFTypeArrayCallBacks);
-        VTSessionSetProperty(session_, kVTCompressionPropertyKey_DataRateLimits, limits);
-        CFRelease(limits);
-        CFRelease(limit_bytes);
-        CFRelease(limit_duration);
+      int64_t bytes_per_second = max_bitrate / 8;
+      CFNumberRef limit_bytes = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &bytes_per_second);
+      double one = 1.0;
+      CFNumberRef limit_duration = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &one);
+      const void* values[] = {limit_bytes, limit_duration};
+      CFArrayRef limits = CFArrayCreate(kCFAllocatorDefault, values, 2, &kCFTypeArrayCallBacks);
+      VTSessionSetProperty(session_, kVTCompressionPropertyKey_DataRateLimits, limits);
+      CFRelease(limits);
+      CFRelease(limit_bytes);
+      CFRelease(limit_duration);
     }
 
     return OM_SUCCESS;

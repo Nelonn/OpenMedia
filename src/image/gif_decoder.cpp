@@ -179,13 +179,13 @@ public:
 };
 
 const CodecDescriptor CODEC_GIF = {
-  .codec_id = OM_CODEC_GIF,
-  .type = OM_MEDIA_IMAGE,
-  .name = "gif",
-  .long_name = "GIF image decoder",
-  .vendor = "libgif",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<GIFDecoder>(); },
+    .codec_id = OM_CODEC_GIF,
+    .type = OM_MEDIA_IMAGE,
+    .name = "gif",
+    .long_name = "GIF image decoder",
+    .vendor = "libgif",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<GIFDecoder>(); },
 };
 
 } // namespace openmedia

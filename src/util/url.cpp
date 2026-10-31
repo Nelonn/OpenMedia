@@ -99,7 +99,7 @@ auto resolveUrl(std::string_view base, std::string_view reference) -> std::strin
     std::string_view prefix;
     std::string_view path;
     splitUrl(std::string_view(reference), prefix, path);
-    (void)prefix;
+    (void) prefix;
     const size_t authority_end = reference.find('/', 2);
     if (authority_end == std::string_view::npos) {
       return std::string(base.substr(0, scheme)) + std::string(reference);

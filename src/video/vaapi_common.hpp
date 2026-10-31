@@ -180,8 +180,7 @@ private:
   static constexpr size_t kGrowBy = 4;
 
   SurfacePool(OwnedDisplay owner, VADisplay display, uint32_t rt_format, uint32_t width, uint32_t height)
-      : owner_(std::move(owner)), display_(display), rt_format_(rt_format), fourcc_(fourccForRtFormat(rt_format)),
-        width_(width), height_(height) {
+      : owner_(std::move(owner)), display_(display), rt_format_(rt_format), fourcc_(fourccForRtFormat(rt_format)), width_(width), height_(height) {
     image_.image_id = VA_INVALID_ID;
   }
 

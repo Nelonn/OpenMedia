@@ -190,30 +190,30 @@ public:
 };
 
 const CodecDescriptor CODEC_PNG = {
-  .codec_id = static_cast<OMCodecId>(OM_CODEC_PNG),
-  .type = OM_MEDIA_IMAGE,
-  .name = "png",
-  .long_name = "PNG",
-  .vendor = "libpng",
-  .flags = NONE,
-  .caps = CodecCaps {
-    .video = VideoCodecCaps {
-      .pix_fmts = {OM_FORMAT_R8G8B8A8, OM_FORMAT_B8G8R8A8, OM_FORMAT_RGBA64,
-                   OM_FORMAT_GRAY8, OM_FORMAT_GRAY16},
+    .codec_id = static_cast<OMCodecId>(OM_CODEC_PNG),
+    .type = OM_MEDIA_IMAGE,
+    .name = "png",
+    .long_name = "PNG",
+    .vendor = "libpng",
+    .flags = NONE,
+    .caps = CodecCaps {
+        .video = VideoCodecCaps {
+            .pix_fmts = {OM_FORMAT_R8G8B8A8, OM_FORMAT_B8G8R8A8, OM_FORMAT_RGBA64,
+                         OM_FORMAT_GRAY8, OM_FORMAT_GRAY16},
+        },
     },
-  },
-  .options = {
-    PNG_ENC_COMPRESSION_LEVEL,
-    PNG_ENC_COMPRESSION_STRATEGY,
-    PNG_ENC_COMPRESSION_MEM_LEVEL,
-    PNG_ENC_COMPRESSION_WINDOW_BITS,
-    PNG_ENC_FILTERS,
-    PNG_ENC_INTERLACE,
-    PNG_ENC_STRIP_ALPHA,
-    PNG_ENC_COLOR_CHUNKS,
-  },
-  .decoder_factory = []{ return std::make_unique<PNGDecoder>(); },
-  .encoder_factory = []{ return createPNGEncoder(); },
+    .options = {
+        PNG_ENC_COMPRESSION_LEVEL,
+        PNG_ENC_COMPRESSION_STRATEGY,
+        PNG_ENC_COMPRESSION_MEM_LEVEL,
+        PNG_ENC_COMPRESSION_WINDOW_BITS,
+        PNG_ENC_FILTERS,
+        PNG_ENC_INTERLACE,
+        PNG_ENC_STRIP_ALPHA,
+        PNG_ENC_COLOR_CHUNKS,
+    },
+    .decoder_factory = [] { return std::make_unique<PNGDecoder>(); },
+    .encoder_factory = [] { return createPNGEncoder(); },
 };
 
 } // namespace openmedia

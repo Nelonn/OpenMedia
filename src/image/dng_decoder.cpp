@@ -115,21 +115,25 @@ class DNGDecoder final : public Decoder {
           g = (get_normalized(x > 0 ? x - 1 : 0, y) +
                get_normalized(x + 1, y) +
                get_normalized(x, y > 0 ? y - 1 : 0) +
-               get_normalized(x, y + 1)) * 0.25f;
+               get_normalized(x, y + 1)) *
+              0.25f;
           b = (get_normalized(x > 0 ? x - 1 : 0, y > 0 ? y - 1 : 0) +
                get_normalized(x + 1, y > 0 ? y - 1 : 0) +
                get_normalized(x > 0 ? x - 1 : 0, y + 1) +
-               get_normalized(x + 1, y + 1)) * 0.25f;
+               get_normalized(x + 1, y + 1)) *
+              0.25f;
         } else if (cfa_type == 2) {
           b = get_normalized(x, y);
           g = (get_normalized(x > 0 ? x - 1 : 0, y) +
                get_normalized(x + 1, y) +
                get_normalized(x, y > 0 ? y - 1 : 0) +
-               get_normalized(x, y + 1)) * 0.25f;
+               get_normalized(x, y + 1)) *
+              0.25f;
           r = (get_normalized(x > 0 ? x - 1 : 0, y > 0 ? y - 1 : 0) +
                get_normalized(x + 1, y > 0 ? y - 1 : 0) +
                get_normalized(x > 0 ? x - 1 : 0, y + 1) +
-               get_normalized(x + 1, y + 1)) * 0.25f;
+               get_normalized(x + 1, y + 1)) *
+              0.25f;
         } else {
           g = get_normalized(x, y);
           uint8_t left_type = cfa_pattern[((y & 1) << 1) | ((x > 0 ? x - 1 : 0) & 1)];
@@ -195,8 +199,7 @@ public:
         dng_decode_close,
         dng_decode_size,
         dng_decode_map,
-        dng_decode_unmap
-    );
+        dng_decode_unmap);
 
     if (!tiff) {
       return Err(OM_CODEC_DECODE_FAILED);
@@ -384,13 +387,13 @@ public:
 };
 
 const CodecDescriptor CODEC_DNG = {
-  .codec_id = OM_CODEC_DNG,
-  .type = OM_MEDIA_IMAGE,
-  .name = "dng",
-  .long_name = "DNG image decoder",
-  .vendor = "libtiff",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DNGDecoder>(); },
+    .codec_id = OM_CODEC_DNG,
+    .type = OM_MEDIA_IMAGE,
+    .name = "dng",
+    .long_name = "DNG image decoder",
+    .vendor = "libtiff",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DNGDecoder>(); },
 };
 
-}
+} // namespace openmedia

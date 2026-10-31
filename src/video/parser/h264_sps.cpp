@@ -4,7 +4,19 @@ namespace h264 {
 
 static auto isHighProfile(int profile) -> bool {
   switch (profile) {
-    case 100: case 110: case 122: case 244: case 44: case 83: case 86: case 118: case 128: case 138: case 139: case 134: case 135:
+    case 100:
+    case 110:
+    case 122:
+    case 244:
+    case 44:
+    case 83:
+    case 86:
+    case 118:
+    case 128:
+    case 138:
+    case 139:
+    case 134:
+    case 135:
       return true;
     default:
       return false;

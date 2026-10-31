@@ -349,7 +349,7 @@ private:
                                           hls::RenditionType::Subtitles}) {
       if (type == hls::RenditionType::Subtitles && !options_.with_subtitles) continue;
       const std::string& group = (type == hls::RenditionType::Audio) ? variant->audio_group
-                                                                    : variant->subtitle_group;
+                                                                     : variant->subtitle_group;
       if (group.empty()) continue; // that track is muxed into the variant itself
 
       std::vector<const hls::Rendition*> group_members;

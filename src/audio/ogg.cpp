@@ -52,7 +52,7 @@ auto opusPacketSamples(std::span<const uint8_t> bytes) -> int64_t {
 
   if (bytes.empty()) return 0;
   const uint32_t config = bytes[0] >> 3;
-  const int32_t frame_samples = config < 12  ? SILK_SIZES[config & 3]
+  const int32_t frame_samples = config < 12   ? SILK_SIZES[config & 3]
                                 : config < 16 ? ((config & 1) != 0 ? 960 : 480)
                                               : CELT_SIZES[config & 3];
 

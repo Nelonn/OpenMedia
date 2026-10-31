@@ -10,9 +10,9 @@ namespace hdr {
 struct Header {
   uint32_t width = 0;
   uint32_t height = 0;
-  size_t data_offset = 0; // first byte of scanline data
-  bool is_xyze = false; // FORMAT=32-bit_rle_xyze
-  bool flip_vertical = false; // "+Y" resolution (bottom-to-top)
+  size_t data_offset = 0;       // first byte of scanline data
+  bool is_xyze = false;         // FORMAT=32-bit_rle_xyze
+  bool flip_vertical = false;   // "+Y" resolution (bottom-to-top)
   bool flip_horizontal = false; // "-X" resolution (right-to-left)
 };
 

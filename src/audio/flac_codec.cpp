@@ -387,19 +387,19 @@ private:
 };
 
 const CodecDescriptor CODEC_FLAC = {
-  .codec_id = OM_CODEC_FLAC,
-  .type = OM_MEDIA_AUDIO,
-  .name = "flac",
-  .long_name = "Free Lossless Audio Codec",
-  .vendor = "Xiph.Org",
-  .flags = NONE,
-  .caps = CodecCaps {
-    .audio = AudioCodecCaps {
-      .fmt_s32 = true,
+    .codec_id = OM_CODEC_FLAC,
+    .type = OM_MEDIA_AUDIO,
+    .name = "flac",
+    .long_name = "Free Lossless Audio Codec",
+    .vendor = "Xiph.Org",
+    .flags = NONE,
+    .caps = CodecCaps {
+        .audio = AudioCodecCaps {
+            .fmt_s32 = true,
+        },
     },
-  },
-  .decoder_factory = []{ return std::make_unique<FLACDecoder>(); },
-  .encoder_factory = []{ return std::make_unique<FLACEncoder>(); },
+    .decoder_factory = [] { return std::make_unique<FLACDecoder>(); },
+    .encoder_factory = [] { return std::make_unique<FLACEncoder>(); },
 };
 
 } // namespace openmedia

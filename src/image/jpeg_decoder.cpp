@@ -139,13 +139,13 @@ public:
 };
 
 const CodecDescriptor CODEC_JPEG = {
-  .codec_id = OM_CODEC_JPEG,
-  .type = OM_MEDIA_IMAGE,
-  .name = "jpeg",
-  .long_name = "JPEG image decoder",
-  .vendor = "libjpeg-turbo",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<JPEGDecoder>(); },
+    .codec_id = OM_CODEC_JPEG,
+    .type = OM_MEDIA_IMAGE,
+    .name = "jpeg",
+    .long_name = "JPEG image decoder",
+    .vendor = "libjpeg-turbo",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<JPEGDecoder>(); },
 };
 
 } // namespace openmedia

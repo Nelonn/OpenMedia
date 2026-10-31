@@ -21,12 +21,18 @@ inline auto base64Decode(std::string_view in) -> std::vector<uint8_t> {
   int valb = -8;
   for (char c : in) {
     int d = -1;
-    if (c >= 'A' && c <= 'Z') d = c - 'A';
-    else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
-    else if (c >= '0' && c <= '9') d = c - '0' + 52;
-    else if (c == '+') d = 62;
-    else if (c == '/') d = 63;
-    else if (c == '=') break;
+    if (c >= 'A' && c <= 'Z')
+      d = c - 'A';
+    else if (c >= 'a' && c <= 'z')
+      d = c - 'a' + 26;
+    else if (c >= '0' && c <= '9')
+      d = c - '0' + 52;
+    else if (c == '+')
+      d = 62;
+    else if (c == '/')
+      d = 63;
+    else if (c == '=')
+      break;
     if (d >= 0) {
       val = (val << 6) | d;
       valb += 6;
@@ -143,4 +149,4 @@ inline void parseVorbisComment(std::span<const uint8_t> data, Dictionary& metada
   }
 }
 
-}
+} // namespace openmedia

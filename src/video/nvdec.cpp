@@ -162,8 +162,8 @@ class NVDec final : public Decoder {
     if (format->seqhdr_data_length >= sizeof(CUVIDEOFORMATEX)) {
       CUVIDEOFORMATEX* ex = (CUVIDEOFORMATEX*) format;
       if (ex->format.display_area.right > 0) { // Check if we have extended info
-          // CUVID structure for HDR varies by version. 
-          // For now, we've enabled color volume reporting.
+                                               // CUVID structure for HDR varies by version.
+                                               // For now, we've enabled color volume reporting.
       }
     }
 

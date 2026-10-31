@@ -250,8 +250,7 @@ public:
         } else if (photometric == 5) {
           convert_cmyk_to_rgba(scanline_buf.data(), dst, width);
         } else {
-          std::memcpy(dst, scanline_buf.data(), std::min(static_cast<size_t>(scanline_size),
-                                                          static_cast<size_t>(width * 4)));
+          std::memcpy(dst, scanline_buf.data(), std::min(static_cast<size_t>(scanline_size), static_cast<size_t>(width * 4)));
         }
       } else if (output_format == OM_FORMAT_GRAY8 || output_format == OM_FORMAT_GRAY16) {
         std::memcpy(dst, scanline_buf.data(), scanline_size);
@@ -282,13 +281,13 @@ public:
 };
 
 const CodecDescriptor CODEC_TIFF = {
-  .codec_id = OM_CODEC_TIFF,
-  .type = OM_MEDIA_IMAGE,
-  .name = "tiff",
-  .long_name = "TIFF image decoder",
-  .vendor = "libtiff",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<TIFFDecoder>(); },
+    .codec_id = OM_CODEC_TIFF,
+    .type = OM_MEDIA_IMAGE,
+    .name = "tiff",
+    .long_name = "TIFF image decoder",
+    .vendor = "libtiff",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<TIFFDecoder>(); },
 };
 
 } // namespace openmedia

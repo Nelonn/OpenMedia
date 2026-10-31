@@ -34,7 +34,7 @@ OMCudaContext* HWCudaContext_create(OMCudaInit init) {
 
   CUresult res = cu->cuInit(0);
   if (res != CUDA_SUCCESS) {
-    openmedia::log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "CUDA: cuInit failed with error {}", (int)res);
+    openmedia::log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "CUDA: cuInit failed with error {}", (int) res);
     return nullptr;
   }
 
@@ -50,13 +50,13 @@ OMCudaContext* HWCudaContext_create(OMCudaInit init) {
     CUdevice device;
     res = cu->cuDeviceGet(&device, context->device_index);
     if (res != CUDA_SUCCESS) {
-      openmedia::log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "CUDA: cuDeviceGet failed with error {}", (int)res);
+      openmedia::log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "CUDA: cuDeviceGet failed with error {}", (int) res);
       delete context;
       return nullptr;
     }
     res = cu->cuCtxCreate(&context->cu_context, 0, device);
     if (res != CUDA_SUCCESS) {
-      openmedia::log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "CUDA: cuCtxCreate failed with error {}", (int)res);
+      openmedia::log(OM_CATEGORY_HARDWARE, OM_LEVEL_ERROR, "CUDA: cuCtxCreate failed with error {}", (int) res);
       delete context;
       return nullptr;
     }

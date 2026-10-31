@@ -46,11 +46,11 @@ public:
 
 // Bucketed by size class: payload sizes are effectively unbounded, so exact-size buckets would
 // retain one per size ever seen.
-// 
+//
 // A block is cached only once its class has proven recurring demand, more for larger blocks
 // (usesRequired), so a one-shot 37 MiB JPEG is never cached while a 4K decode loop is. A class
 // untouched for max_idle is dropped. MAX_BUFFERS_PER_CLASS and a byte budget cap the rest.
-// 
+//
 // Sweeps run on get()/release(), so an idle process keeps its cache until clear(); there is no
 // reaper thread because joining one from a DLL being unloaded can deadlock the loader.
 class OPENMEDIA_ABI BufferPool {

@@ -34,4 +34,4 @@ auto RandomRead::read(size_t pos, void* dst, size_t n) -> bool {
   return got == n;
 }
 
-}
+} // namespace openmedia

@@ -31,14 +31,22 @@ using FrameQueue = BlockingQueue<VideoFrame>;
 
 inline auto bitDepth(OMPixelFormat format) -> int {
   switch (format) {
-    case OM_FORMAT_YUV420P10: case OM_FORMAT_YUV422P10: case OM_FORMAT_YUV444P10:
+    case OM_FORMAT_YUV420P10:
+    case OM_FORMAT_YUV422P10:
+    case OM_FORMAT_YUV444P10:
     case OM_FORMAT_P010:
       return 10;
-    case OM_FORMAT_YUV420P12: case OM_FORMAT_YUV422P12: case OM_FORMAT_YUV444P12:
+    case OM_FORMAT_YUV420P12:
+    case OM_FORMAT_YUV422P12:
+    case OM_FORMAT_YUV444P12:
     case OM_FORMAT_P012:
       return 12;
-    case OM_FORMAT_YUV420P16: case OM_FORMAT_YUV422P16: case OM_FORMAT_YUV444P16:
-    case OM_FORMAT_P016: case OM_FORMAT_GRAY16: case OM_FORMAT_RGBA64:
+    case OM_FORMAT_YUV420P16:
+    case OM_FORMAT_YUV422P16:
+    case OM_FORMAT_YUV444P16:
+    case OM_FORMAT_P016:
+    case OM_FORMAT_GRAY16:
+    case OM_FORMAT_RGBA64:
       return 16;
     default:
       return 8;
@@ -49,7 +57,10 @@ namespace upload {
 
 // SDL samples 8-bit 4:2:0 YUV and packed RGBA directly on the GPU; everything
 // else goes through libyuv to ARGB8888.
-enum class Path { Planar, SemiPlanar, Packed, Convert };
+enum class Path { Planar,
+                  SemiPlanar,
+                  Packed,
+                  Convert };
 
 struct Plan {
   SDL_PixelFormat format;
@@ -72,21 +83,28 @@ inline auto planFor(OMPixelFormat format) -> Plan {
 // J-formats carry full range in the pixel format rather than the range field.
 inline auto isFullRange(const VideoFrame& vf) -> bool {
   switch (vf.format) {
-    case OM_FORMAT_YUVJ420P: case OM_FORMAT_YUVJ422P: case OM_FORMAT_YUVJ444P:
+    case OM_FORMAT_YUVJ420P:
+    case OM_FORMAT_YUVJ422P:
+    case OM_FORMAT_YUVJ444P:
       return true;
     default:
       return vf.color_range == OM_COLOR_RANGE_FULL;
   }
 }
 
-enum class Matrix { BT601, BT709, BT2020 };
+enum class Matrix { BT601,
+                    BT709,
+                    BT2020 };
 
 // Unspecified colour space: SD is BT.601, HD and up is BT.709.
 inline auto matrixOf(const VideoFrame& vf) -> Matrix {
   switch (vf.color_space) {
-    case OM_COLOR_SPACE_BT2020: case OM_COLOR_SPACE_BT2020_CL:
+    case OM_COLOR_SPACE_BT2020:
+    case OM_COLOR_SPACE_BT2020_CL:
       return Matrix::BT2020;
-    case OM_COLOR_SPACE_BT601: case OM_COLOR_SPACE_SMPTE240M: case OM_COLOR_SPACE_FCC:
+    case OM_COLOR_SPACE_BT601:
+    case OM_COLOR_SPACE_SMPTE240M:
+    case OM_COLOR_SPACE_FCC:
       return Matrix::BT601;
     case OM_COLOR_SPACE_UNKNOWN:
       return vf.height > 576 ? Matrix::BT709 : Matrix::BT601;

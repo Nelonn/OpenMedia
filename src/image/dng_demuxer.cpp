@@ -103,8 +103,7 @@ public:
         dng_close,
         dng_size,
         dng_map_file,
-        dng_unmap_file
-    );
+        dng_unmap_file);
 
     if (!tiff) {
       return OM_FORMAT_PARSE_FAILED;
@@ -197,4 +196,4 @@ const FormatDescriptor FORMAT_DNG = {
     .muxer_factory = {},
 };
 
-}
+} // namespace openmedia

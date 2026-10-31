@@ -157,12 +157,12 @@ class VpxEncoder final : public Encoder {
 
   static auto toVpxColorSpace(OMColorSpace c) -> vpx_color_space_t {
     switch (c) {
-      case OM_COLOR_SPACE_BT601:     return VPX_CS_BT_601;
-      case OM_COLOR_SPACE_BT709:     return VPX_CS_BT_709;
-      case OM_COLOR_SPACE_BT2020:    return VPX_CS_BT_2020;
+      case OM_COLOR_SPACE_BT601: return VPX_CS_BT_601;
+      case OM_COLOR_SPACE_BT709: return VPX_CS_BT_709;
+      case OM_COLOR_SPACE_BT2020: return VPX_CS_BT_2020;
       case OM_COLOR_SPACE_SMPTE240M: return VPX_CS_SMPTE_240;
-      case OM_COLOR_SPACE_RGB:       return VPX_CS_SRGB;
-      default:                       return VPX_CS_UNKNOWN;
+      case OM_COLOR_SPACE_RGB: return VPX_CS_SRGB;
+      default: return VPX_CS_UNKNOWN;
     }
   }
 
@@ -266,7 +266,8 @@ public:
 
     color_space_ = toVpxColorSpace(options.format.video.color_space);
     color_range_ = (options.format.video.color_range == OM_COLOR_RANGE_FULL)
-                       ? VPX_CR_FULL_RANGE : VPX_CR_STUDIO_RANGE;
+                       ? VPX_CR_FULL_RANGE
+                       : VPX_CR_STUDIO_RANGE;
 
     if (vpx_codec_enc_init(&ctx_, iface, &cfg, (cfg.g_bit_depth > VPX_BITS_8) ? VPX_CODEC_USE_HIGHBITDEPTH : 0) != VPX_CODEC_OK) {
       return OM_CODEC_OPEN_FAILED;

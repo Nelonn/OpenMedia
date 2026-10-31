@@ -35,7 +35,8 @@ auto makeAlacFormatDescription(const AudioFormat& format, uint32_t bit_depth, ui
   desc.mSampleRate = format.sample_rate;
   desc.mFormatID = kALACFormatAppleLossless;
   // InitializeEncoder takes the bit depth from these flags and ignores mBitsPerChannel.
-  desc.mFormatFlags = bit_depth == 16 ? 1 : bit_depth == 24 ? 3 : 4;
+  desc.mFormatFlags = bit_depth == 16 ? 1 : bit_depth == 24 ? 3
+                                                            : 4;
   desc.mFramesPerPacket = frame_size;
   desc.mChannelsPerFrame = format.channels;
   desc.mBitsPerChannel = bit_depth;
@@ -56,7 +57,7 @@ void expandPacked24ToS32(uint8_t* data, size_t sample_count) {
   }
 }
 
-}
+} // namespace
 
 class ALACEncoder final : public Encoder {
   ::ALACEncoder encoder_;
@@ -89,8 +90,8 @@ class ALACEncoder final : public Encoder {
     for (size_t sample = 0; sample < samples.nb_samples; ++sample) {
       for (size_t channel = 0; channel < samples.format.channels; ++channel) {
         const uint8_t* src = samples.format.planar
-            ? samples.planes.data[channel] + sample * source_size
-            : samples.buffer->bytes().data() + (sample * samples.format.channels + channel) * source_size;
+                                 ? samples.planes.data[channel] + sample * source_size
+                                 : samples.buffer->bytes().data() + (sample * samples.format.channels + channel) * source_size;
         std::memcpy(out, src + skipped, coded_size);
         out += coded_size;
       }
@@ -113,8 +114,8 @@ public:
 
     bit_depth_ = sampleFormatToBitDepth(options.audio_format, options.format.audio.bit_depth);
     const bool depth_supported = options.audio_format.sample_format == OM_SAMPLE_S16
-        ? bit_depth_ == 16
-        : bit_depth_ == 24 || bit_depth_ == 32;
+                                     ? bit_depth_ == 16
+                                     : bit_depth_ == 24 || bit_depth_ == 32;
     if (!depth_supported) {
       return OM_CODEC_INVALID_PARAMS;
     }
@@ -279,14 +280,14 @@ public:
 };
 
 const CodecDescriptor CODEC_ALAC = {
-  .codec_id = OM_CODEC_ALAC,
-  .type = OM_MEDIA_AUDIO,
-  .name = "alac",
-  .long_name = "Apple Lossless Audio Codec",
-  .vendor = "Apple",
-  .flags = NONE,
-  .decoder_factory = []{ return std::make_unique<ALACDecoder>(); },
-  .encoder_factory = []{ return std::make_unique<ALACEncoder>(); },
+    .codec_id = OM_CODEC_ALAC,
+    .type = OM_MEDIA_AUDIO,
+    .name = "alac",
+    .long_name = "Apple Lossless Audio Codec",
+    .vendor = "Apple",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<ALACDecoder>(); },
+    .encoder_factory = [] { return std::make_unique<ALACEncoder>(); },
 };
 
 } // namespace openmedia

@@ -105,7 +105,7 @@ public:
   }
 };
 
-static std::shared_ptr<Logger> LOGGER{std::make_shared<DefaultLogger>()};
+static std::shared_ptr<Logger> LOGGER {std::make_shared<DefaultLogger>()};
 
 void setLogger(std::unique_ptr<Logger>&& logger) {
   std::atomic_store(&LOGGER, std::shared_ptr<Logger>(std::move(logger)));

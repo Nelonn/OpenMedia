@@ -4,17 +4,14 @@
 #include <cstring>
 
 OMVulkanContext::OMVulkanContext(OMVulkanInit init)
-    : vk_instance(init.instance),
-      vk_physical_device(init.physical_device),
-      vk_device(init.device),
-      allocator(init.allocator),
-      queue_family_index(init.queue_family_index),
-      video_decode_queue_family_index(init.video_decode_queue_family_index),
-      video_encode_queue_family_index(init.video_encode_queue_family_index),
-      vkGetInstanceProcAddr(init.proc) {
-  
+    : vk_instance(init.instance), vk_physical_device(init.physical_device), vk_device(init.device), allocator(init.allocator), queue_family_index(init.queue_family_index), video_decode_queue_family_index(init.video_decode_queue_family_index), video_encode_queue_family_index(init.video_encode_queue_family_index), vkGetInstanceProcAddr(init.proc) {
+
 #define GET_INST_FN(name) name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(vk_instance, #name))
-#define GET_DEV_FN(name) do { name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(vk_device, #name)); if (!name && vkGetInstanceProcAddr && vk_instance) name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(vk_instance, #name)); } while(0)
+#define GET_DEV_FN(name)                                                                                                               \
+  do {                                                                                                                                 \
+    name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(vk_device, #name));                                                        \
+    if (!name && vkGetInstanceProcAddr && vk_instance) name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(vk_instance, #name)); \
+  } while (0)
 
   GET_INST_FN(vkGetDeviceProcAddr);
   GET_INST_FN(vkGetPhysicalDeviceMemoryProperties);
@@ -67,8 +64,8 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   GET_DEV_FN(vkCmdCopyImageToBuffer);
   GET_DEV_FN(vkCmdEncodeVideoKHR);
 
-  #undef GET_INST_FN
-  #undef GET_DEV_FN
+#undef GET_INST_FN
+#undef GET_DEV_FN
 
   if (queue_family_index != 0xFFFFFFFF)
     this->vkGetDeviceQueue(vk_device, queue_family_index, 0, &queue);
@@ -76,49 +73,49 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
     this->vkGetDeviceQueue(vk_device, video_decode_queue_family_index, 0, &video_decode_queue);
   if (video_encode_queue_family_index != 0xFFFFFFFF)
     this->vkGetDeviceQueue(vk_device, video_encode_queue_family_index, 0, &video_encode_queue);
-  }
+}
 
-  OMVulkanContext* HWVulkanContext_create(OMVulkanInit init) {
+OMVulkanContext* HWVulkanContext_create(OMVulkanInit init) {
   auto* context = static_cast<OMVulkanContext*>(malloc(sizeof(OMVulkanContext)));
   if (!context) return nullptr;
   new (context) OMVulkanContext(init);
   return context;
-  }
+}
 
-  void HWVulkanContext_delete(OMVulkanContext* context) {
+void HWVulkanContext_delete(OMVulkanContext* context) {
   if (!context) return;
   context->~OMVulkanContext();
   free(context);
-  }
+}
 
-  VkInstance HWVulkanContext_getInstance(OMVulkanContext* context) {
-    if (!context) return VK_NULL_HANDLE;
-    return context->vk_instance;
-  }
+VkInstance HWVulkanContext_getInstance(OMVulkanContext* context) {
+  if (!context) return VK_NULL_HANDLE;
+  return context->vk_instance;
+}
 
-  VkPhysicalDevice HWVulkanContext_getPhysicalDevice(OMVulkanContext* context) {
-    if (!context) return VK_NULL_HANDLE;
-    return context->vk_physical_device;
-  }
+VkPhysicalDevice HWVulkanContext_getPhysicalDevice(OMVulkanContext* context) {
+  if (!context) return VK_NULL_HANDLE;
+  return context->vk_physical_device;
+}
 
-  VkDevice HWVulkanContext_getDevice(OMVulkanContext* context) {
-    if (!context) return VK_NULL_HANDLE;
-    return context->vk_device;
-  }
+VkDevice HWVulkanContext_getDevice(OMVulkanContext* context) {
+  if (!context) return VK_NULL_HANDLE;
+  return context->vk_device;
+}
 
-  OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context) {
+OMVulkanPicture* HWVulkanContext_createPicture(OMVulkanContext* context) {
   auto* picture = static_cast<OMVulkanPicture*>(malloc(sizeof(OMVulkanPicture)));
   if (!picture) return nullptr;
   std::memset(picture, 0, sizeof(OMVulkanPicture));
   return picture;
-  }
+}
 
-  void HWVulkanPicture_delete(OMVulkanPicture* picture) {
+void HWVulkanPicture_delete(OMVulkanPicture* picture) {
   if (!picture) return;
   free(picture);
-  }
+}
 
-  void HWVulkanContext_copyToHost(OMVulkanContext* context, OMVulkanPicture* src, void* dst_y, uint32_t stride_y, void* dst_uv, uint32_t stride_uv, uint32_t width, uint32_t height) {
+void HWVulkanContext_copyToHost(OMVulkanContext* context, OMVulkanPicture* src, void* dst_y, uint32_t stride_y, void* dst_uv, uint32_t stride_uv, uint32_t width, uint32_t height) {
   if (!context || !src || !src->image) return;
 
   uint32_t src_family = context->video_decode_queue_family_index;
@@ -133,28 +130,46 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
     case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
     case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
     case VK_FORMAT_G16_B16R16_2PLANE_420_UNORM:
-      bpp = 2; ssx = 1; ssy = 1; break;
+      bpp = 2;
+      ssx = 1;
+      ssy = 1;
+      break;
     case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16:
     case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16:
     case VK_FORMAT_G16_B16R16_2PLANE_422_UNORM:
-      bpp = 2; ssx = 1; ssy = 0; break;
+      bpp = 2;
+      ssx = 1;
+      ssy = 0;
+      break;
     case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16:
     case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16:
     case VK_FORMAT_G16_B16R16_2PLANE_444_UNORM:
-      bpp = 2; ssx = 0; ssy = 0; break;
+      bpp = 2;
+      ssx = 0;
+      ssy = 0;
+      break;
     case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
-      bpp = 1; ssx = 1; ssy = 0; break;
+      bpp = 1;
+      ssx = 1;
+      ssy = 0;
+      break;
     case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
-      bpp = 1; ssx = 0; ssy = 0; break;
+      bpp = 1;
+      ssx = 0;
+      ssy = 0;
+      break;
     default:
-      bpp = 1; ssx = 1; ssy = 1; break; // 8-bit 4:2:0
+      bpp = 1;
+      ssx = 1;
+      ssy = 1;
+      break; // 8-bit 4:2:0
   }
 
-  const uint32_t chroma_width = width >> ssx;   // chroma samples per row
+  const uint32_t chroma_width = width >> ssx; // chroma samples per row
   const uint32_t chroma_height = height >> ssy;
-  const size_t luma_bytes = (size_t)width * height * bpp;
+  const size_t luma_bytes = (size_t) width * height * bpp;
   // Two interleaved components per chroma sample.
-  const size_t chroma_row_bytes = (size_t)chroma_width * 2 * bpp;
+  const size_t chroma_row_bytes = (size_t) chroma_width * 2 * bpp;
   size_t size = luma_bytes + chroma_row_bytes * chroma_height;
   VkBuffer staging_buffer;
   VkDeviceMemory staging_memory;
@@ -168,7 +183,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkGetBufferMemoryRequirements(context->vk_device, staging_buffer, &reqs);
   VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   alloc_info.allocationSize = reqs.size;
-  
+
   VkPhysicalDeviceMemoryProperties mem_props;
   context->vkGetPhysicalDeviceMemoryProperties(context->vk_physical_device, &mem_props);
   bool is_coherent = false;
@@ -204,7 +219,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   context->vkCreateFence(context->vk_device, &fence_info, context->allocator, &fence);
 
   VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  
+
   // 1. Release from decode queue
   context->vkBeginCommandBuffer(decode_cb, &begin_info);
   VkImageMemoryBarrier2 release_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -249,7 +264,7 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
   regions[1].bufferOffset = luma_bytes;
   regions[1].imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, src->layer, 1};
   regions[1].imageExtent = {chroma_width, chroma_height, 1};
-  
+
   context->vkCmdCopyImageToBuffer(graphics_cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_buffer, 2, regions);
 
   release_barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -292,17 +307,17 @@ OMVulkanContext::OMVulkanContext(OMVulkanInit init)
 
   void* data;
   context->vkMapMemory(context->vk_device, staging_memory, 0, size, 0, &data);
-  
-  uint8_t* src_ptr = (uint8_t*)data;
-  uint8_t* d_y = (uint8_t*)dst_y;
+
+  uint8_t* src_ptr = (uint8_t*) data;
+  uint8_t* d_y = (uint8_t*) dst_y;
   for (uint32_t i = 0; i < height; ++i) {
-    memcpy(d_y + (size_t)i * stride_y, src_ptr + (size_t)i * width * bpp, (size_t)width * bpp);
+    memcpy(d_y + (size_t) i * stride_y, src_ptr + (size_t) i * width * bpp, (size_t) width * bpp);
   }
-  
+
   uint8_t* src_uv = src_ptr + luma_bytes;
-  uint8_t* d_uv = (uint8_t*)dst_uv;
+  uint8_t* d_uv = (uint8_t*) dst_uv;
   for (uint32_t i = 0; i < chroma_height; ++i) {
-    memcpy(d_uv + (size_t)i * stride_uv, src_uv + (size_t)i * chroma_row_bytes, chroma_row_bytes);
+    memcpy(d_uv + (size_t) i * stride_uv, src_uv + (size_t) i * chroma_row_bytes, chroma_row_bytes);
   }
 
   context->vkUnmapMemory(context->vk_device, staging_memory);

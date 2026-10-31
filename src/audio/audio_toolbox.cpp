@@ -87,7 +87,7 @@ auto buildMagicCookie(OMCodecId codec_id, std::span<const uint8_t> extradata) ->
     // If extradata is small (typically 2-5 bytes), it's likely a raw AudioSpecificConfig.
     // AudioToolbox often accepts this directly or prefers it over a double-wrapped ESDS.
     if (extradata.size() <= 5) {
-        return std::vector<uint8_t>(extradata.begin(), extradata.end());
+      return std::vector<uint8_t>(extradata.begin(), extradata.end());
     }
     return buildAacMagicCookie(extradata);
   }
@@ -437,15 +437,15 @@ public:
     }
 
     if (options.rate_control.getMode() == RateControlMode::ABR || options.rate_control.getMode() == RateControlMode::CBR) {
-        uint32_t bitrate = 0;
-        if (options.rate_control.getMode() == RateControlMode::ABR) {
-            bitrate = static_cast<uint32_t>(std::get<AbrParams>(options.rate_control.params).target_bitrate);
-        } else {
-            bitrate = static_cast<uint32_t>(std::get<CbrParams>(options.rate_control.params).bitrate.target_bitrate);
-        }
-        if (bitrate > 0) {
-            AudioConverterSetProperty(converter_, kAudioConverterEncodeBitRate, sizeof(bitrate), &bitrate);
-        }
+      uint32_t bitrate = 0;
+      if (options.rate_control.getMode() == RateControlMode::ABR) {
+        bitrate = static_cast<uint32_t>(std::get<AbrParams>(options.rate_control.params).target_bitrate);
+      } else {
+        bitrate = static_cast<uint32_t>(std::get<CbrParams>(options.rate_control.params).bitrate.target_bitrate);
+      }
+      if (bitrate > 0) {
+        AudioConverterSetProperty(converter_, kAudioConverterEncodeBitRate, sizeof(bitrate), &bitrate);
+      }
     }
 
     initialized_ = true;
@@ -455,12 +455,12 @@ public:
   auto getInfo() -> EncodingInfo override {
     EncodingInfo info = {};
     if (converter_) {
-        UInt32 size = 0;
-        OSStatus status = AudioConverterGetPropertyInfo(converter_, kAudioConverterCompressionMagicCookie, &size, nullptr);
-        if (status == noErr && size > 0) {
-            info.extradata.resize(size);
-            AudioConverterGetProperty(converter_, kAudioConverterCompressionMagicCookie, &size, info.extradata.data());
-        }
+      UInt32 size = 0;
+      OSStatus status = AudioConverterGetPropertyInfo(converter_, kAudioConverterCompressionMagicCookie, &size, nullptr);
+      if (status == noErr && size > 0) {
+        info.extradata.resize(size);
+        AudioConverterGetProperty(converter_, kAudioConverterCompressionMagicCookie, &size, info.extradata.data());
+      }
     }
     return info;
   }
@@ -493,19 +493,19 @@ public:
                                                       &packet_count,
                                                       &output_buffers,
                                                       &out_desc);
-    
+
     if (status != noErr && status != 1) { // 1 is often used to signal end of data in some contexts, but here we expect noErr
-        return Err(OM_CODEC_ENCODE_FAILED);
+      return Err(OM_CODEC_ENCODE_FAILED);
     }
 
     std::vector<Packet> packets;
     if (packet_count > 0) {
-        Packet packet;
-        packet.allocate(output_buffers.mBuffers[0].mDataByteSize);
-        std::memcpy(packet.bytes.data(), output_buffers.mBuffers[0].mData, packet.bytes.size());
-        packet.pts = frame.pts;
-        packet.dts = frame.dts;
-        packets.push_back(std::move(packet));
+      Packet packet;
+      packet.allocate(output_buffers.mBuffers[0].mDataByteSize);
+      std::memcpy(packet.bytes.data(), output_buffers.mBuffers[0].mData, packet.bytes.size());
+      packet.pts = frame.pts;
+      packet.dts = frame.dts;
+      packets.push_back(std::move(packet));
     }
 
     return Ok(std::move(packets));
@@ -544,58 +544,58 @@ auto createAudioToolboxEncoder(OMCodecId codec_id) -> std::unique_ptr<Encoder> {
 } // namespace
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_ALAC = {
-  .codec_id = OM_CODEC_ALAC,
-  .type = OM_MEDIA_AUDIO,
-  .name = "audiotoolbox_alac",
-  .long_name = "Apple Lossless Audio Codec (AudioToolbox)",
-  .vendor = "Apple",
-  .flags = NONE,
-  .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_ALAC); },
-  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_ALAC); },
+    .codec_id = OM_CODEC_ALAC,
+    .type = OM_MEDIA_AUDIO,
+    .name = "audiotoolbox_alac",
+    .long_name = "Apple Lossless Audio Codec (AudioToolbox)",
+    .vendor = "Apple",
+    .flags = NONE,
+    .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_ALAC); },
+    .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_ALAC); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_MP3 = {
-  .codec_id = OM_CODEC_MP3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "audiotoolbox_mp3",
-  .long_name = "MP3 (AudioToolbox)",
-  .vendor = "Apple",
-  .flags = NONE,
-  .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_MP3); },
-  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_MP3); },
+    .codec_id = OM_CODEC_MP3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "audiotoolbox_mp3",
+    .long_name = "MP3 (AudioToolbox)",
+    .vendor = "Apple",
+    .flags = NONE,
+    .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_MP3); },
+    .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_MP3); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_AAC = {
-  .codec_id = OM_CODEC_AAC,
-  .type = OM_MEDIA_AUDIO,
-  .name = "audiotoolbox_aac",
-  .long_name = "AAC (AudioToolbox)",
-  .vendor = "Apple",
-  .flags = NONE,
-  .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_AAC); },
-  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_AAC); },
+    .codec_id = OM_CODEC_AAC,
+    .type = OM_MEDIA_AUDIO,
+    .name = "audiotoolbox_aac",
+    .long_name = "AAC (AudioToolbox)",
+    .vendor = "Apple",
+    .flags = NONE,
+    .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_AAC); },
+    .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_AAC); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_AC3 = {
-  .codec_id = OM_CODEC_AC3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "audiotoolbox_ac3",
-  .long_name = "AC-3 (AudioToolbox)",
-  .vendor = "Apple",
-  .flags = NONE,
-  .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_AC3); },
-  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_AC3); },
+    .codec_id = OM_CODEC_AC3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "audiotoolbox_ac3",
+    .long_name = "AC-3 (AudioToolbox)",
+    .vendor = "Apple",
+    .flags = NONE,
+    .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_AC3); },
+    .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_AC3); },
 };
 
 const CodecDescriptor CODEC_AUDIO_TOOLBOX_EAC3 = {
-  .codec_id = OM_CODEC_EAC3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "audiotoolbox_eac3",
-  .long_name = "E-AC-3 (AudioToolbox)",
-  .vendor = "Apple",
-  .flags = NONE,
-  .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_EAC3); },
-  .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_EAC3); },
+    .codec_id = OM_CODEC_EAC3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "audiotoolbox_eac3",
+    .long_name = "E-AC-3 (AudioToolbox)",
+    .vendor = "Apple",
+    .flags = NONE,
+    .decoder_factory = [] { return createAudioToolboxDecoder(OM_CODEC_EAC3); },
+    .encoder_factory = [] { return createAudioToolboxEncoder(OM_CODEC_EAC3); },
 };
 
 } // namespace openmedia

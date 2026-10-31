@@ -13,4 +13,4 @@ overloads(Ts...) -> overloads<Ts...>;
 template<typename T>
 using fn_ptr = T*;
 
-}
+} // namespace openmedia

@@ -24,12 +24,12 @@ struct DataGuard {
 
 auto toOMError(WebPMuxError err) -> OMError {
   switch (err) {
-    case WEBP_MUX_OK:               return OM_SUCCESS;
-    case WEBP_MUX_MEMORY_ERROR:     return OM_COMMON_OUT_OF_MEMORY;
+    case WEBP_MUX_OK: return OM_SUCCESS;
+    case WEBP_MUX_MEMORY_ERROR: return OM_COMMON_OUT_OF_MEMORY;
     case WEBP_MUX_INVALID_ARGUMENT: return OM_COMMON_INVALID_ARGUMENT;
-    case WEBP_MUX_BAD_DATA:         return OM_FORMAT_INVALID_PACKET;
-    case WEBP_MUX_NOT_ENOUGH_DATA:  return OM_IO_NOT_ENOUGH_DATA;
-    default:                        return OM_FORMAT_MUXING_FAILED;
+    case WEBP_MUX_BAD_DATA: return OM_FORMAT_INVALID_PACKET;
+    case WEBP_MUX_NOT_ENOUGH_DATA: return OM_IO_NOT_ENOUGH_DATA;
+    default: return OM_FORMAT_MUXING_FAILED;
   }
 }
 

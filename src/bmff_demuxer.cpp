@@ -57,8 +57,8 @@ static auto isContainerBox(uint32_t type) -> bool {
       ATOM('w', 'a', 'v', 'e'),
       ATOM('s', 'i', 'n', 'f'), // protection scheme information
       ATOM('s', 'c', 'h', 'i'), // scheme information
-      // `udta`, `meta` and `ilst` are containers too, but each needs something
-      // done on the way in, so handleBox takes them itself.
+                                // `udta`, `meta` and `ilst` are containers too, but each needs something
+                                // done on the way in, so handleBox takes them itself.
   };
   return containsAtom(TABLE, type);
 }
@@ -210,7 +210,13 @@ static auto isPcmVariant(uint32_t fmt) -> bool {
 
 // QuickTime sound four-CCs carry the layout. A `wave/enda` box may flip the endianness,
 // so that is resolved separately.
-enum class PcmLayout : uint8_t { Unknown, U8, S16, S24, S32, F32, F64 };
+enum class PcmLayout : uint8_t { Unknown,
+                                 U8,
+                                 S16,
+                                 S24,
+                                 S32,
+                                 F32,
+                                 F64 };
 
 static auto pcmLayoutOf(uint32_t fmt) -> PcmLayout {
   switch (fmt) {
@@ -272,7 +278,7 @@ static auto ac3Channels(uint32_t acmod) -> uint32_t {
 }
 
 static auto ac3BitRateKbps(uint32_t bit_rate_code) -> uint32_t {
-  static constexpr uint16_t RATES[] = {32,  40,  48,  56,  64,  80,  96,
+  static constexpr uint16_t RATES[] = {32, 40, 48, 56, 64, 80, 96,
                                        112, 128, 160, 192, 224, 256, 320,
                                        384, 448, 512, 576, 640};
   return bit_rate_code < std::size(RATES) ? RATES[bit_rate_code] : 0u;
@@ -439,7 +445,13 @@ inline auto decodeIso639(uint16_t packed) -> std::string {
 
 // `esds` and friends appear under both audio and video entries, so the kind travels with
 // the recursion.
-enum class SampleEntryKind : uint8_t { None, Mp4aAudio, AlacAudio, Pcm, OtherAudio, Mpeg4Video, OtherVideo };
+enum class SampleEntryKind : uint8_t { None,
+                                       Mp4aAudio,
+                                       AlacAudio,
+                                       Pcm,
+                                       OtherAudio,
+                                       Mpeg4Video,
+                                       OtherVideo };
 
 static auto isAudioEntry(SampleEntryKind kind) -> bool {
   return kind == SampleEntryKind::Mp4aAudio || kind == SampleEntryKind::AlacAudio ||
@@ -497,9 +509,9 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
 
   // GASpecificConfig must be consumed before the 0x2B7 extension scan.
   if (usesGaSpecificConfig(aot)) {
-    r.skipBits(1); // frameLengthFlag
+    r.skipBits(1);                    // frameLengthFlag
     if (r.readFlag()) r.skipBits(14); // dependsOnCoreCoder → coreCoderDelay
-    r.skipBits(1); // extensionFlag
+    r.skipBits(1);                    // extensionFlag
   }
 
   // Implicit SBR/PS signalling. Speculative: without the sync word or the SBR flag the cursor
@@ -522,15 +534,17 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
 
   // --- Write outputs ---
 
-  if (sample_rate)            out_sample_rate = sample_rate;
-  if (sbr_found && ext_sr)   out_sample_rate = ext_sr;
-  if (channels)               out_channels    = channels;
+  if (sample_rate) out_sample_rate = sample_rate;
+  if (sbr_found && ext_sr) out_sample_rate = ext_sr;
+  if (channels) out_channels = channels;
   if (ps_found && out_channels == 1) out_channels = 2; // PS always upmixes mono → stereo
 
   uint32_t final_aot = aot;
-  if (ps_found)       final_aot = 29;
-  else if (sbr_found) final_aot = 5;
-  if (final_aot > 0)  out_profile = static_cast<OMProfile>(final_aot);
+  if (ps_found)
+    final_aot = 29;
+  else if (sbr_found)
+    final_aot = 5;
+  if (final_aot > 0) out_profile = static_cast<OMProfile>(final_aot);
 
   return true;
 }
@@ -975,8 +989,8 @@ inline auto parseAvcc(std::span<const uint8_t> body,
   if (!config) return false;
 
   track.track.format.profile = config->constrained_baseline
-      ? OM_PROFILE_H264_CONSTRAINED_BASELINE
-      : static_cast<OMProfile>(config->profile_idc);
+                                   ? OM_PROFILE_H264_CONSTRAINED_BASELINE
+                                   : static_cast<OMProfile>(config->profile_idc);
   track.track.extradata = config->annexb_extradata;
   track.nal_length_size = config->nal_length_size;
   track.bsf = std::make_unique<AnnexBFilter>(
@@ -1202,9 +1216,9 @@ inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track, bool is_a
 
   r.skip(2); // ES_ID
   const uint8_t es_flags = r.u8();
-  if (es_flags & 0x80u) { r.skip(2); }           // streamDependenceFlag → dependsOn_ES_ID
+  if (es_flags & 0x80u) { r.skip(2); }      // streamDependenceFlag → dependsOn_ES_ID
   if (es_flags & 0x40u) { r.skip(r.u8()); } // URL_Flag → URL_length + URL_string
-  if (es_flags & 0x20u) { r.skip(2); }           // OCRstreamFlag → OCR_ES_Id
+  if (es_flags & 0x20u) { r.skip(2); }      // OCRstreamFlag → OCR_ES_Id
 
   while (r.tell() < es_end) {
     const uint8_t tag = r.u8();
@@ -1533,8 +1547,8 @@ inline void parseSgpd(std::span<const uint8_t> body, CryptoScope& scope) {
 inline void parseSeigGroups(std::span<const uint8_t> body, CryptoScope& scope) {
   ByteReader r(body);
   const uint8_t version = r.u8();
-  r.skip(3);               // flags
-  r.skip(4);               // grouping_type, already read by the caller
+  r.skip(3);                   // flags
+  r.skip(4);                   // grouping_type, already read by the caller
   if (version == 1) r.skip(4); // grouping_type_parameter
 
   const uint32_t count = clampEntryCount(r, r.u32be(), 8);
@@ -2580,11 +2594,17 @@ private:
 
     size_t prev = samples_.size();
     for (size_t i = pivots.after; i-- > 0;) {
-      if (belongs(i)) { prev = i; break; }
+      if (belongs(i)) {
+        prev = i;
+        break;
+      }
     }
     size_t next = samples_.size();
     for (size_t i = pivots.at_or_after; i < samples_.size(); ++i) {
-      if (belongs(i)) { next = i; break; }
+      if (belongs(i)) {
+        next = i;
+        break;
+      }
     }
     return pickNearest(prev, next, target_ns);
   }
@@ -2781,7 +2801,8 @@ private:
     }
   }
 
-  enum class ParsingState { READING_HEADER, READY };
+  enum class ParsingState { READING_HEADER,
+                            READY };
   ParsingState parsing_state_ = ParsingState::READING_HEADER;
 
   // `storage` belongs to the caller so no two bodies share a scratch buffer. A short read is
@@ -2930,8 +2951,8 @@ private:
     r.skip(3);
 
     current_fragment_->decode_time = (version == 1)
-        ? static_cast<int64_t>(r.u64be())
-        : static_cast<int64_t>(r.u32be());
+                                         ? static_cast<int64_t>(r.u64be())
+                                         : static_cast<int64_t>(r.u32be());
     current_fragment_->has_decode_time = true;
   }
 
@@ -2966,8 +2987,8 @@ private:
             ? (track->samples.back().dts + static_cast<int64_t>(track->samples.back().duration))
             : (fragment_mode_ ? track->next_fragment_dts : 0);
     int64_t current_dts = current_fragment_->has_decode_time
-        ? (current_fragment_->decode_time - getEditListStartDts(*track, movie_timescale_))
-        : continued_dts;
+                              ? (current_fragment_->decode_time - getEditListStartDts(*track, movie_timescale_))
+                              : continued_dts;
 
     if (current_fragment_->sample_count == 0) {
       current_fragment_->first_sample = track->samples.size();
@@ -2978,11 +2999,11 @@ private:
     const size_t stream_size = sampleBound();
     for (uint32_t i = 0; i < sample_count && r.ok(); ++i) {
       const uint32_t duration = (flags & 0x000100u)
-          ? r.u32be()
-          : current_fragment_->default_sample_duration;
+                                    ? r.u32be()
+                                    : current_fragment_->default_sample_duration;
       const uint32_t size = (flags & 0x000200u)
-          ? r.u32be()
-          : current_fragment_->default_sample_size;
+                                ? r.u32be()
+                                : current_fragment_->default_sample_size;
 
       uint32_t sample_flags = current_fragment_->default_sample_flags;
       if (flags & 0x000400u) {
@@ -2992,8 +3013,8 @@ private:
       }
 
       const int32_t cts_offset = (flags & 0x000800u)
-          ? ((version == 1) ? r.i32be() : static_cast<int32_t>(r.u32be()))
-          : 0;
+                                     ? ((version == 1) ? r.i32be() : static_cast<int32_t>(r.u32be()))
+                                     : 0;
 
       const bool is_keyframe = track->track.format.type != OM_MEDIA_VIDEO ||
                                (sample_flags & 0x00010000u) == 0;
@@ -3133,7 +3154,7 @@ private:
       if (group > FRAGMENT_GROUP_BASE) {
         const size_t index = group - FRAGMENT_GROUP_BASE - 1u;
         return (fragment_scope && index < scope.group_keys.size()) ? &scope.group_keys[index]
-                                                                  : nullptr;
+                                                                   : nullptr;
       }
       const auto& list = fragment_scope ? track_groups : scope.group_keys;
       const size_t index = group - 1u;
@@ -3737,7 +3758,7 @@ private:
         }
         if (item_id != 0) {
           auto it = std::find_if(meta_items_.begin(), meta_items_.end(),
-                                [&](const MetaItem& m) { return m.id == item_id; });
+                                 [&](const MetaItem& m) { return m.id == item_id; });
           if (it != meta_items_.end()) {
             it->name = name;
             it->mime = mime;
@@ -3794,7 +3815,7 @@ private:
       }
       if (item_id != 0 && first_len > 0) {
         auto it = std::find_if(meta_items_.begin(), meta_items_.end(),
-                              [&](const MetaItem& m) { return m.id == item_id; });
+                               [&](const MetaItem& m) { return m.id == item_id; });
         if (it != meta_items_.end()) {
           it->offset = first_offset;
           it->length = first_len;

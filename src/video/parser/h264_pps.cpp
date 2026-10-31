@@ -65,7 +65,8 @@ auto read_pps(PPS& pps, const SPS sps_table[32], Bitstream& bs, openmedia::RbspB
     } else if (pps.slice_group_map_type == 6) {
       pps.pic_size_in_map_units_minus1 = static_cast<int>(br.readUE());
       if (pps.pic_size_in_map_units_minus1 < 0 || pps.pic_size_in_map_units_minus1 >= 256) return false;
-      const int bits = pps.num_slice_groups_minus1 + 1 <= 2 ? 1 : pps.num_slice_groups_minus1 + 1 <= 4 ? 2 : 3;
+      const int bits = pps.num_slice_groups_minus1 + 1 <= 2 ? 1 : pps.num_slice_groups_minus1 + 1 <= 4 ? 2
+                                                                                                       : 3;
       for (int i = 0; i <= pps.pic_size_in_map_units_minus1; ++i) pps.slice_group_id[i] = static_cast<int>(br.readBits(bits));
     }
   }

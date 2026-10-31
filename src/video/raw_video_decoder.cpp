@@ -110,13 +110,13 @@ public:
 };
 
 const CodecDescriptor CODEC_RAW_VIDEO = {
-  .codec_id = OM_CODEC_RAW_VIDEO,
-  .type = OM_MEDIA_VIDEO,
-  .name = "rawvideo",
-  .long_name = "Raw video decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<RawVideoDecoder>(); },
+    .codec_id = OM_CODEC_RAW_VIDEO,
+    .type = OM_MEDIA_VIDEO,
+    .name = "rawvideo",
+    .long_name = "Raw video decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<RawVideoDecoder>(); },
 };
 
 } // namespace openmedia

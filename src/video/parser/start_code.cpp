@@ -17,15 +17,15 @@ static auto countTrailingZeros(uint64_t value) -> int {
   assert(value != 0);
 #ifdef _WIN64
   unsigned long offset = 0;
-  (void)_BitScanForward64(&offset, value);
+  (void) _BitScanForward64(&offset, value);
   return static_cast<int>(offset);
 #elif defined(_WIN32)
   unsigned long offset = 0;
   unsigned long low = static_cast<unsigned long>(value & 0xffffffffULL);
   if (low != 0) {
-    (void)_BitScanForward(&offset, low);
+    (void) _BitScanForward(&offset, low);
   } else {
-    (void)_BitScanForward(&offset, static_cast<unsigned long>(value >> 32U));
+    (void) _BitScanForward(&offset, static_cast<unsigned long>(value >> 32U));
     offset += 32U;
   }
   return static_cast<int>(offset);
@@ -44,7 +44,7 @@ public:
 private:
   struct CpuInfo {
     CpuInfo() {
-      std::array<int, 4> cpui{};
+      std::array<int, 4> cpui {};
       __cpuid(cpui.data(), 0);
       const int nids = cpui[0];
       if (nids >= 1) {
@@ -57,8 +57,8 @@ private:
       }
     }
 
-    std::bitset<32> ecx1{};
-    std::bitset<32> ebx7{};
+    std::bitset<32> ecx1 {};
+    std::bitset<32> ebx7 {};
   };
 
   static const CpuInfo cpu_;

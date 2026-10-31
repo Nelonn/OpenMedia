@@ -45,7 +45,7 @@ enum StreamType : uint8_t {
 };
 
 constexpr uint32_t AAC_SAMPLE_RATES[] = {96000, 88200, 64000, 48000, 44100, 32000,
-                                        24000, 22050, 16000, 12000, 11025, 8000, 7350};
+                                         24000, 22050, 16000, 12000, 11025, 8000, 7350};
 constexpr uint8_t AAC_CHANNELS[] = {0, 1, 2, 3, 4, 5, 6, 8};
 
 // A 33-bit timestamp, spread over five bytes around the marker bits.
@@ -56,7 +56,7 @@ auto readTimestamp(const uint8_t* bytes) -> int64_t {
 }
 
 // The zero byte of a four-byte start code stays on the previous NAL; no reader minds.
-template <typename Fn>
+template<typename Fn>
 void forEachNal(std::span<const uint8_t> bytes, Fn&& fn) {
   video_parser::StartCodeScanner scanner;
   size_t start = 0;

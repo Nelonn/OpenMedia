@@ -264,7 +264,7 @@ static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, con
 auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256],
                        const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool {
   if (!bs.valid() || bs.remaining() == 0) return false;
-  const std::span<const uint8_t> nal_body{bs.current(), bs.remaining()};
+  const std::span<const uint8_t> nal_body {bs.current(), bs.remaining()};
   bs.finish();
 
   // The header is a few hundred bytes, the payload megabytes; only a long header pays twice.

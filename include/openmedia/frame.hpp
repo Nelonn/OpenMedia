@@ -12,4 +12,4 @@ struct OPENMEDIA_ABI Frame {
   std::variant<AudioSamples, Picture> data;
 };
 
-}
+} // namespace openmedia

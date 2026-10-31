@@ -191,14 +191,14 @@ struct OPENMEDIA_ABI VbrLatParams { // VBR_LAT
 };
 
 using RateControlVariant = std::variant<
-    CrfParams,    // CRF
-    CbrParams,    // CBR
-    VbrParams,    // VBR
-    CqpParams,    // CQP
-    AbrParams,    // ABR
-    HqcbrParams,  // HQCBR
-    HqvbrParams,  // HQVBR
-    QvbrParams,   // QVBR
+    CrfParams,   // CRF
+    CbrParams,   // CBR
+    VbrParams,   // VBR
+    CqpParams,   // CQP
+    AbrParams,   // ABR
+    HqcbrParams, // HQCBR
+    HqvbrParams, // HQVBR
+    QvbrParams,  // QVBR
     VbrLatParams // VBR_LAT
     //CrfParams     // ICQ - same shape as CRF, disambiguated by index (or wrap if desired)
     >;

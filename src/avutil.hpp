@@ -83,19 +83,25 @@ auto omSampleFormatToAvSampleFormat(OMSampleFormat om_fmt) -> AVSampleFormat;
 
 auto av_make_q(int num, int den) -> AVRational;
 
-template <typename T>
+template<typename T>
 struct AVDeleter {
   void operator()(T* ptr) const;
 };
 
-template <> void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const;
-template <> void AVDeleter<::AVCodecContext>::operator()(::AVCodecContext* ptr) const;
-template <> void AVDeleter<::AVPacket>::operator()(::AVPacket* ptr) const;
-template <> void AVDeleter<::AVCodecParserContext>::operator()(::AVCodecParserContext* ptr) const;
-template <> void AVDeleter<::AVFormatContext>::operator()(::AVFormatContext* ptr) const;
-template <> void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const;
+template<>
+void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const;
+template<>
+void AVDeleter<::AVCodecContext>::operator()(::AVCodecContext* ptr) const;
+template<>
+void AVDeleter<::AVPacket>::operator()(::AVPacket* ptr) const;
+template<>
+void AVDeleter<::AVCodecParserContext>::operator()(::AVCodecParserContext* ptr) const;
+template<>
+void AVDeleter<::AVFormatContext>::operator()(::AVFormatContext* ptr) const;
+template<>
+void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const;
 
-template <typename T>
+template<typename T>
 using AVPtr = std::unique_ptr<T, AVDeleter<T>>;
 
 inline auto avCodecIdToOmCodecId(AVCodecID id) -> OMCodecId {

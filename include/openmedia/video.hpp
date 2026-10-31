@@ -121,8 +121,8 @@ OM_ENUM(OMColorPrimaries, uint8_t) {
 };
 
 struct OPENMEDIA_ABI OMMasteringDisplayMetadata {
-  uint16_t display_primaries[3][2]; // 0.00002 units
-  uint16_t white_point[2];          // 0.00002 units
+  uint16_t display_primaries[3][2];         // 0.00002 units
+  uint16_t white_point[2];                  // 0.00002 units
   uint32_t max_display_mastering_luminance; // 0.0001 units
   uint32_t min_display_mastering_luminance; // 0.0001 units
   bool has_value = false;
@@ -387,7 +387,7 @@ struct OPENMEDIA_ABI Picture {
   OMTransferCharacteristic transfer_char;
   OMColorPrimaries color_primaries;
   OMColorRange color_range;
-  
+
   OMMasteringDisplayMetadata mastering_display;
   OMContentLightLevel content_light_level;
 

@@ -9,13 +9,12 @@
 
 // Blocking calls give up on their stop token, so shutdown is just request_stop(). An empty
 // queue accepts anything, so one oversized item can never wedge its producer.
-template <typename T>
+template<typename T>
 class BlockingQueue {
 public:
   using CostFn = size_t (*)(const T&);
 
-  explicit BlockingQueue(size_t max_items, size_t max_cost = SIZE_MAX,
-                         CostFn cost = [](const T&) -> size_t { return 0; })
+  explicit BlockingQueue(size_t max_items, size_t max_cost = SIZE_MAX, CostFn cost = [](const T&) -> size_t { return 0; })
       : max_items_(max_items), max_cost_(max_cost), cost_fn_(cost) {}
 
   auto push(T item, std::stop_token stop) -> bool {
@@ -38,7 +37,7 @@ public:
   }
 
   // Non-blocking: pops the front item only if `accept` agrees.
-  template <typename Pred>
+  template<typename Pred>
   auto popIf(Pred&& accept) -> std::optional<T> {
     std::lock_guard lock(mutex_);
     if (items_.empty() || !accept(items_.front())) return std::nullopt;

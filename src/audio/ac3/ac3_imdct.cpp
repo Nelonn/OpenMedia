@@ -25,7 +25,7 @@ auto besselI0(double x) -> double {
 // Output gain applied on top of the unnormalized transform.
 constexpr double OUTPUT_SCALE = -2.0;
 
-}
+} // namespace
 
 template<int M>
 void Imdct::Dct4<M>::init() {

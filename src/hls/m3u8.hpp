@@ -121,7 +121,11 @@ struct Variant {
   bool iframes_only = false;
 };
 
-enum class RenditionType : uint8_t { Unknown, Audio, Video, Subtitles, ClosedCaptions };
+enum class RenditionType : uint8_t { Unknown,
+                                     Audio,
+                                     Video,
+                                     Subtitles,
+                                     ClosedCaptions };
 
 // `#EXT-X-MEDIA`, one alternative track within a group.
 struct Rendition {

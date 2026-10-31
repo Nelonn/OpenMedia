@@ -81,7 +81,7 @@ auto LibAVFormat::isLoaded() const -> bool {
   return loaded_;
 }
 
-template <>
+template<>
 void AVDeleter<::AVFormatContext>::operator()(::AVFormatContext* ptr) const {
   if (ptr) {
     auto& loader = LibAVFormat::getInstance();
@@ -93,7 +93,7 @@ void AVDeleter<::AVFormatContext>::operator()(::AVFormatContext* ptr) const {
   }
 }
 
-template <>
+template<>
 void AVDeleter<::AVIOContext>::operator()(::AVIOContext* ptr) const {
   if (ptr) LibAVFormat::getInstance().avio_context_free(&ptr);
 }
@@ -115,7 +115,7 @@ private:
 
   AVPtr<AVFormatContext> fmt_ctx_;
   AVPtr<AVIOContext> avio_ctx_;
-  std::unique_ptr<uint8_t, void(*)(void*)> io_buf_ {nullptr, [](void* p) { if (p) LibAVUtil::getInstance().av_free(p); }};
+  std::unique_ptr<uint8_t, void (*)(void*)> io_buf_ {nullptr, [](void* p) { if (p) LibAVUtil::getInstance().av_free(p); }};
 
   AVPtr<AVPacket> packet_;
 
@@ -271,9 +271,9 @@ public:
       }
       ret = format_loader.avformat_seek_file(fmt_ctx_.get(), stream_idx, min_ts, timestamp, max_ts, flags);
     } else {
-      int flags = mode == SeekMode::DONT_SYNC ? AVSEEK_FLAG_ANY
+      int flags = mode == SeekMode::DONT_SYNC       ? AVSEEK_FLAG_ANY
                   : mode == SeekMode::PREVIOUS_SYNC ? AVSEEK_FLAG_BACKWARD
-                  : 0;
+                                                    : 0;
       ret = format_loader.av_seek_frame(fmt_ctx_.get(), stream_idx, timestamp, flags);
     }
     if (ret < 0) {
@@ -451,7 +451,7 @@ private:
 
   AVPtr<AVFormatContext> fmt_ctx_;
   AVPtr<AVIOContext> avio_ctx_;
-  std::unique_ptr<uint8_t, void(*)(void*)> io_buf_ {nullptr, [](void* p) { if (p) LibAVUtil::getInstance().av_free(p); }};
+  std::unique_ptr<uint8_t, void (*)(void*)> io_buf_ {nullptr, [](void* p) { if (p) LibAVUtil::getInstance().av_free(p); }};
 
   AVPtr<AVPacket> packet_;
 

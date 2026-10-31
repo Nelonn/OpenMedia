@@ -192,17 +192,26 @@ private:
   }
 
 public:
-  template<class F> constexpr auto map(F&& fn) & { return mapImpl(*this, std::forward<F>(fn)); }
-  template<class F> constexpr auto map(F&& fn) const& { return mapImpl(*this, std::forward<F>(fn)); }
-  template<class F> constexpr auto map(F&& fn) && { return mapImpl(std::move(*this), std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto map(F&& fn) & { return mapImpl(*this, std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto map(F&& fn) const& { return mapImpl(*this, std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto map(F&& fn) && { return mapImpl(std::move(*this), std::forward<F>(fn)); }
 
-  template<class F> constexpr auto mapErr(F&& fn) & { return mapErrImpl(*this, std::forward<F>(fn)); }
-  template<class F> constexpr auto mapErr(F&& fn) const& { return mapErrImpl(*this, std::forward<F>(fn)); }
-  template<class F> constexpr auto mapErr(F&& fn) && { return mapErrImpl(std::move(*this), std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto mapErr(F&& fn) & { return mapErrImpl(*this, std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto mapErr(F&& fn) const& { return mapErrImpl(*this, std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto mapErr(F&& fn) && { return mapErrImpl(std::move(*this), std::forward<F>(fn)); }
 
-  template<class F> constexpr auto andThen(F&& fn) & { return andThenImpl(*this, std::forward<F>(fn)); }
-  template<class F> constexpr auto andThen(F&& fn) const& { return andThenImpl(*this, std::forward<F>(fn)); }
-  template<class F> constexpr auto andThen(F&& fn) && { return andThenImpl(std::move(*this), std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto andThen(F&& fn) & { return andThenImpl(*this, std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto andThen(F&& fn) const& { return andThenImpl(*this, std::forward<F>(fn)); }
+  template<class F>
+  constexpr auto andThen(F&& fn) && { return andThenImpl(std::move(*this), std::forward<F>(fn)); }
 };
 
 template<class T, class E>

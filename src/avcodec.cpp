@@ -85,17 +85,17 @@ auto LibAVCodec::isLoaded() const -> bool {
   return loaded_;
 }
 
-template <>
+template<>
 void AVDeleter<::AVCodecContext>::operator()(::AVCodecContext* ptr) const {
   if (ptr) LibAVCodec::getInstance().avcodec_free_context(&ptr);
 }
 
-template <>
+template<>
 void AVDeleter<::AVPacket>::operator()(::AVPacket* ptr) const {
   if (ptr) LibAVCodec::getInstance().av_packet_free(&ptr);
 }
 
-template <>
+template<>
 void AVDeleter<::AVCodecParserContext>::operator()(::AVCodecParserContext* ptr) const {
   if (ptr) LibAVCodec::getInstance().av_parser_close(ptr);
 }
@@ -198,11 +198,11 @@ public:
     DecodingInfo info;
     info.media_type = (codec_ctx_->codec_type == AVMEDIA_TYPE_VIDEO)
                           ? OM_MEDIA_VIDEO
-                          : (codec_ctx_->codec_type == AVMEDIA_TYPE_AUDIO) ? OM_MEDIA_AUDIO
-                                                                           : OM_MEDIA_NONE;
+                      : (codec_ctx_->codec_type == AVMEDIA_TYPE_AUDIO) ? OM_MEDIA_AUDIO
+                                                                       : OM_MEDIA_NONE;
 
     if (info.media_type == OM_MEDIA_VIDEO) {
-      info.video_format = VideoFormat{
+      info.video_format = VideoFormat {
           .format = avPixelFormatToOmPixelFormat(codec_ctx_->pix_fmt),
           .width = static_cast<uint32_t>(codec_ctx_->width),
           .height = static_cast<uint32_t>(codec_ctx_->height),
@@ -213,7 +213,7 @@ public:
       };
     } else if (info.media_type == OM_MEDIA_AUDIO) {
       auto& util = LibAVUtil::getInstance();
-      info.audio_format = AudioFormat{
+      info.audio_format = AudioFormat {
           .sample_format = avSampleFormatToOmSampleFormat(codec_ctx_->sample_fmt),
           .bits_per_sample = static_cast<uint8_t>(codec_ctx_->bits_per_coded_sample),
           .sample_rate = static_cast<uint32_t>(codec_ctx_->sample_rate),
@@ -487,7 +487,8 @@ public:
         } else if constexpr (std::is_same_v<T, AbrParams>) {
           codec_ctx_->bit_rate = p.target_bitrate;
         }
-      }, rc.params);
+      },
+                 rc.params);
     };
 
     apply_rc(options.rate_control);
@@ -570,7 +571,6 @@ public:
             auto* cll = reinterpret_cast<AVContentLightMetadata*>(sd->data);
             cll->MaxCLL = pic.content_light_level.max_content_light_level;
             cll->MaxFALL = pic.content_light_level.max_pic_average_light_level;
-
           }
         }
 
@@ -646,7 +646,8 @@ public:
       } else if constexpr (std::is_same_v<T, AbrParams>) {
         codec_ctx_->bit_rate = p.target_bitrate;
       }
-    }, rc.params);
+    },
+               rc.params);
 
     return OM_SUCCESS;
   }
@@ -734,11 +735,11 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
         om_id == OM_CODEC_TGA) {
       desc->type = OM_MEDIA_IMAGE;
     } else {
-      desc->type = (codec->type == AVMEDIA_TYPE_VIDEO) ? OM_MEDIA_VIDEO :
-                   (codec->type == AVMEDIA_TYPE_AUDIO) ? OM_MEDIA_AUDIO :
-                   (codec->type == AVMEDIA_TYPE_SUBTITLE) ? OM_MEDIA_SUBTITLE : OM_MEDIA_NONE;
+      desc->type = (codec->type == AVMEDIA_TYPE_VIDEO) ? OM_MEDIA_VIDEO : (codec->type == AVMEDIA_TYPE_AUDIO)  ? OM_MEDIA_AUDIO
+                                                                      : (codec->type == AVMEDIA_TYPE_SUBTITLE) ? OM_MEDIA_SUBTITLE
+                                                                                                               : OM_MEDIA_NONE;
     }
-    
+
     if (desc->type == OM_MEDIA_NONE) continue;
 
     desc->name = FFMPEG_DESCRIPTORS.strings.concat("ffmpeg_", codec->name);
@@ -747,7 +748,7 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
     }
 
     desc->vendor = "FFmpeg";
-    
+
     // av_codec_iterate yields each implementation ("vvc", "libvvenc"), so a descriptor opens
     // exactly its own AVCodec rather than the id's default.
     if (loader.av_codec_is_decoder(codec)) {
@@ -763,7 +764,7 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
     }
 
     if (!desc->decoder_factory && !desc->encoder_factory) continue;
-    
+
     registry->registerCodec(desc.get());
     FFMPEG_DESCRIPTORS.descriptors.push_back(std::move(desc));
   }

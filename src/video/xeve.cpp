@@ -282,7 +282,8 @@ public:
     int force = 1;
     int size = sizeof(force);
     return XEVE_FAILED(xeve_config(ctx_.get(), XEVE_CFG_SET_FINTRA, &force, &size))
-               ? OM_CODEC_ENCODE_FAILED : OM_SUCCESS;
+               ? OM_CODEC_ENCODE_FAILED
+               : OM_SUCCESS;
   }
 };
 

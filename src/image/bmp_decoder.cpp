@@ -313,13 +313,13 @@ public:
 };
 
 const CodecDescriptor CODEC_BMP = {
-  .codec_id = OM_CODEC_BMP,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bmp",
-  .long_name = "BMP image decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<BMPDecoder>(); },
+    .codec_id = OM_CODEC_BMP,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bmp",
+    .long_name = "BMP image decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<BMPDecoder>(); },
 };
 
 } // namespace openmedia

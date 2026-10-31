@@ -284,8 +284,10 @@ public:
     if (!started_) return std::nullopt;
     DecodingInfo info;
     info.media_type = type_;
-    if (type_ == OM_MEDIA_VIDEO) info.video_format = video_format_;
-    else info.audio_format = audio_format_;
+    if (type_ == OM_MEDIA_VIDEO)
+      info.video_format = video_format_;
+    else
+      info.audio_format = audio_format_;
     return info;
   }
 
@@ -324,11 +326,11 @@ public:
         if (status != OM_SUCCESS) return Err(status);
       }
       if (!output_eof_) return Err(OM_COMMON_TIMEOUT);
-      return Ok(std::exchange(pending_eos_frames_, std::vector<Frame>{}));
+      return Ok(std::exchange(pending_eos_frames_, std::vector<Frame> {}));
     }
     OMError status = drainOutput(pending_eos_frames_, WAIT_US);
     if (status != OM_SUCCESS) return Err(status);
-    return Ok(std::exchange(pending_eos_frames_, std::vector<Frame>{}));
+    return Ok(std::exchange(pending_eos_frames_, std::vector<Frame> {}));
   }
 
   void flush() override {
@@ -408,7 +410,7 @@ class MediaCodecEncoder final : public Encoder {
           } else if (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) {
             if (encoding_info_.extradata.empty())
               encoding_info_.extradata.assign(buffer + info.offset,
-                                               buffer + info.offset + info.size);
+                                              buffer + info.offset + info.size);
           } else {
             Packet packet;
             packet.allocate(static_cast<size_t>(info.size));
@@ -530,8 +532,7 @@ public:
           return Err(OM_CODEC_INVALID_PARAMS);
         }
         for (size_t y = 0; y < height; ++y) {
-          std::memcpy(buffer + size, picture->planes.data[plane] +
-                      y * picture->planes.linesize[plane], width);
+          std::memcpy(buffer + size, picture->planes.data[plane] + y * picture->planes.linesize[plane], width);
           size += width;
         }
       }
@@ -554,7 +555,7 @@ public:
     }
     OMError status = drainOutput(pending_packets_, WAIT_US);
     if (status != OM_SUCCESS) return Err(status);
-    return Ok(std::exchange(pending_packets_, std::vector<Packet>{}));
+    return Ok(std::exchange(pending_packets_, std::vector<Packet> {}));
   }
 
   auto finish() -> Result<std::vector<Packet>, OMError> override {
@@ -577,8 +578,8 @@ public:
       if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
         return Err(OM_CODEC_NEED_MORE_DATA);
       if (index < 0 || AMediaCodec_queueInputBuffer(
-              codec_, index, 0, 0, 0,
-              AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != AMEDIA_OK)
+                           codec_, index, 0, 0, 0,
+                           AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != AMEDIA_OK)
         return Err(OM_CODEC_ENCODE_FAILED);
       input_eof_ = true;
     }
@@ -591,7 +592,7 @@ public:
     if (!output_eof_) {
       return Err(OM_COMMON_TIMEOUT);
     }
-    return Ok(std::exchange(pending_eos_packets_, std::vector<Packet>{}));
+    return Ok(std::exchange(pending_eos_packets_, std::vector<Packet> {}));
   }
 
   auto updateBitrate(const RateControlParams& rc) -> OMError override {
@@ -602,7 +603,8 @@ public:
         bitrate = params.bitrate.target_bitrate;
       else if constexpr (requires { params.target_bitrate; })
         bitrate = params.target_bitrate;
-    }, rc.params);
+    },
+               rc.params);
     if (bitrate == 0) return started_ ? OM_COMMON_NOT_SUPPORTED : OM_SUCCESS;
     if (bitrate < 0 || bitrate > INT32_MAX) return OM_CODEC_INVALID_PARAMS;
     if (!started_) {
@@ -635,16 +637,15 @@ public:
   }
 };
 
-#define DEFINE_MEDIACODEC_CODEC(id, type_val, name_str, long_name_str) \
-  const CodecDescriptor CODEC_MEDIACODEC_##id = { \
-    .codec_id = OM_CODEC_##id, \
-    .type = type_val, \
-    .name = "mediacodec_" name_str, \
-    .long_name = "MediaCodec " long_name_str, \
-    .flags = HARDWARE, \
-    .decoder_factory = []() { return std::make_unique<MediaCodecDecoder>(); }, \
-    .encoder_factory = []() { return std::make_unique<MediaCodecEncoder>(); } \
-  }
+#define DEFINE_MEDIACODEC_CODEC(id, type_val, name_str, long_name_str)           \
+  const CodecDescriptor CODEC_MEDIACODEC_##id = {                                \
+      .codec_id = OM_CODEC_##id,                                                 \
+      .type = type_val,                                                          \
+      .name = "mediacodec_" name_str,                                            \
+      .long_name = "MediaCodec " long_name_str,                                  \
+      .flags = HARDWARE,                                                         \
+      .decoder_factory = []() { return std::make_unique<MediaCodecDecoder>(); }, \
+      .encoder_factory = []() { return std::make_unique<MediaCodecEncoder>(); }}
 
 DEFINE_MEDIACODEC_CODEC(H264, OM_MEDIA_VIDEO, "h264", "H.264 (AVC)");
 DEFINE_MEDIACODEC_CODEC(H265, OM_MEDIA_VIDEO, "h265", "H.265 (HEVC)");

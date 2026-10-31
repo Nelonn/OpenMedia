@@ -10,8 +10,8 @@ extern "C" {
 typedef void* VADisplay;
 
 typedef struct OMVAAPIInit {
-    VADisplay display;
-    int drm_fd;
+  VADisplay display;
+  int drm_fd;
 } OMVAAPIInit;
 
 typedef struct OMVAAPIContext OMVAAPIContext;
@@ -44,15 +44,15 @@ namespace openmedia {
 
 class OPENMEDIA_ABI VAAPIHardwarePicture : public HardwarePicture {
 public:
-    VAAPIHardwarePicture(VADisplay display, uint32_t surface)
-        : HardwarePicture(HWDeviceType::VAAPI), display_(display), surface_(surface) {}
+  VAAPIHardwarePicture(VADisplay display, uint32_t surface)
+      : HardwarePicture(HWDeviceType::VAAPI), display_(display), surface_(surface) {}
 
-    auto display() const noexcept -> VADisplay { return display_; }
-    auto surface() const noexcept -> uint32_t { return surface_; }
+  auto display() const noexcept -> VADisplay { return display_; }
+  auto surface() const noexcept -> uint32_t { return surface_; }
 
 private:
-    VADisplay display_ = nullptr;
-    uint32_t surface_ = 0xffffffffu;
+  VADisplay display_ = nullptr;
+  uint32_t surface_ = 0xffffffffu;
 };
 
 } // namespace openmedia

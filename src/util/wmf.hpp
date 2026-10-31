@@ -18,4 +18,4 @@ inline auto codecIdToMFVideoFormat(OMCodecId codec) -> GUID {
   }
 }
 
-}
+} // namespace openmedia

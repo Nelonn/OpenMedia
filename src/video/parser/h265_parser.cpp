@@ -17,7 +17,9 @@ static constexpr int MAX_ENTRY_POINT_OFFSETS = 1 << 16;
 
 // Result of a slice header attempt. `truncated` means the unescaped prefix ran
 // out, not that the stream is bad, so the caller may retry with more data.
-enum class HevcParse { ok, invalid, truncated };
+enum class HevcParse { ok,
+                       invalid,
+                       truncated };
 
 static auto isAnnexB(std::span<const uint8_t> data) noexcept -> bool {
   return data.size() >= 3 && data[0] == 0 && data[1] == 0 &&
@@ -258,25 +260,137 @@ namespace {
 // Table 7-6 in raster order; the lists themselves are kept in coded order, so
 // defaultList8x8() reorders these through the diagonal scan.
 constexpr uint8_t kDefaultScalingListIntraRaster[64] = {
-    16, 16, 16, 16, 17, 18, 21, 24,
-    16, 16, 16, 16, 17, 19, 22, 25,
-    16, 16, 17, 18, 20, 22, 25, 29,
-    16, 16, 18, 21, 24, 27, 31, 36,
-    17, 17, 20, 24, 30, 35, 41, 47,
-    18, 19, 22, 27, 35, 44, 54, 65,
-    21, 22, 25, 31, 41, 54, 70, 88,
-    24, 25, 29, 36, 47, 65, 88, 115,
+    16,
+    16,
+    16,
+    16,
+    17,
+    18,
+    21,
+    24,
+    16,
+    16,
+    16,
+    16,
+    17,
+    19,
+    22,
+    25,
+    16,
+    16,
+    17,
+    18,
+    20,
+    22,
+    25,
+    29,
+    16,
+    16,
+    18,
+    21,
+    24,
+    27,
+    31,
+    36,
+    17,
+    17,
+    20,
+    24,
+    30,
+    35,
+    41,
+    47,
+    18,
+    19,
+    22,
+    27,
+    35,
+    44,
+    54,
+    65,
+    21,
+    22,
+    25,
+    31,
+    41,
+    54,
+    70,
+    88,
+    24,
+    25,
+    29,
+    36,
+    47,
+    65,
+    88,
+    115,
 };
 
 constexpr uint8_t kDefaultScalingListInterRaster[64] = {
-    16, 16, 16, 16, 17, 18, 20, 24,
-    16, 16, 16, 17, 18, 20, 24, 25,
-    16, 16, 17, 18, 20, 24, 25, 28,
-    16, 17, 18, 20, 24, 25, 28, 33,
-    17, 18, 20, 24, 25, 28, 33, 41,
-    18, 20, 24, 25, 28, 33, 41, 54,
-    20, 24, 25, 28, 33, 41, 54, 71,
-    24, 25, 28, 33, 41, 54, 71, 91,
+    16,
+    16,
+    16,
+    16,
+    17,
+    18,
+    20,
+    24,
+    16,
+    16,
+    16,
+    17,
+    18,
+    20,
+    24,
+    25,
+    16,
+    16,
+    17,
+    18,
+    20,
+    24,
+    25,
+    28,
+    16,
+    17,
+    18,
+    20,
+    24,
+    25,
+    28,
+    33,
+    17,
+    18,
+    20,
+    24,
+    25,
+    28,
+    33,
+    41,
+    18,
+    20,
+    24,
+    25,
+    28,
+    33,
+    41,
+    54,
+    20,
+    24,
+    25,
+    28,
+    33,
+    41,
+    54,
+    71,
+    24,
+    25,
+    28,
+    33,
+    41,
+    54,
+    71,
+    91,
 };
 
 // matrixId 0..2 are the intra lists, 3..5 the inter ones; for sizeId 3 the two
@@ -311,15 +425,23 @@ auto H265AccessUnitParser::parseScalingListData(openmedia::BitReader& br, H265Sc
         if (pred_matrix_id_delta == 0) {
           // Table 7-5/7-6: the 4x4 default is flat, the larger ones are not.
           const bool intra = size_id == 3 ? matrix_id == 0 : matrix_id < 3;
-          if (size_id == 0) std::memset(sl.scaling_list_4x4[matrix_id], 16, 16);
-          else if (size_id == 1) defaultList8x8(sl.scaling_list_8x8[matrix_id], intra);
-          else if (size_id == 2) defaultList8x8(sl.scaling_list_16x16[matrix_id], intra);
-          else defaultList8x8(sl.scaling_list_32x32[matrix_id], intra);
-          if (size_id == 2) sl.scaling_list_dc_coef_16x16[matrix_id] = 16;
-          else if (size_id == 3) sl.scaling_list_dc_coef_32x32[matrix_id] = 16;
+          if (size_id == 0)
+            std::memset(sl.scaling_list_4x4[matrix_id], 16, 16);
+          else if (size_id == 1)
+            defaultList8x8(sl.scaling_list_8x8[matrix_id], intra);
+          else if (size_id == 2)
+            defaultList8x8(sl.scaling_list_16x16[matrix_id], intra);
+          else
+            defaultList8x8(sl.scaling_list_32x32[matrix_id], intra);
+          if (size_id == 2)
+            sl.scaling_list_dc_coef_16x16[matrix_id] = 16;
+          else if (size_id == 3)
+            sl.scaling_list_dc_coef_32x32[matrix_id] = 16;
         } else {
-          if (size_id == 0) std::memcpy(sl.scaling_list_4x4[matrix_id], sl.scaling_list_4x4[pred_matrix_id], 16);
-          else if (size_id == 1) std::memcpy(sl.scaling_list_8x8[matrix_id], sl.scaling_list_8x8[pred_matrix_id], 64);
+          if (size_id == 0)
+            std::memcpy(sl.scaling_list_4x4[matrix_id], sl.scaling_list_4x4[pred_matrix_id], 16);
+          else if (size_id == 1)
+            std::memcpy(sl.scaling_list_8x8[matrix_id], sl.scaling_list_8x8[pred_matrix_id], 64);
           else if (size_id == 2) {
             std::memcpy(sl.scaling_list_16x16[matrix_id], sl.scaling_list_16x16[pred_matrix_id], 64);
             sl.scaling_list_dc_coef_16x16[matrix_id] = sl.scaling_list_dc_coef_16x16[pred_matrix_id];
@@ -335,8 +457,10 @@ auto H265AccessUnitParser::parseScalingListData(openmedia::BitReader& br, H265Sc
           const int dc_delta = br.readSE();
           if (dc_delta < -7 || dc_delta > 247) return false;
           const int dc_coef = dc_delta + 8;
-          if (size_id == 2) sl.scaling_list_dc_coef_16x16[matrix_id] = static_cast<uint8_t>(dc_coef);
-          else sl.scaling_list_dc_coef_32x32[matrix_id] = static_cast<uint8_t>(dc_coef);
+          if (size_id == 2)
+            sl.scaling_list_dc_coef_16x16[matrix_id] = static_cast<uint8_t>(dc_coef);
+          else
+            sl.scaling_list_dc_coef_32x32[matrix_id] = static_cast<uint8_t>(dc_coef);
           next_coef = dc_coef;
         }
         for (int i = 0; i < coef_count; ++i) {
@@ -344,10 +468,14 @@ auto H265AccessUnitParser::parseScalingListData(openmedia::BitReader& br, H265Sc
           if (delta_coef < -128 || delta_coef > 127) return false;
           // & 0xff, not % 256: a negative remainder would put out-of-range entries in the matrix.
           next_coef = (next_coef + delta_coef + 256) & 0xff;
-          if (size_id == 0) sl.scaling_list_4x4[matrix_id][i] = static_cast<uint8_t>(next_coef);
-          else if (size_id == 1) sl.scaling_list_8x8[matrix_id][i] = static_cast<uint8_t>(next_coef);
-          else if (size_id == 2) sl.scaling_list_16x16[matrix_id][i] = static_cast<uint8_t>(next_coef);
-          else sl.scaling_list_32x32[matrix_id][i] = static_cast<uint8_t>(next_coef);
+          if (size_id == 0)
+            sl.scaling_list_4x4[matrix_id][i] = static_cast<uint8_t>(next_coef);
+          else if (size_id == 1)
+            sl.scaling_list_8x8[matrix_id][i] = static_cast<uint8_t>(next_coef);
+          else if (size_id == 2)
+            sl.scaling_list_16x16[matrix_id][i] = static_cast<uint8_t>(next_coef);
+          else
+            sl.scaling_list_32x32[matrix_id][i] = static_cast<uint8_t>(next_coef);
         }
       }
       if (!br.ok()) return false;

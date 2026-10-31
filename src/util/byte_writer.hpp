@@ -55,20 +55,47 @@ class BasicByteWriter {
 
 public:
   template<class Target>
-    requires std::constructible_from<Sink, Target&&>
+  requires std::constructible_from<Sink, Target&&>
   explicit BasicByteWriter(Target&& target) noexcept : sink_(std::forward<Target>(target)) {}
 
-  auto u8(uint8_t v) -> BasicByteWriter& { *sink_.grow(1) = v; return *this; }
+  auto u8(uint8_t v) -> BasicByteWriter& {
+    *sink_.grow(1) = v;
+    return *this;
+  }
 
-  auto u16be(uint16_t v) -> BasicByteWriter& { store_u16_be(sink_.grow(2), v); return *this; }
-  auto u24be(uint32_t v) -> BasicByteWriter& { store_u24_be(sink_.grow(3), v); return *this; }
-  auto u32be(uint32_t v) -> BasicByteWriter& { store_u32_be(sink_.grow(4), v); return *this; }
-  auto u64be(uint64_t v) -> BasicByteWriter& { store_u64_be(sink_.grow(8), v); return *this; }
+  auto u16be(uint16_t v) -> BasicByteWriter& {
+    store_u16_be(sink_.grow(2), v);
+    return *this;
+  }
+  auto u24be(uint32_t v) -> BasicByteWriter& {
+    store_u24_be(sink_.grow(3), v);
+    return *this;
+  }
+  auto u32be(uint32_t v) -> BasicByteWriter& {
+    store_u32_be(sink_.grow(4), v);
+    return *this;
+  }
+  auto u64be(uint64_t v) -> BasicByteWriter& {
+    store_u64_be(sink_.grow(8), v);
+    return *this;
+  }
 
-  auto u16le(uint16_t v) -> BasicByteWriter& { store_u16_le(sink_.grow(2), v); return *this; }
-  auto u24le(uint32_t v) -> BasicByteWriter& { store_u24_le(sink_.grow(3), v); return *this; }
-  auto u32le(uint32_t v) -> BasicByteWriter& { store_u32_le(sink_.grow(4), v); return *this; }
-  auto u64le(uint64_t v) -> BasicByteWriter& { store_u64_le(sink_.grow(8), v); return *this; }
+  auto u16le(uint16_t v) -> BasicByteWriter& {
+    store_u16_le(sink_.grow(2), v);
+    return *this;
+  }
+  auto u24le(uint32_t v) -> BasicByteWriter& {
+    store_u24_le(sink_.grow(3), v);
+    return *this;
+  }
+  auto u32le(uint32_t v) -> BasicByteWriter& {
+    store_u32_le(sink_.grow(4), v);
+    return *this;
+  }
+  auto u64le(uint64_t v) -> BasicByteWriter& {
+    store_u64_le(sink_.grow(8), v);
+    return *this;
+  }
 
   auto bytes(std::span<const uint8_t> data) -> BasicByteWriter& {
     if (!data.empty()) {

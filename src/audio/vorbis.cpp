@@ -394,20 +394,20 @@ private:
 };
 
 const CodecDescriptor CODEC_VORBIS = {
-  .codec_id = OM_CODEC_VORBIS,
-  .type = OM_MEDIA_AUDIO,
-  .name = "vorbis",
-  .long_name = "Vorbis Audio Codec",
-  .vendor = "Xiph.Org",
-  .flags = NONE,
-  .caps = CodecCaps {
-    .audio = AudioCodecCaps {
-      .fmt_f32 = true,
-      .sample_rates = {8000, 11025, 16000, 22050, 32000, 44100, 48000},
+    .codec_id = OM_CODEC_VORBIS,
+    .type = OM_MEDIA_AUDIO,
+    .name = "vorbis",
+    .long_name = "Vorbis Audio Codec",
+    .vendor = "Xiph.Org",
+    .flags = NONE,
+    .caps = CodecCaps {
+        .audio = AudioCodecCaps {
+            .fmt_f32 = true,
+            .sample_rates = {8000, 11025, 16000, 22050, 32000, 44100, 48000},
+        },
     },
-  },
-  .decoder_factory = [] { return std::make_unique<VorbisDecoder>(); },
-  .encoder_factory = [] { return std::make_unique<VorbisEncoder>(); },
+    .decoder_factory = [] { return std::make_unique<VorbisDecoder>(); },
+    .encoder_factory = [] { return std::make_unique<VorbisEncoder>(); },
 };
 
 } // namespace openmedia

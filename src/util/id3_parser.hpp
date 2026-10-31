@@ -488,4 +488,4 @@ inline void parseId3v1(std::span<const uint8_t> data, Dictionary& metadata) {
   }
 }
 
-}
+} // namespace openmedia

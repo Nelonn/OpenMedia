@@ -446,8 +446,8 @@ private:
 
   // ARGB decoder (ic04, ic05, icsb)
   static auto decodeARGB(const ParsedElement& el,
-                  std::span<const uint8_t> raw,
-                  std::vector<uint8_t>& out) -> OMError {
+                         std::span<const uint8_t> raw,
+                         std::vector<uint8_t>& out) -> OMError {
     ElementInfo info = elementInfo(el.type);
     uint32_t w = info.width;
     uint32_t h = info.height;
@@ -470,15 +470,18 @@ private:
 
     consumed = decompressChannel(src, avail, ch_a, n_pixels);
     if (!consumed) return OM_FORMAT_PARSE_FAILED;
-    src += consumed; avail -= consumed;
+    src += consumed;
+    avail -= consumed;
 
     consumed = decompressChannel(src, avail, ch_r, n_pixels);
     if (!consumed) return OM_FORMAT_PARSE_FAILED;
-    src += consumed; avail -= consumed;
+    src += consumed;
+    avail -= consumed;
 
     consumed = decompressChannel(src, avail, ch_g, n_pixels);
     if (!consumed) return OM_FORMAT_PARSE_FAILED;
-    src += consumed; avail -= consumed;
+    src += consumed;
+    avail -= consumed;
 
     // Blue is last; tolerate partial decompression (known macOS 11 bug).
     decompressChannel(src, avail, ch_b, n_pixels);
@@ -517,11 +520,13 @@ private:
 
     consumed = decompressChannel(src, src_len, ch_r.data(), n_pixels);
     if (!consumed) return OM_FORMAT_PARSE_FAILED;
-    src += consumed; src_len -= consumed;
+    src += consumed;
+    src_len -= consumed;
 
     consumed = decompressChannel(src, src_len, ch_g.data(), n_pixels);
     if (!consumed) return OM_FORMAT_PARSE_FAILED;
-    src += consumed; src_len -= consumed;
+    src += consumed;
+    src_len -= consumed;
 
     consumed = decompressChannel(src, src_len, ch_b.data(), n_pixels);
     if (!consumed) return OM_FORMAT_PARSE_FAILED;

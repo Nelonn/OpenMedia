@@ -17,9 +17,9 @@ namespace openmedia {
 
 /** One byte range of one resource, named the way the manifest named it. */
 struct OPENMEDIA_ABI SegmentRequest {
-  std::string url;      // absolute, already resolved against the manifest's own URL
-  int64_t offset = 0;   // start of the byte range
-  int64_t length = -1;  // -1 asks for everything from `offset` on
+  std::string url;     // absolute, already resolved against the manifest's own URL
+  int64_t offset = 0;  // start of the byte range
+  int64_t length = -1; // -1 asks for everything from `offset` on
 
   auto operator==(const SegmentRequest& other) const -> bool {
     return offset == other.offset && length == other.length && url == other.url;
@@ -33,9 +33,9 @@ struct OPENMEDIA_ABI SegmentRequest {
  */
 struct OPENMEDIA_ABI SegmentPlan {
   SegmentRequest request;
-  int32_t track_index = -1;   // the track it feeds
-  int64_t start_time_ns = 0;  // presentation time of its first sample
-  int64_t duration_ns = 0;    // 0 when the manifest or playlist does not say
+  int32_t track_index = -1;  // the track it feeds
+  int64_t start_time_ns = 0; // presentation time of its first sample
+  int64_t duration_ns = 0;   // 0 when the manifest or playlist does not say
   // Needed before any media segment of that track, and again after
   // selectRepresentation().
   bool initialization = false;

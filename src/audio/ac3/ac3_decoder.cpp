@@ -75,34 +75,34 @@ constexpr auto CRC_TABLE = [] {
 // Speaker location of each coded channel for every acmod (A/52 Table 5.8).
 // Single surround channels map to back center.
 constexpr uint64_t ACMOD_LOCATIONS[8][5] = {
-  {CH_FRONT_LEFT, CH_FRONT_RIGHT},
-  {CH_FRONT_CENTER},
-  {CH_FRONT_LEFT, CH_FRONT_RIGHT},
-  {CH_FRONT_LEFT, CH_FRONT_CENTER, CH_FRONT_RIGHT},
-  {CH_FRONT_LEFT, CH_FRONT_RIGHT, CH_BACK_CENTER},
-  {CH_FRONT_LEFT, CH_FRONT_CENTER, CH_FRONT_RIGHT, CH_BACK_CENTER},
-  {CH_FRONT_LEFT, CH_FRONT_RIGHT, CH_SIDE_LEFT, CH_SIDE_RIGHT},
-  {CH_FRONT_LEFT, CH_FRONT_CENTER, CH_FRONT_RIGHT, CH_SIDE_LEFT, CH_SIDE_RIGHT},
+    {CH_FRONT_LEFT, CH_FRONT_RIGHT},
+    {CH_FRONT_CENTER},
+    {CH_FRONT_LEFT, CH_FRONT_RIGHT},
+    {CH_FRONT_LEFT, CH_FRONT_CENTER, CH_FRONT_RIGHT},
+    {CH_FRONT_LEFT, CH_FRONT_RIGHT, CH_BACK_CENTER},
+    {CH_FRONT_LEFT, CH_FRONT_CENTER, CH_FRONT_RIGHT, CH_BACK_CENTER},
+    {CH_FRONT_LEFT, CH_FRONT_RIGHT, CH_SIDE_LEFT, CH_SIDE_RIGHT},
+    {CH_FRONT_LEFT, CH_FRONT_CENTER, CH_FRONT_RIGHT, CH_SIDE_LEFT, CH_SIDE_RIGHT},
 };
 
 // Locations for each chanmap bit, most significant bit first (TS 102 366 Table E1.4).
 constexpr uint64_t CHANMAP_LOCATIONS[16][2] = {
-  {CH_FRONT_LEFT, 0},
-  {CH_FRONT_CENTER, 0},
-  {CH_FRONT_RIGHT, 0},
-  {CH_SIDE_LEFT, 0},
-  {CH_SIDE_RIGHT, 0},
-  {CH_FRONT_LEFT_OF_CENTER, CH_FRONT_RIGHT_OF_CENTER},
-  {CH_BACK_LEFT, CH_BACK_RIGHT},
-  {CH_BACK_CENTER, 0},
-  {CH_TOP_CENTER, 0},
-  {CH_SURROUND_DIRECT_LEFT, CH_SURROUND_DIRECT_RIGHT},
-  {CH_WIDE_LEFT, CH_WIDE_RIGHT},
-  {CH_TOP_FRONT_LEFT, CH_TOP_FRONT_RIGHT},
-  {CH_TOP_FRONT_CENTER, 0},
-  {CH_TOP_BACK_LEFT, CH_TOP_BACK_RIGHT},
-  {CH_LOW_FREQUENCY_2, 0},
-  {CH_LOW_FREQUENCY, 0},
+    {CH_FRONT_LEFT, 0},
+    {CH_FRONT_CENTER, 0},
+    {CH_FRONT_RIGHT, 0},
+    {CH_SIDE_LEFT, 0},
+    {CH_SIDE_RIGHT, 0},
+    {CH_FRONT_LEFT_OF_CENTER, CH_FRONT_RIGHT_OF_CENTER},
+    {CH_BACK_LEFT, CH_BACK_RIGHT},
+    {CH_BACK_CENTER, 0},
+    {CH_TOP_CENTER, 0},
+    {CH_SURROUND_DIRECT_LEFT, CH_SURROUND_DIRECT_RIGHT},
+    {CH_WIDE_LEFT, CH_WIDE_RIGHT},
+    {CH_TOP_FRONT_LEFT, CH_TOP_FRONT_RIGHT},
+    {CH_TOP_FRONT_CENTER, 0},
+    {CH_TOP_BACK_LEFT, CH_TOP_BACK_RIGHT},
+    {CH_LOW_FREQUENCY_2, 0},
+    {CH_LOW_FREQUENCY, 0},
 };
 
 // Dynamic range gain word to linear gain (A/52 Section 7.7.1.2): a 3-bit
@@ -146,7 +146,7 @@ auto calcLowComp(int a, int b0, int b1, int band) -> int {
   return std::max(a - 128, 0);
 }
 
-}
+} // namespace
 
 auto parseFrameHeader(std::span<const uint8_t> data) -> std::optional<FrameHeader> {
   if (data.size() < 8 || data[0] != 0x0B || data[1] != 0x77) return std::nullopt;
@@ -297,7 +297,8 @@ auto SubstreamDecoder::decode(std::span<const uint8_t> frame, const PcmTarget& t
     ba_shift_ = header_.sr_shift;
   } else if (header_.sr_shift) {
     // Reduced rate E-AC-3: fscod2 selects the hearing threshold column.
-    ba_fscod_ = header_.sample_rate == 24000 ? 0 : header_.sample_rate == 22050 ? 1 : 2;
+    ba_fscod_ = header_.sample_rate == 24000 ? 0 : header_.sample_rate == 22050 ? 1
+                                                                                : 2;
     ba_shift_ = 0;
   } else {
     ba_fscod_ = header_.fscod;
@@ -342,8 +343,8 @@ auto SubstreamDecoder::decode(std::span<const uint8_t> frame, const PcmTarget& t
 }
 
 auto SubstreamDecoder::parseAc3Bsi(BitReader& br) -> bool {
-  br.skipBits(16 + 2 + 6); // crc1, fscod, frmsizecod
-  br.skipBits(5 + 3 + 3);  // bsid, bsmod, acmod
+  br.skipBits(16 + 2 + 6);                         // crc1, fscod, frmsizecod
+  br.skipBits(5 + 3 + 3);                          // bsid, bsmod, acmod
   if ((acmod_ & 1) && acmod_ != 1) br.skipBits(2); // cmixlev
   if (acmod_ & 4) br.skipBits(2);                  // surmixlev
   if (acmod_ == 2) br.skipBits(2);                 // dsurmod
@@ -662,7 +663,7 @@ void SubstreamDecoder::parseSpxCoordinates(BitReader& br) {
       const int size = spx_band_sizes_[bnd];
       // Noise blending grows towards the top of the extension range.
       const float nratio =
-        std::clamp(static_cast<float>(bin + size / 2) / static_cast<float>(spx_end_) - blend, 0.0f, 1.0f);
+          std::clamp(static_cast<float>(bin + size / 2) / static_cast<float>(spx_end_) - blend, 0.0f, 1.0f);
       bin += size;
 
       const int exp = static_cast<int>(br.readBits(4));

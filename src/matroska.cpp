@@ -947,15 +947,15 @@ private:
     switch (track.format.codec_id) {
       case OM_CODEC_H264: config = parseAvcDecoderConfig(track.extradata); break;
       case OM_CODEC_H265: config = parseHevcDecoderConfig(track.extradata); break;
-      case OM_CODEC_VVC:  config = parseVvcDecoderConfig(track.extradata); break;
+      case OM_CODEC_VVC: config = parseVvcDecoderConfig(track.extradata); break;
       default: return;
     }
     if (!config || config->annexb_extradata.empty()) return;
 
     if (config->profile_idc) {
       track.format.profile = config->constrained_baseline
-          ? OM_PROFILE_H264_CONSTRAINED_BASELINE
-          : static_cast<OMProfile>(config->profile_idc);
+                                 ? OM_PROFILE_H264_CONSTRAINED_BASELINE
+                                 : static_cast<OMProfile>(config->profile_idc);
     }
 
     track.extradata = config->annexb_extradata;

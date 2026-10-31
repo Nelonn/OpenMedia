@@ -527,7 +527,7 @@ private:
     if ((channel_code < 8 ? channel_code + 1u : 2u) != stream_info_.channels) return false;
 
     const uint8_t depth_code = (d[3] >> 1) & 0x07;
-    if (depth_code == 3) return false;  // reserved
+    if (depth_code == 3) return false;    // reserved
     if ((d[3] & 0x01) != 0) return false; // reserved bit
     if (depth_code != 0 && BIT_DEPTH_CODES[depth_code] != stream_info_.bits_per_sample) return false;
 
@@ -1093,8 +1093,8 @@ private:
 
       ByteWriter w(header_bytes);
       w.str("fLaC")
-       .u8((has_picture ? 0x00 : 0x80) | static_cast<uint8_t>(FLACMetadataType::STREAMINFO))
-       .u24be(34);
+          .u8((has_picture ? 0x00 : 0x80) | static_cast<uint8_t>(FLACMetadataType::STREAMINFO))
+          .u24be(34);
       streaminfo_offset_ = static_cast<int64_t>(w.size());
       w.bytes(streaminfo_bytes_);
 
@@ -1130,17 +1130,17 @@ private:
     const std::string_view mime = pictureMime();
     ByteWriter w(out);
     w.u8((is_last ? 0x80 : 0x00) | static_cast<uint8_t>(FLACMetadataType::PICTURE))
-     .u24be(static_cast<uint32_t>(pictureBodySize()))
-     .u32be(3) // picture type: front cover
-     .u32be(static_cast<uint32_t>(mime.size()))
-     .str(mime)
-     .u32be(0) // description length
-     .u32be(cover_art_width_)
-     .u32be(cover_art_height_)
-     .u32be(24) // color depth
-     .u32be(0)  // number of indexed colors
-     .u32be(static_cast<uint32_t>(cover_art_data_.size()))
-     .bytes(cover_art_data_);
+        .u24be(static_cast<uint32_t>(pictureBodySize()))
+        .u32be(3) // picture type: front cover
+        .u32be(static_cast<uint32_t>(mime.size()))
+        .str(mime)
+        .u32be(0) // description length
+        .u32be(cover_art_width_)
+        .u32be(cover_art_height_)
+        .u32be(24) // color depth
+        .u32be(0)  // number of indexed colors
+        .u32be(static_cast<uint32_t>(cover_art_data_.size()))
+        .bytes(cover_art_data_);
   }
 };
 

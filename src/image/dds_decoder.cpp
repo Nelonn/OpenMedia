@@ -255,73 +255,73 @@ public:
 };
 
 const CodecDescriptor CODEC_BC1 = {
-  .codec_id = OM_CODEC_BC1,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc1",
-  .long_name = "BC1 (DXT1) texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC1,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc1",
+    .long_name = "BC1 (DXT1) texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 const CodecDescriptor CODEC_BC2 = {
-  .codec_id = OM_CODEC_BC2,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc2",
-  .long_name = "BC2 (DXT3) texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC2,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc2",
+    .long_name = "BC2 (DXT3) texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 const CodecDescriptor CODEC_BC3 = {
-  .codec_id = OM_CODEC_BC3,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc3",
-  .long_name = "BC3 (DXT5) texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC3,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc3",
+    .long_name = "BC3 (DXT5) texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 const CodecDescriptor CODEC_BC4 = {
-  .codec_id = OM_CODEC_BC4,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc4",
-  .long_name = "BC4 (ATI1) texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC4,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc4",
+    .long_name = "BC4 (ATI1) texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 const CodecDescriptor CODEC_BC5 = {
-  .codec_id = OM_CODEC_BC5,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc5",
-  .long_name = "BC5 (ATI2) texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC5,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc5",
+    .long_name = "BC5 (ATI2) texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 const CodecDescriptor CODEC_BC6H = {
-  .codec_id = OM_CODEC_BC6H,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc6h",
-  .long_name = "BC6H HDR texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC6H,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc6h",
+    .long_name = "BC6H HDR texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 const CodecDescriptor CODEC_BC7 = {
-  .codec_id = OM_CODEC_BC7,
-  .type = OM_MEDIA_IMAGE,
-  .name = "bc7",
-  .long_name = "BC7 (BPTC) texture decoder",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
+    .codec_id = OM_CODEC_BC7,
+    .type = OM_MEDIA_IMAGE,
+    .name = "bc7",
+    .long_name = "BC7 (BPTC) texture decoder",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<DDSDecoder>(); },
 };
 
 } // namespace openmedia

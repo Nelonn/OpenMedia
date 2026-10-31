@@ -157,7 +157,7 @@ private:
       float,                       // FLOAT
       double,                      // DOUBLE
       std::string,                 // STRING
-      Rational,                  // RATIONAL
+      Rational,                    // RATIONAL
       std::shared_ptr<BinaryData>, // BINARY
       bool,                        // BOOL
       std::shared_ptr<ArrayType>,  // ARRAY

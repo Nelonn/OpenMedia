@@ -155,7 +155,10 @@ class DX11Encoder final : public Encoder {
         for (; leb < 8 && cursor + leb < data.size(); ++leb) {
           const uint8_t byte = data[cursor + leb];
           payload |= static_cast<uint64_t>(byte & 0x7F) << (leb * 7);
-          if ((byte & 0x80) == 0) { ++leb; break; }
+          if ((byte & 0x80) == 0) {
+            ++leb;
+            break;
+          }
         }
         cursor += leb;
         if (cursor + payload > data.size()) break;
@@ -235,12 +238,12 @@ class DX11Encoder final : public Encoder {
 
     uint32_t mode = eAVEncCommonRateControlMode_UnconstrainedVBR;
     switch (options.rate_control.getMode()) {
-      case RateControlMode::CBR:   mode = eAVEncCommonRateControlMode_CBR; break;
-      case RateControlMode::CQP:   mode = eAVEncCommonRateControlMode_Quality; break;
+      case RateControlMode::CBR: mode = eAVEncCommonRateControlMode_CBR; break;
+      case RateControlMode::CQP: mode = eAVEncCommonRateControlMode_Quality; break;
       case RateControlMode::CRF:
-      case RateControlMode::ICQ:   mode = eAVEncCommonRateControlMode_Quality; break;
-      case RateControlMode::VBR:   mode = eAVEncCommonRateControlMode_PeakConstrainedVBR; break;
-      default:                     mode = eAVEncCommonRateControlMode_UnconstrainedVBR; break;
+      case RateControlMode::ICQ: mode = eAVEncCommonRateControlMode_Quality; break;
+      case RateControlMode::VBR: mode = eAVEncCommonRateControlMode_PeakConstrainedVBR; break;
+      default: mode = eAVEncCommonRateControlMode_UnconstrainedVBR; break;
     }
     set_u32(CODECAPI_AVEncCommonRateControlMode, mode);
     set_u32(CODECAPI_AVEncCommonMeanBitRate, target_bitrate(options.rate_control));
@@ -262,7 +265,8 @@ class DX11Encoder final : public Encoder {
     }
     if (gop == 0 && options.format.video.framerate.den > 0)
       gop = static_cast<uint32_t>(options.format.video.framerate.num /
-                                  std::max(1, options.format.video.framerate.den)) * 2;
+                                  std::max(1, options.format.video.framerate.den)) *
+            2;
     if (gop > 0) set_u32(CODECAPI_AVEncMPVGOPSize, gop);
 
     // 0 is all speed, 100 all quality. MF_LOW_LATENCY still applies, so this buys a better
@@ -277,8 +281,8 @@ class DX11Encoder final : public Encoder {
     if (codec == OM_CODEC_H264) {
       switch (profile) {
         case OM_PROFILE_H264_BASELINE: return eAVEncH264VProfile_Base;
-        case OM_PROFILE_H264_MAIN:     return eAVEncH264VProfile_Main;
-        case OM_PROFILE_H264_HIGH:     return eAVEncH264VProfile_High;
+        case OM_PROFILE_H264_MAIN: return eAVEncH264VProfile_Main;
+        case OM_PROFILE_H264_HIGH: return eAVEncH264VProfile_High;
         default: return 0;
       }
     }
@@ -293,43 +297,43 @@ class DX11Encoder final : public Encoder {
 
   static auto map_color_primaries(OMColorPrimaries p) -> uint32_t {
     switch (p) {
-      case OM_PRIMARIES_BT709:     return MFVideoPrimaries_BT709;
-      case OM_PRIMARIES_BT470M:    return MFVideoPrimaries_BT470_2_SysM;
-      case OM_PRIMARIES_BT470BG:   return MFVideoPrimaries_BT470_2_SysBG;
-      case OM_PRIMARIES_BT601:     return MFVideoPrimaries_SMPTE170M;
+      case OM_PRIMARIES_BT709: return MFVideoPrimaries_BT709;
+      case OM_PRIMARIES_BT470M: return MFVideoPrimaries_BT470_2_SysM;
+      case OM_PRIMARIES_BT470BG: return MFVideoPrimaries_BT470_2_SysBG;
+      case OM_PRIMARIES_BT601: return MFVideoPrimaries_SMPTE170M;
       case OM_PRIMARIES_SMPTE240M: return MFVideoPrimaries_SMPTE240M;
-      case OM_PRIMARIES_BT2020:    return MFVideoPrimaries_BT2020;
-      case OM_PRIMARIES_SMPTE428:  return MFVideoPrimaries_XYZ;
-      case OM_PRIMARIES_SMPTE431:  return MFVideoPrimaries_DCI_P3;
-      case OM_PRIMARIES_SMPTE432:  return MFVideoPrimaries_Display_P3;
-      case OM_PRIMARIES_EBU3213:   return MFVideoPrimaries_EBU3213;
+      case OM_PRIMARIES_BT2020: return MFVideoPrimaries_BT2020;
+      case OM_PRIMARIES_SMPTE428: return MFVideoPrimaries_XYZ;
+      case OM_PRIMARIES_SMPTE431: return MFVideoPrimaries_DCI_P3;
+      case OM_PRIMARIES_SMPTE432: return MFVideoPrimaries_Display_P3;
+      case OM_PRIMARIES_EBU3213: return MFVideoPrimaries_EBU3213;
       // OM_PRIMARIES_FILM has no Media Foundation equivalent.
-      default:                     return MFVideoPrimaries_Unknown;
+      default: return MFVideoPrimaries_Unknown;
     }
   }
 
   static auto map_transfer_characteristics(OMTransferCharacteristic t) -> uint32_t {
     switch (t) {
-      case OM_TRANSFER_BT709:      return MFVideoTransFunc_709;
-      case OM_TRANSFER_BT601:      return MFVideoTransFunc_709; // shares the 709 curve
-      case OM_TRANSFER_SMPTE240M:  return MFVideoTransFunc_240M;
-      case OM_TRANSFER_LINEAR:     return MFVideoTransFunc_10;
-      case OM_TRANSFER_SRGB:       return MFVideoTransFunc_sRGB;
-      case OM_TRANSFER_GAMMA22:    return MFVideoTransFunc_22;
-      case OM_TRANSFER_GAMMA28:    return MFVideoTransFunc_28;
+      case OM_TRANSFER_BT709: return MFVideoTransFunc_709;
+      case OM_TRANSFER_BT601: return MFVideoTransFunc_709; // shares the 709 curve
+      case OM_TRANSFER_SMPTE240M: return MFVideoTransFunc_240M;
+      case OM_TRANSFER_LINEAR: return MFVideoTransFunc_10;
+      case OM_TRANSFER_SRGB: return MFVideoTransFunc_sRGB;
+      case OM_TRANSFER_GAMMA22: return MFVideoTransFunc_22;
+      case OM_TRANSFER_GAMMA28: return MFVideoTransFunc_28;
       case OM_TRANSFER_BT2020_10:
-      case OM_TRANSFER_BT2020_12:  return MFVideoTransFunc_2020;
-      case OM_TRANSFER_PQ:         return MFVideoTransFunc_2084;
-      case OM_TRANSFER_HLG:        return MFVideoTransFunc_HLG;
-      default:                     return MFVideoTransFunc_Unknown;
+      case OM_TRANSFER_BT2020_12: return MFVideoTransFunc_2020;
+      case OM_TRANSFER_PQ: return MFVideoTransFunc_2084;
+      case OM_TRANSFER_HLG: return MFVideoTransFunc_HLG;
+      default: return MFVideoTransFunc_Unknown;
     }
   }
 
   static auto map_nominal_range(OMColorRange range) -> uint32_t {
     switch (range) {
-      case OM_COLOR_RANGE_FULL:    return MFNominalRange_0_255;
+      case OM_COLOR_RANGE_FULL: return MFNominalRange_0_255;
       case OM_COLOR_RANGE_LIMITED: return MFNominalRange_16_235;
-      default:                     return MFNominalRange_Unknown;
+      default: return MFNominalRange_Unknown;
     }
   }
 
@@ -356,21 +360,21 @@ class DX11Encoder final : public Encoder {
 
   static auto map_color_space(OMColorSpace c, uint8_t bit_depth) -> uint32_t {
     switch (c) {
-      case OM_COLOR_SPACE_BT709:      return MFVideoTransferMatrix_BT709;
-      case OM_COLOR_SPACE_BT601:      return MFVideoTransferMatrix_BT601;
-      case OM_COLOR_SPACE_SMPTE240M:  return MFVideoTransferMatrix_SMPTE240M;
-      case OM_COLOR_SPACE_FCC:        return MFVideoTransferMatrix_FCC47;
-      case OM_COLOR_SPACE_YCGCO:      return MFVideoTransferMatrix_YCgCo;
-      case OM_COLOR_SPACE_RGB:        return MFVideoTransferMatrix_Identity;
+      case OM_COLOR_SPACE_BT709: return MFVideoTransferMatrix_BT709;
+      case OM_COLOR_SPACE_BT601: return MFVideoTransferMatrix_BT601;
+      case OM_COLOR_SPACE_SMPTE240M: return MFVideoTransferMatrix_SMPTE240M;
+      case OM_COLOR_SPACE_FCC: return MFVideoTransferMatrix_FCC47;
+      case OM_COLOR_SPACE_YCGCO: return MFVideoTransferMatrix_YCgCo;
+      case OM_COLOR_SPACE_RGB: return MFVideoTransferMatrix_Identity;
       case OM_COLOR_SPACE_CHROMA_DERIVED_NCL: return MFVideoTransferMatrix_Chroma;
-      case OM_COLOR_SPACE_CHROMA_DERIVED_CL:  return MFVideoTransferMatrix_Chroma_const;
+      case OM_COLOR_SPACE_CHROMA_DERIVED_CL: return MFVideoTransferMatrix_Chroma_const;
       case OM_COLOR_SPACE_BT2020:
         // BT.2020 has separate 10- and 12-bit matrices; always claiming the
         // 10-bit one mis-signals 12-bit content.
         return (bit_depth >= 12) ? MFVideoTransferMatrix_BT2020_12
                                  : MFVideoTransferMatrix_BT2020_10;
       // BT.2020 constant luminance and ICtCp have no Media Foundation value.
-      default:                        return MFVideoTransferMatrix_Unknown;
+      default: return MFVideoTransferMatrix_Unknown;
     }
   }
 
@@ -418,7 +422,7 @@ class DX11Encoder final : public Encoder {
         payload.push_back(0x80); // trailing bits
         out.push_back(0x2A);     // OBU_METADATA, has_size_field
         size_t size = payload.size();
-        do {                     // leb128 size
+        do { // leb128 size
           uint8_t byte = static_cast<uint8_t>(size & 0x7F);
           size >>= 7;
           if (size) byte |= 0x80;
@@ -436,10 +440,10 @@ class DX11Encoder final : public Encoder {
       if (have_md) {
         // AV1 uses another fixed point and red-green-blue order; stored values follow the SEI.
         const auto& md = hdr_mastering_display_;
-        auto chroma = [](uint16_t v) -> uint16_t {          // 1/50000 -> 0.16
+        auto chroma = [](uint16_t v) -> uint16_t { // 1/50000 -> 0.16
           return static_cast<uint16_t>((static_cast<uint32_t>(v) * 65536u + 25000u) / 50000u);
         };
-        const uint32_t sei_index_for_rgb[3] = {2, 0, 1};    // R, G, B
+        const uint32_t sei_index_for_rgb[3] = {2, 0, 1}; // R, G, B
 
         std::vector<uint8_t> body;
         for (uint32_t i = 0; i < 3; ++i) {
@@ -516,14 +520,19 @@ class DX11Encoder final : public Encoder {
       for (; leb < 8 && cursor + leb < data.size(); ++leb) {
         const uint8_t byte = data[cursor + leb];
         payload |= static_cast<uint64_t>(byte & 0x7F) << (leb * 7);
-        if ((byte & 0x80) == 0) { ++leb; break; }
+        if ((byte & 0x80) == 0) {
+          ++leb;
+          break;
+        }
       }
       cursor += leb;
       if (cursor + payload > data.size()) break;
       const size_t next = cursor + static_cast<size_t>(payload);
       // 2 = OBU_TEMPORAL_DELIMITER, 1 = OBU_SEQUENCE_HEADER
-      if (type == 2 || type == 1) insert_at = next;
-      else break;
+      if (type == 2 || type == 1)
+        insert_at = next;
+      else
+        break;
       pos = next;
     }
     return insert_at;
@@ -648,7 +657,7 @@ class DX11Encoder final : public Encoder {
             memcpy(with_hdr.bytes.data(), pkt.bytes.data(), at);
             memcpy(with_hdr.bytes.data() + at, hdr_sei_.data(), hdr_sei_.size());
             memcpy(with_hdr.bytes.data() + at + hdr_sei_.size(),
-                        pkt.bytes.data() + at, pkt.bytes.size() - at);
+                   pkt.bytes.data() + at, pkt.bytes.size() - at);
             with_hdr.pts = pkt.pts;
             with_hdr.dts = pkt.dts;
             with_hdr.duration = pkt.duration;
@@ -1098,9 +1107,11 @@ public:
             const uint32_t coded_width = static_cast<uint32_t>(s.pic_width_in_luma_samples);
             const uint32_t coded_height = static_cast<uint32_t>(s.pic_height_in_luma_samples);
             const uint32_t crop_x = s.conformance_window_flag
-                ? 2u * static_cast<uint32_t>(s.conf_win_left_offset + s.conf_win_right_offset) : 0u;
+                                        ? 2u * static_cast<uint32_t>(s.conf_win_left_offset + s.conf_win_right_offset)
+                                        : 0u;
             const uint32_t crop_y = s.conformance_window_flag
-                ? 2u * static_cast<uint32_t>(s.conf_win_top_offset + s.conf_win_bottom_offset) : 0u;
+                                        ? 2u * static_cast<uint32_t>(s.conf_win_top_offset + s.conf_win_bottom_offset)
+                                        : 0u;
             width_ = coded_width > crop_x ? coded_width - crop_x : coded_width;
             height_ = coded_height > crop_y ? coded_height - crop_y : coded_height;
           }
@@ -1934,7 +1945,8 @@ private:
 
       if (h.show_existing_frame) {
         const int32_t slot = (h.frame_to_show_map_idx < 8)
-                                 ? av1_ref_slot_[h.frame_to_show_map_idx] : -1;
+                                 ? av1_ref_slot_[h.frame_to_show_map_idx]
+                                 : -1;
         if (slot < 0) continue;
         if (auto pic = download(static_cast<uint32_t>(slot))) {
           Frame frame = {};
@@ -1965,7 +1977,10 @@ private:
       UINT buffer_size = 0;
 
       hr = video_context_->GetDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &buffer_size, &buffer);
-      if (FAILED(hr) || buffer_size < sizeof(pic_params)) { video_context_->DecoderEndFrame(decoder_.Get()); return Err(OM_CODEC_DECODE_FAILED); }
+      if (FAILED(hr) || buffer_size < sizeof(pic_params)) {
+        video_context_->DecoderEndFrame(decoder_.Get());
+        return Err(OM_CODEC_DECODE_FAILED);
+      }
       memcpy(buffer, &pic_params, sizeof(pic_params));
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
 
@@ -1989,7 +2004,10 @@ private:
       {
         auto* dst = static_cast<uint8_t*>(buffer);
         size_t off = 0;
-        for (const auto& t : tiles) { memcpy(dst + off, t.data, t.size); off += t.size; }
+        for (const auto& t : tiles) {
+          memcpy(dst + off, t.data, t.size);
+          off += t.size;
+        }
       }
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
@@ -2080,7 +2098,8 @@ private:
       const uint8_t map_idx = h.ref_frame_idx[i];
       pp.frame_refs[i].bPicEntry =
           (map_idx < 8 && vp9_ref_slot_[map_idx] >= 0)
-              ? static_cast<UCHAR>(vp9_ref_slot_[map_idx]) : 0xFF;
+              ? static_cast<UCHAR>(vp9_ref_slot_[map_idx])
+              : 0xFF;
     }
     for (uint32_t i = 0; i < 4; ++i)
       pp.ref_frame_sign_bias[i] = static_cast<CHAR>(h.ref_frame_sign_bias[i]);
@@ -2141,7 +2160,8 @@ private:
 
       if (h.show_existing_frame) {
         const int32_t slot = (h.frame_to_show_map_idx < 8)
-                                 ? vp9_ref_slot_[h.frame_to_show_map_idx] : -1;
+                                 ? vp9_ref_slot_[h.frame_to_show_map_idx]
+                                 : -1;
         if (slot < 0) continue;
         if (auto pic = download(static_cast<uint32_t>(slot))) {
           Frame frame = {};

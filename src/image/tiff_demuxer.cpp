@@ -111,8 +111,7 @@ public:
         tiff_close,
         tiff_size,
         tiff_map_file,
-        tiff_unmap_file
-    );
+        tiff_unmap_file);
 
     if (!tiff) {
       return OM_FORMAT_PARSE_FAILED;

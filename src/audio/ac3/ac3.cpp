@@ -71,7 +71,7 @@ void mapChannels(Program& program) {
   }
 }
 
-}
+} // namespace
 
 class AC3Decoder final : public Decoder {
   ac3::SubstreamDecoder independent_;
@@ -218,23 +218,23 @@ private:
 };
 
 const CodecDescriptor CODEC_AC3 = {
-  .codec_id = OM_CODEC_AC3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "ac3",
-  .long_name = "ATSC A/52 AC-3 (Dolby Digital)",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<AC3Decoder>(); },
+    .codec_id = OM_CODEC_AC3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "ac3",
+    .long_name = "ATSC A/52 AC-3 (Dolby Digital)",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<AC3Decoder>(); },
 };
 
 const CodecDescriptor CODEC_EAC3 = {
-  .codec_id = OM_CODEC_EAC3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "eac3",
-  .long_name = "ATSC A/52 Annex E E-AC-3 (Dolby Digital Plus)",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = [] { return std::make_unique<AC3Decoder>(); },
+    .codec_id = OM_CODEC_EAC3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "eac3",
+    .long_name = "ATSC A/52 Annex E E-AC-3 (Dolby Digital Plus)",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = [] { return std::make_unique<AC3Decoder>(); },
 };
 
 } // namespace openmedia

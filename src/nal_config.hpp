@@ -24,10 +24,10 @@ inline auto parseAvcDecoderConfig(std::span<const uint8_t> body)
   if (body.size() < 7) return std::nullopt;
   ByteReader r(body);
 
-  r.skip(1); // configurationVersion
-  const uint8_t profile_idc = r.u8(); // AVCProfileIndication
+  r.skip(1);                             // configurationVersion
+  const uint8_t profile_idc = r.u8();    // AVCProfileIndication
   const uint8_t profile_compat = r.u8(); // profile_compatibility
-  r.skip(1); // AVCLevelIndication
+  r.skip(1);                             // AVCLevelIndication
 
   NalDecoderConfig config;
   config.profile_idc = profile_idc;
@@ -67,15 +67,15 @@ inline auto parseHevcDecoderConfig(std::span<const uint8_t> body)
   r.skip(1); // configurationVersion
   const uint8_t ptl_byte = r.u8();
   const uint8_t profile_idc = ptl_byte & 0x1Fu; // general_profile_idc
-  r.skip(4); // general_profile_compatibility_flags
-  r.skip(6); // general_constraint_indicator_flags (48 bit)
-  r.skip(1); // general_level_idc
-  r.skip(2); // min_spatial_segmentation_idc
-  r.skip(1); // parallelismType
-  r.skip(1); // chromaFormat
-  r.skip(1); // bitDepthLumaMinus8
-  r.skip(1); // bitDepthChromaMinus8
-  r.skip(2); // avgFrameRate
+  r.skip(4);                                    // general_profile_compatibility_flags
+  r.skip(6);                                    // general_constraint_indicator_flags (48 bit)
+  r.skip(1);                                    // general_level_idc
+  r.skip(2);                                    // min_spatial_segmentation_idc
+  r.skip(1);                                    // parallelismType
+  r.skip(1);                                    // chromaFormat
+  r.skip(1);                                    // bitDepthLumaMinus8
+  r.skip(1);                                    // bitDepthChromaMinus8
+  r.skip(2);                                    // avgFrameRate
 
   NalDecoderConfig config;
   config.profile_idc = profile_idc;
@@ -130,7 +130,7 @@ inline auto parseVvcDecoderConfig(std::span<const uint8_t> body)
     // VvcPTLRecord(num_sublayers), §11.2.4.3
     const uint8_t num_bytes_constraint_info = r.u8() & 0x3Fu;
     config.profile_idc = r.u8() >> 1; // general_profile_idc(7) | general_tier_flag(1)
-    r.skip(1); // general_level_idc
+    r.skip(1);                        // general_level_idc
     // ptl_frame_only_constraint_flag, ptl_multilayer_enabled_flag and
     // general_constraint_info share these bytes.
     r.skip(num_bytes_constraint_info);

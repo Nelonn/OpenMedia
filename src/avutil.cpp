@@ -299,7 +299,7 @@ auto av_make_q(int num, int den) -> AVRational {
   return {num, den};
 }
 
-template <>
+template<>
 void AVDeleter<::AVFrame>::operator()(::AVFrame* ptr) const {
   if (ptr) LibAVUtil::getInstance().av_frame_free(&ptr);
 }

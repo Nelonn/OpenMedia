@@ -130,7 +130,7 @@ public:
     format_.channels = options.format.audio.channels;
 
     switch (options.format.codec_id) {
-      case OM_CODEC_PCM_U8:    format_.sample_format = OM_SAMPLE_U8; break;
+      case OM_CODEC_PCM_U8: format_.sample_format = OM_SAMPLE_U8; break;
       case OM_CODEC_PCM_S16LE: format_.sample_format = OM_SAMPLE_S16; break;
       case OM_CODEC_PCM_S32LE: format_.sample_format = OM_SAMPLE_S32; break;
       case OM_CODEC_PCM_F32LE: format_.sample_format = OM_SAMPLE_F32; break;
@@ -161,7 +161,7 @@ public:
 
     uint32_t nb_samples = static_cast<uint32_t>(packet.bytes.size() / alignment);
     if (nb_samples == 0) {
-      return Ok(std::vector<Frame>{});
+      return Ok(std::vector<Frame> {});
     }
 
     AudioSamples samples(format_, nb_samples);
@@ -187,58 +187,58 @@ auto create_pcm_decoder() -> std::unique_ptr<Decoder> {
 }
 
 const CodecDescriptor CODEC_PCM_U8 = {
-  .codec_id = OM_CODEC_PCM_U8,
-  .type = OM_MEDIA_AUDIO,
-  .name = "pcm_u8",
-  .long_name = "PCM Unsigned 8-bit",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = create_pcm_decoder,
-  .encoder_factory = create_pcm_encoder,
+    .codec_id = OM_CODEC_PCM_U8,
+    .type = OM_MEDIA_AUDIO,
+    .name = "pcm_u8",
+    .long_name = "PCM Unsigned 8-bit",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = create_pcm_decoder,
+    .encoder_factory = create_pcm_encoder,
 };
 
 const CodecDescriptor CODEC_PCM_S16LE = {
-  .codec_id = OM_CODEC_PCM_S16LE,
-  .type = OM_MEDIA_AUDIO,
-  .name = "pcm_s16le",
-  .long_name = "PCM Signed 16-bit",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = create_pcm_decoder,
-  .encoder_factory = create_pcm_encoder,
+    .codec_id = OM_CODEC_PCM_S16LE,
+    .type = OM_MEDIA_AUDIO,
+    .name = "pcm_s16le",
+    .long_name = "PCM Signed 16-bit",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = create_pcm_decoder,
+    .encoder_factory = create_pcm_encoder,
 };
 
 const CodecDescriptor CODEC_PCM_S32LE = {
-  .codec_id = OM_CODEC_PCM_S32LE,
-  .type = OM_MEDIA_AUDIO,
-  .name = "pcm_s32le",
-  .long_name = "PCM Signed 32-bit",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = create_pcm_decoder,
-  .encoder_factory = create_pcm_encoder,
+    .codec_id = OM_CODEC_PCM_S32LE,
+    .type = OM_MEDIA_AUDIO,
+    .name = "pcm_s32le",
+    .long_name = "PCM Signed 32-bit",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = create_pcm_decoder,
+    .encoder_factory = create_pcm_encoder,
 };
 
 const CodecDescriptor CODEC_PCM_F32LE = {
-  .codec_id = OM_CODEC_PCM_F32LE,
-  .type = OM_MEDIA_AUDIO,
-  .name = "pcm_f32le",
-  .long_name = "PCM Float 32-bit",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = create_pcm_decoder,
-  .encoder_factory = create_pcm_encoder,
+    .codec_id = OM_CODEC_PCM_F32LE,
+    .type = OM_MEDIA_AUDIO,
+    .name = "pcm_f32le",
+    .long_name = "PCM Float 32-bit",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = create_pcm_decoder,
+    .encoder_factory = create_pcm_encoder,
 };
 
 const CodecDescriptor CODEC_PCM_F64LE = {
-  .codec_id = OM_CODEC_PCM_F64LE,
-  .type = OM_MEDIA_AUDIO,
-  .name = "pcm_f64le",
-  .long_name = "PCM Float 64-bit",
-  .vendor = "OpenMedia",
-  .flags = NONE,
-  .decoder_factory = create_pcm_decoder,
-  .encoder_factory = create_pcm_encoder,
+    .codec_id = OM_CODEC_PCM_F64LE,
+    .type = OM_MEDIA_AUDIO,
+    .name = "pcm_f64le",
+    .long_name = "PCM Float 64-bit",
+    .vendor = "OpenMedia",
+    .flags = NONE,
+    .decoder_factory = create_pcm_decoder,
+    .encoder_factory = create_pcm_encoder,
 };
 
 } // namespace openmedia

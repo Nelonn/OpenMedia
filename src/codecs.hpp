@@ -126,4 +126,4 @@ extern const CodecDescriptor CODEC_RAW_VIDEO;
 struct CodecRegistry;
 void registerFFmpegCodecs(CodecRegistry* registry) noexcept;
 
-}
+} // namespace openmedia

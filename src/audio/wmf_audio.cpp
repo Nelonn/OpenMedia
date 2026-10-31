@@ -54,7 +54,7 @@ public:
   }
 
   static auto FindDecoder(IMFTransform** ppDecoder, GUID codec) -> HRESULT {
-    MFT_REGISTER_TYPE_INFO inputInfo = { MFMediaType_Audio, codec };
+    MFT_REGISTER_TYPE_INFO inputInfo = {MFMediaType_Audio, codec};
     IMFActivate** ppActivates = nullptr;
     UINT32 count = 0;
 
@@ -118,7 +118,7 @@ public:
           uint16_t wStructType;
           uint16_t wReserved1;
           uint32_t dwReserved2;
-        } aac_info = { static_cast<uint16_t>(payload_type), 0xFE, 0, 0, 0 };
+        } aac_info = {static_cast<uint16_t>(payload_type), 0xFE, 0, 0, 0};
         memcpy(user_data.data(), &aac_info, 12);
         memcpy(user_data.data() + 12, options.extradata.data(), options.extradata.size());
         input_type->SetBlob(MF_MT_USER_DATA, user_data.data(), static_cast<UINT32>(user_data.size()));
@@ -281,10 +281,10 @@ private:
     ComPtr<IMFMediaType> output_type;
     HRESULT hr;
 
-    const GUID preferences[] = { MFAudioFormat_PCM, MFAudioFormat_Float };
+    const GUID preferences[] = {MFAudioFormat_PCM, MFAudioFormat_Float};
 
     for (const auto& pref_subtype : preferences) {
-      for (DWORD i = 0; ; ++i) {
+      for (DWORD i = 0;; ++i) {
         hr = decoder_->GetOutputAvailableType(0, i, &output_type);
         if (FAILED(hr)) break;
 
@@ -315,23 +315,23 @@ auto create_wmf_audio_decoder() -> std::unique_ptr<Decoder> {
 }
 
 const CodecDescriptor CODEC_WMF_AAC = {
-  .codec_id = OM_CODEC_AAC,
-  .type = OM_MEDIA_AUDIO,
-  .name = "wmf_aac",
-  .long_name = "AAC (Windows Media Foundation)",
-  .vendor = "Microsoft",
-  .flags = NONE,
-  .decoder_factory = create_wmf_audio_decoder,
+    .codec_id = OM_CODEC_AAC,
+    .type = OM_MEDIA_AUDIO,
+    .name = "wmf_aac",
+    .long_name = "AAC (Windows Media Foundation)",
+    .vendor = "Microsoft",
+    .flags = NONE,
+    .decoder_factory = create_wmf_audio_decoder,
 };
 
 const CodecDescriptor CODEC_WMF_MP3 = {
-  .codec_id = OM_CODEC_MP3,
-  .type = OM_MEDIA_AUDIO,
-  .name = "wmf_mp3",
-  .long_name = "MP3 (Windows Media Foundation)",
-  .vendor = "Microsoft",
-  .flags = NONE,
-  .decoder_factory = create_wmf_audio_decoder,
+    .codec_id = OM_CODEC_MP3,
+    .type = OM_MEDIA_AUDIO,
+    .name = "wmf_mp3",
+    .long_name = "MP3 (Windows Media Foundation)",
+    .vendor = "Microsoft",
+    .flags = NONE,
+    .decoder_factory = create_wmf_audio_decoder,
 };
 
 } // namespace openmedia

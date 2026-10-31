@@ -25,7 +25,11 @@
 
 using namespace openmedia;
 
-enum class HwApi { Vulkan, DX11, DX12, Cuda, VAAPI };
+enum class HwApi { Vulkan,
+                   DX11,
+                   DX12,
+                   Cuda,
+                   VAAPI };
 
 // Picked as a whole, never per codec; codecs the backend lacks fall back to software.
 struct Backend {
@@ -122,10 +126,10 @@ public:
 private:
   static auto align(int bytes) -> int { return (bytes + 31) & ~31; }
 
-  template <typename T>
+  template<typename T>
   auto context() const -> T* { return static_cast<T*>(device_->context); }
 
-  template <typename Ctx>
+  template<typename Ctx>
   auto adopt(HWDeviceType type, Ctx* ctx) -> bool {
     if (!ctx) return false;
     device_ = HWDevice {type, ctx};
@@ -152,7 +156,7 @@ private:
 #ifndef __APPLE__
   static constexpr uint32_t kNoQueue = UINT32_MAX;
 
-  template <typename Fn>
+  template<typename Fn>
   auto vk(const char* name) const -> Fn {
     return reinterpret_cast<Fn>(vk_proc_(vk_instance_, name));
   }
@@ -295,11 +299,14 @@ private:
     for (uint32_t family : {graphics_family, decode_family}) {
       if (queues.empty() || queues.back().queueFamilyIndex != family)
         queues.push_back({.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                          .queueFamilyIndex = family, .queueCount = 1, .pQueuePriorities = &priority});
+                          .queueFamilyIndex = family,
+                          .queueCount = 1,
+                          .pQueuePriorities = &priority});
     }
 
     VkPhysicalDeviceSynchronization2Features sync2 {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES, .synchronization2 = VK_TRUE};
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
+        .synchronization2 = VK_TRUE};
     const VkDeviceCreateInfo info {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = supported(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) ? &sync2 : nullptr,

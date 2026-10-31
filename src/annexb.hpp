@@ -147,7 +147,6 @@ public:
   auto keyframePrefix() const noexcept -> std::span<const uint8_t> override {
     return annexb_extra_;
   }
-
 };
 
 inline auto isAnnexBBitstream(std::span<const uint8_t> data) noexcept -> bool {
