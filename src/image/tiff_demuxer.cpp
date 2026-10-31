@@ -80,10 +80,6 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Check TIFF magic bytes
-    // TIFF files start with either:
-    // - "II" (0x49, 0x49) followed by 0x2A, 0x00 (little-endian)
-    // - "MM" (0x4D, 0x4D) followed by 0x00, 0x2A (big-endian)
     uint8_t header[8];
     if (input_->read(header) < 8) {
       return OM_IO_NOT_ENOUGH_DATA;
@@ -104,7 +100,6 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Open TIFF from memory
     input_->seek(0, Whence::BEG);
     TIFF* tiff = TIFFClientOpen(
         "memory",
@@ -123,7 +118,6 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Read TIFF tags
     TIFFGetField(tiff, TIFFTAG_IMAGEWIDTH, &width_);
     TIFFGetField(tiff, TIFFTAG_IMAGELENGTH, &height_);
     TIFFGetField(tiff, TIFFTAG_BITSPERSAMPLE, &bits_per_sample_);
@@ -138,7 +132,6 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Create track
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;

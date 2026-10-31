@@ -223,13 +223,11 @@ public:
     // Unref previous packet
     codec_loader.av_packet_unref(packet_.get());
 
-    // Read next packet
     int ret = format_loader.av_read_frame(fmt_ctx_.get(), packet_.get());
     if (ret < 0) {
       return Err(avErrorToOmError(ret));
     }
 
-    // Convert to our Packet format
     Packet om_packet;
     om_packet.allocate(static_cast<size_t>(packet_->size));
     std::memcpy(om_packet.bytes.data(), packet_->data, packet_->size);
@@ -414,10 +412,6 @@ private:
   bool initialized_ = false;
 };
 
-// ============================================================================
-// FFmpeg Muxer Implementation
-// ============================================================================
-
 static auto omCodecIdToAvCodecId(OMCodecId codec_id) -> AVCodecID {
   switch (codec_id) {
     case OM_CODEC_H264: return AV_CODEC_ID_H264;
@@ -491,13 +485,11 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Allocate IO buffer
     io_buf_.reset(static_cast<uint8_t*>(util_loader.av_malloc(IO_BUFFER_SIZE)));
     if (!io_buf_) {
       return OM_COMMON_OUT_OF_MEMORY;
     }
 
-    // Setup AVIO context for writing
     OutputStream* raw_output = output_.get();
     avio_ctx_.reset(format_loader.avio_alloc_context(
         io_buf_.get(),
@@ -515,7 +507,6 @@ public:
 
     avio_ctx_->seekable = raw_output->canSeek() ? AVIO_SEEKABLE_NORMAL : 0;
 
-    // Allocate output context
     AVFormatContext* fmt_ptr = nullptr;
     int ret = format_loader.avformat_alloc_output_context2(&fmt_ptr, nullptr, nullptr, nullptr);
     if (ret < 0 || !fmt_ptr) {
@@ -528,7 +519,6 @@ public:
     // Don't write header here - wait until all streams are added
     // Headers will be written when finalize() is called or after all tracks are added
 
-    // Allocate packet for writing
     packet_.reset(codec_loader.av_packet_alloc());
     if (!packet_) {
       close();
@@ -576,7 +566,6 @@ public:
       codecpar->ch_layout.nb_channels = track.format.audio.channels;
     }
 
-    // Copy extradata
     if (!track.extradata.empty()) {
       codecpar->extradata = static_cast<uint8_t*>(util_loader.av_malloc(track.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
       if (!codecpar->extradata) {
@@ -630,7 +619,6 @@ public:
       packet_->flags |= AV_PKT_FLAG_KEY;
     }
 
-    // Write the packet
     ret = format_loader.av_interleaved_write_frame(fmt_ctx_.get(), packet_.get());
     if (ret < 0) {
       return avErrorToOmError(ret);
@@ -644,7 +632,6 @@ public:
       return OM_COMMON_NOT_INITIALIZED;
     }
 
-    // Write header if not already done
     if (!header_written_) {
       auto& format_loader = LibAVFormat::getInstance();
       int ret = format_loader.avformat_write_header(fmt_ctx_.get(), nullptr);
@@ -654,7 +641,6 @@ public:
       header_written_ = true;
     }
 
-    // Write trailer
     auto& format_loader = LibAVFormat::getInstance();
     int ret = format_loader.av_write_trailer(fmt_ctx_.get());
     if (ret < 0) {

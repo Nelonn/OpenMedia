@@ -172,10 +172,7 @@ struct PPS {
   int second_chroma_qp_index_offset = 0;
 };
 
-// 7.4.3.3: one memory_management_control_operation and whichever of its
-// arguments that operation carries. Kept so the DPB can run the marking
-// process; skipping them used to leave every reference picture marked as still
-// in use forever.
+// 7.4.3.3. Skipping these left every reference marked in use for ever.
 struct RefPicMarking {
   int operation = 0; // memory_management_control_operation, 0 terminates
   int difference_of_pic_nums_minus1 = 0;
@@ -186,9 +183,7 @@ struct RefPicMarking {
 
 inline constexpr int MAX_REF_PIC_MARKINGS = 32;
 
-// 7.3.3.1: one entry of ref_pic_list_modification(). DXVA builds the reference
-// lists inside the driver, but VA-API takes them ready-made per slice, so the
-// modifications have to survive parsing rather than just be skipped over.
+// 7.3.3.1. VA-API takes reference lists ready-made per slice, so these survive parsing.
 struct RefPicListModification {
   int modification_of_pic_nums_idc = 3; // 3 terminates the list
   int abs_diff_pic_num_minus1 = 0;

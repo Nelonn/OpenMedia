@@ -76,7 +76,6 @@ public:
     // Reset stream position
     input_->seek(data_start_, Whence::BEG);
 
-    // Create track
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;

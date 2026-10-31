@@ -121,9 +121,8 @@ private:
     appendChunk(out, "IHDR", ihdr->data);
     appendChunk(out, "acTL", animationControl());
 
-    // The first frame stays an ordinary IDAT; the fcTL in front of it is what
-    // folds it into the animation. Everything else frame 0 carries - palette,
-    // colour chunks - describes the whole file and is copied through.
+    // The fcTL in front of frame 0's IDAT folds it into the animation; its other chunks describe
+    // the whole file and are copied through.
     bool first_frame_declared = false;
     for (const auto& chunk : first) {
       if (chunk.is("IHDR") || chunk.is("IEND")) continue;
@@ -200,9 +199,7 @@ private:
     store_u32_be(data.data() + 16, 0); // y_offset
     store_u16_be(data.data() + 20, delay);
     store_u16_be(data.data() + 22, 1000);
-    // Every packet is a full-canvas image, so replacing the canvas outright
-    // reproduces it exactly; APNG_BLEND_OP_OVER would composite frames with
-    // alpha over their predecessor instead.
+    // Each packet is full-canvas; APNG_BLEND_OP_OVER would composite alpha over its predecessor.
     data[24] = 0; // dispose_op: APNG_DISPOSE_OP_NONE
     data[25] = 0; // blend_op: APNG_BLEND_OP_SOURCE
     return data;

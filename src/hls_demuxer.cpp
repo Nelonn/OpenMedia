@@ -14,9 +14,7 @@
 namespace openmedia {
 namespace {
 
-// A playlist measures segments in decimal seconds, which milliseconds hold exactly.
-// Used only for addressing segments: the timestamps handed to the caller come from
-// the media itself, in whatever timescale its header declares.
+// Addresses segments only: the timestamps handed out come from the media's own timescale.
 constexpr uint32_t PLAYLIST_TIMESCALE = 1000;
 
 // What a variant says about the playlist it points at. Kept separate from the
@@ -53,11 +51,6 @@ auto segmentEncryptionOf(const hls::Key& key, uint64_t sequence)
   return out;
 }
 
-// An HLS media playlist, answering the questions the segment demuxer asks.
-//
-// A playlist is already the explicit segment list DASH computes from a template, so
-// the only thing to build is each segment's running start time -- a playlist states
-// only how long each one lasts.
 class HlsSegmentIndex final : public SegmentIndex {
   // Shared, not copied: a four-hour playlist is thousands of segments, each with its
   // own URL and a repeat of the initialization section and key in force.
@@ -82,11 +75,7 @@ public:
     for (const hls::MediaSegment& segment : segments) {
       starts_.push_back(cursor);
       cursor += static_cast<int64_t>(segment.duration * 1000.0 + 0.5);
-      // One per segment even where a run of them is under the same `#EXT-X-KEY`:
-      // every one carries its own media sequence number, and that is what a derived
-      // initialization vector is made of. Sharing them would have been a few hundred
-      // kilobytes on a four-hour playlist, against a copy of the tag itself that the
-      // playlist is already keeping per segment.
+      // One per segment: each carries its own media sequence number, which a derived IV uses.
       keys_.push_back(segmentEncryptionOf(segment.key, segment.sequence));
     }
     starts_.push_back(cursor);
@@ -115,9 +104,7 @@ public:
     out.duration = static_cast<uint64_t>(starts_[at + 1] - start);
     out.init = initOf(segment);
     out.gap = segment.gap;
-    // A playlist's first segment is a discontinuity in all but name: the clock before
-    // it is whatever the last read left behind, which after a seek or a quality
-    // switch has nothing to do with this one.
+    // The clock before a playlist's first segment is whatever the last read left behind.
     out.discontinuity = segment.discontinuity || at == 0;
     out.program_date_time_ms = segment.program_date_time_ms;
     out.encryption = keys_[at];
@@ -179,9 +166,6 @@ auto mediaTypeOf(hls::RenditionType type) -> OMMediaType {
   }
 }
 
-// What `#EXT-X-MEDIA` says about a rendition's part in the presentation. The
-// CHARACTERISTICS strings are Apple's media characteristic identifiers, of which
-// the two accessibility ones are what a track list has somewhere to put.
 auto dispositionOf(const hls::Rendition& rendition) -> OMDisposition {
   auto flags = static_cast<uint16_t>(OM_DISPOSITION_NONE);
   if (rendition.is_default) flags |= OM_DISPOSITION_DEFAULT;
@@ -214,9 +198,7 @@ auto sameLanguage(std::string_view a, std::string_view b) -> bool {
          });
 }
 
-// `hls::Key` as the public API reports it. `session` tells a master playlist's
-// `#EXT-X-SESSION-KEY` from a media playlist's `#EXT-X-KEY`, which is the one thing
-// a caller has to know before it can decide when to ask for a licence.
+// `session` tells `#EXT-X-SESSION-KEY` from `#EXT-X-KEY`: when a licence can be requested.
 auto publicKeyOf(const hls::Key& key, bool session) -> HlsKey {
   HlsKey out;
   out.method = key.method_name;
@@ -229,9 +211,7 @@ auto publicKeyOf(const hls::Key& key, bool session) -> HlsKey {
   return out;
 }
 
-// Two tags naming the same key, which is what a playlist repeating one does between
-// every pair of segments it covers. The initialization vector is left out: a
-// per-segment one does not make a second key, it makes the same key used again.
+// The IV is left out: a per-segment one is the same key used again, not a second key.
 auto sameKey(const HlsKey& a, const HlsKey& b) -> bool {
   return a.method == b.method && a.uri == b.uri && a.key_format == b.key_format &&
          a.session == b.session;
@@ -391,9 +371,7 @@ private:
           }
         }
       }
-      // DEFAULT=YES is what the playlist asks for when nothing else was asked for,
-      // and AUTOSELECT=NO withholds a rendition from exactly this choice (RFC 8216
-      // 4.3.4.1) -- a commentary or a descriptive track nobody asked to hear.
+      // AUTOSELECT=NO withholds a rendition from this choice (RFC 8216 4.3.4.1).
       if (!pick) {
         for (const hls::Rendition* candidate : group_members) {
           if (candidate->is_default) {
@@ -415,9 +393,7 @@ private:
     return chosen;
   }
 
-  // Where a variant's segments are listed: the first of its addresses actually in
-  // hand, since a caller that could not reach the primary may have fetched a backup
-  // and a rendition fetched from a backup is the same rendition.
+  // The first address in hand: a rendition fetched from a backup is the same rendition.
   auto playlistUrlOf(const hls::Variant& variant) const -> const std::string& {
     if (media_.contains(variant.url)) return variant.url;
     for (const std::string& backup : variant.backup_urls) {
@@ -474,9 +450,7 @@ private:
     if (!chosen) return source;
     const HlsSegmentIndex* described = nullptr;
 
-    // The variants are one track's alternatives. Only those whose playlist is in
-    // hand are offered: switching to the rest would mean fetching a playlist
-    // mid-read, which this demuxer does not do.
+    // Only variants whose playlist is in hand: this demuxer does not fetch one mid-read.
     SegmentTrack variants;
     variants.type = OM_MEDIA_NONE; // the initialization segment knows
     size_t chosen_at = 0;
@@ -486,9 +460,7 @@ private:
       if (!media_.contains(playlistUrlOf(variant))) continue;
 
       IndexDescription description;
-      // Named by its primary address whichever one was fetched, since this is the
-      // name selectRepresentation() takes and it must mean the same rendition every
-      // time.
+      // Named by primary address, since selectRepresentation() must mean the same one every time.
       description.id = variant.url;
       description.codecs = variant.codecs;
       description.bandwidth = variant.bandwidth;
@@ -498,9 +470,6 @@ private:
       auto index = makeIndex(playlistUrlOf(variant), std::move(description));
       if (!index || index->isEmpty()) continue;
       if (!first_readable) first_readable = index.get();
-      // Described by the variant that will actually be read, not by whichever
-      // happened to be listed first: the two agree on a well-made ladder, and where
-      // they do not there is no reason to report the one nothing will play.
       if (&variant == chosen) {
         chosen_at = variants.alternatives.size();
         described = index.get();
@@ -512,9 +481,7 @@ private:
     // played -- and what describes the presentation -- is the first that was not.
     describeSource(source, *(described ? described : first_readable));
 
-    // The segment demuxer picks the first alternative that fits its caps, which
-    // were already applied here against what the master said; putting the choice
-    // first makes the two agree.
+    // The segment demuxer takes the first alternative within its caps, so the choice goes first.
     if (chosen_at != 0) {
       std::swap(variants.alternatives[0], variants.alternatives[chosen_at]);
     }
@@ -539,9 +506,7 @@ private:
   }
 };
 
-// Registered so a playlist opened through FormatRegistry behaves like any other
-// container, reading everything it points at off the same filesystem. A caller
-// fetching from anywhere else goes through createHlsPlaylists() and says how.
+// The FormatRegistry entry: everything is read off the filesystem beside the playlist.
 class HlsFormatDemuxer final : public Demuxer {
   std::unique_ptr<Demuxer> inner_;
   std::vector<Track> no_tracks_;
@@ -552,11 +517,8 @@ public:
     close();
     if (!input || !input->isValid()) return OM_IO_INVALID_STREAM;
 
-    // A playlist names everything relative to itself, and this wrapper reads it off
-    // the filesystem beside it. A stream that cannot say where it came from leaves
-    // no "beside": resolving against the working directory would open whatever files
-    // happen to sit there. Such a playlist goes through openHlsPlaylist(), which
-    // takes its URL as an argument rather than guessing.
+    // Resolving against the working directory would open unrelated files. A stream with no
+    // source path goes through openHlsPlaylist(), which takes the URL.
     const std::string source = input->sourcePath();
     if (source.empty()) return OM_COMMON_INVALID_ARGUMENT;
 
@@ -623,9 +585,7 @@ auto openHlsPlaylist(std::span<const uint8_t> document, std::string_view url,
     return Err(error);
   }
 
-  // A master playlist needs a second round. A fetch function means the caller is
-  // content to block, so it happens here; without one the round trip is the
-  // caller's, through createHlsPlaylists().
+  // A fetch function means the caller will block; otherwise the round trip is theirs.
   const std::vector<std::string> wanted = playlists->needed();
   if (!wanted.empty()) {
     if (!options.fetch) return Err(OM_IO_NOT_ENOUGH_DATA);
@@ -654,9 +614,6 @@ auto hlsPlaylistKeys(std::span<const uint8_t> document, std::string_view url)
   std::vector<HlsKey> keys;
   if (document.empty()) return keys;
 
-  // Either kind of playlist can name keys: a media playlist per segment, a master
-  // playlist for the presentation. Which one this is decides where to look, and a
-  // document that is neither has nothing to key.
   switch (hls::detectKind(document)) {
     case hls::PlaylistKind::Master: {
       auto parsed = hls::parseMaster(document, url);

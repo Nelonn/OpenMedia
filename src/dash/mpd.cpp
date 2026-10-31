@@ -117,9 +117,7 @@ auto parseIsoDuration(std::string_view text) -> int64_t {
     const double value = std::strtod(number.c_str(), nullptr);
     double seconds = 0;
     switch (unit) {
-      // Years and months have no fixed length. A manifest that dates a
-      // presentation in them is describing something no player will buffer, and
-      // the nominal lengths are as close as an answer can get.
+      // Years and months have no fixed length; nominal ones are the closest answer.
       case 'Y': seconds = value * 365.0 * 86400.0; break;
       case 'D': seconds = value * 86400.0; break;
       case 'H': seconds = value * 3600.0; break;
@@ -137,9 +135,8 @@ auto parseIsoDuration(std::string_view text) -> int64_t {
 
 namespace {
 
-// Which identifiers this pass is able to fill in. One that is not available is
-// written back out exactly as it was found, format specifier and all, so a later
-// pass can still substitute it.
+// An identifier not available yet is written back verbatim, format specifier included,
+// so a later pass can still substitute it.
 struct TemplateValues {
   std::string_view representation_id;
   uint32_t bandwidth = 0;
@@ -245,10 +242,6 @@ auto expandRepresentationTemplate(std::string_view tmpl, std::string_view repres
                                   uint32_t bandwidth) -> std::string {
   return expandWith(tmpl, {representation_id, bandwidth, 0, 0, true, false, false});
 }
-
-// ---------------------------------------------------------------------------
-// Representation
-// ---------------------------------------------------------------------------
 
 auto Representation::mediaType() const -> OMMediaType {
   if (mime_type.starts_with("video/")) return OM_MEDIA_VIDEO;
@@ -404,10 +397,6 @@ auto Representation::coveredDuration() const -> uint64_t {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Manifest parsing
-// ---------------------------------------------------------------------------
-
 namespace {
 
 // Attributes a Representation may inherit from its AdaptationSet, and an
@@ -554,10 +543,8 @@ void readSegmentBase(const xml::Node& node, std::string_view base_url, SegmentCt
   ctx.has_segment_base = true;
 }
 
-// Applies whichever of the three addressing elements a level carries. Each is
-// read fresh, so a Representation naming its own SegmentTemplate replaces the
-// AdaptationSet's rather than merging with it -- except for the attributes it
-// leaves out, which is exactly what inheritance is for.
+// A Representation's SegmentTemplate replaces the AdaptationSet's rather than merging,
+// except for the attributes it leaves out.
 void readAddressing(const xml::Node& node, std::string_view base_url, SegmentCtx& ctx) {
   if (const xml::Node* tmpl = node.child("SegmentTemplate")) {
     readSegmentTemplate(*tmpl, base_url, ctx);
@@ -570,9 +557,7 @@ void readAddressing(const xml::Node& node, std::string_view base_url, SegmentCtx
   }
 }
 
-// The first non-empty BaseURL of a level, resolved against what it inherits.
-// Alternatives beyond the first describe other servers holding the same bytes,
-// which is a redundancy policy and so the caller's business, not the parser's.
+// BaseURLs past the first are other servers for the same bytes: the caller's policy.
 auto descendBaseUrl(const xml::Node& node, const std::string& inherited) -> std::string {
   for (const xml::Node* base : node.childrenNamed("BaseURL")) {
     if (!base->text.empty()) return resolveUrl(inherited, base->text);
@@ -635,9 +620,6 @@ auto buildRepresentation(const xml::Node& node, const MediaAttrs& inherited_attr
     rep.media_url = base;
   }
 
-  // An initialization segment can be named three ways, and a manifest may use
-  // more than one: a template, an explicit sourceURL, or a byte range of the
-  // media resource itself.
   if (!ctx.initialization.empty()) {
     rep.init_url =
         resolveUrl(base, expandRepresentationTemplate(ctx.initialization, rep.id, rep.bandwidth));

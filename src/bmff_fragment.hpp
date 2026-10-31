@@ -5,10 +5,7 @@
 
 namespace openmedia {
 
-// Reads fragmented ISO BMFF: the initialization segment settles the tracks, then each
-// media segment is parsed and read out before the next arrives. The plain BMFF demuxer
-// cannot stand in for it, since it indexes every sample up front and so needs the whole
-// file at once.
+// The plain BMFF demuxer indexes every sample up front, so it needs the whole file.
 auto createFragmentedMP4Reader() -> std::unique_ptr<SegmentReader>;
 
 } // namespace openmedia

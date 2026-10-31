@@ -29,7 +29,6 @@ auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
       device->GetImmediateContext(&device_context);
     }
   } else {
-    // Create our own D3D11 device
     owns_device = true;
 
     HRESULT hr = S_OK;
@@ -87,7 +86,6 @@ auto OMDX11Context::initialize(const OMDX11Init& init) -> bool {
     }
   }
 
-  // Get video device interfaces
   HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&video_device));
   if (FAILED(hr)) {
     return false;

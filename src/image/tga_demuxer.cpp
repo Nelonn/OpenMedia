@@ -22,25 +22,10 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Read TGA header (18 bytes)
     uint8_t header[18];
     if (input_->read(header) < 18) {
       return OM_IO_NOT_ENOUGH_DATA;
     }
-
-    // Parse header
-    // [0]: ID length
-    // [1]: Color map type (0 = none, 1 = present)
-    // [2]: Image type
-    // [3-4]: Color map origin
-    // [5-6]: Color map length
-    // [7]: Color map entry size
-    // [8-9]: X origin
-    // [10-11]: Y origin
-    // [12-13]: Width
-    // [14-15]: Height
-    // [16]: Pixel depth
-    // [17]: Image descriptor
 
     uint8_t color_map_type = header[1];
     image_type_ = header[2];
@@ -49,19 +34,11 @@ public:
     pixel_depth_ = header[16];
     uint8_t image_descriptor = header[17];
 
-    // Check for valid TGA
     if (width_ == 0 || height_ == 0) {
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Validate image type
-    // 0: No image data
-    // 1: Uncompressed, color-mapped
-    // 2: Uncompressed, true-color
-    // 3: Uncompressed, black-and-white
-    // 9: Run-length encoded, color-mapped
-    // 10: Run-length encoded, true-color
-    // 11: Run-length encoded, black-and-white
+    // 1-3 uncompressed, 9-11 RLE, of colour-mapped, true-colour, black-and-white.
     if (image_type_ == 0) {
       return OM_FORMAT_PARSE_FAILED;
     }
@@ -69,13 +46,11 @@ public:
     // Check alpha channel from image descriptor (bits 0-3 = alpha bits, bit 5 = origin)
     has_alpha_ = (image_descriptor & 0x0F) > 0;
 
-    // Validate pixel depth
     if (pixel_depth_ != 8 && pixel_depth_ != 15 && pixel_depth_ != 16 &&
         pixel_depth_ != 24 && pixel_depth_ != 32) {
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Skip ID field and color map if present
     uint8_t id_length = header[0];
     int64_t skip_bytes = id_length;
 
@@ -90,7 +65,6 @@ public:
       input_->skip(skip_bytes);
     }
 
-    // Create track
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;

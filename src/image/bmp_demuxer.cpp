@@ -22,7 +22,6 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Read BMP file header (14 bytes)
     uint8_t file_header[14];
     if (input_->read(file_header) < 14) {
       return OM_IO_NOT_ENOUGH_DATA;
@@ -33,11 +32,6 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Parse file header
-    // [0-1]: Signature "BM"
-    // [2-5]: File size
-    // [6-9]: Reserved
-    // [10-13]: Pixel data offset
     data_offset_ = file_header[10] | (file_header[11] << 8) |
                    (file_header[12] << 16) | (file_header[13] << 24);
 
@@ -57,19 +51,6 @@ public:
     if (dib_size < 40) {
       return OM_FORMAT_PARSE_FAILED;
     }
-
-    // Parse BITMAPINFOHEADER
-    // [0-3]: DIB header size
-    // [4-7]: Width (signed, can be negative)
-    // [8-11]: Height (signed, negative = top-down)
-    // [12-13]: Color planes (must be 1)
-    // [14-15]: Bits per pixel
-    // [16-19]: Compression method
-    // [20-23]: Image size (can be 0 for uncompressed)
-    // [24-27]: Horizontal resolution
-    // [28-31]: Vertical resolution
-    // [32-35]: Colors in color table
-    // [36-39]: Important colors
 
     int32_t width_signed = dib_header[4] | (dib_header[5] << 8) |
                            (dib_header[6] << 16) | (dib_header[7] << 24);
@@ -92,13 +73,11 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Validate bit depth
     if (bit_count_ != 1 && bit_count_ != 4 && bit_count_ != 8 &&
         bit_count_ != 16 && bit_count_ != 24 && bit_count_ != 32) {
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Create stream
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;

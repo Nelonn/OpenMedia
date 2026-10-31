@@ -29,13 +29,8 @@ using SliceHeader = video_parser::H265SliceHeader;
 using ParsedFrame = video_parser::H265ParsedFrame;
 using StRefPicSet = video_parser::H265StRefPicSet;
 
-// How many pictures a stream may hold back before the earliest of them can be shown. HEVC states
-// it outright in the SPS, per temporal sub-layer; the highest sub-layer is the one a decoder taking
-// the whole stream has to allow for. Zero means none, and a stream that says so is emitted as it
-// is decoded.
-//
-// Without this the pictures come out in decode order, which for anything with B-frames means their
-// timestamps run backwards -- the same fault the H.264 path had; see dx_h264::reorderDepth.
+// The highest sub-layer is what a decoder taking the whole stream must allow for. Without
+// this, B-frames come out with timestamps running backwards; see dx_h264::reorderDepth.
 inline auto reorderDepth(const Sps& sps) -> size_t {
   const int layer = std::clamp(sps.max_sub_layers_minus1, 0, 7);
   return static_cast<size_t>(std::clamp(sps.sps_max_num_reorder_pics[layer], 0, 16));
@@ -93,9 +88,7 @@ struct WantedPicture {
   bool by_lsb_only = false;
 };
 
-// ITU-T H.265 8.3.2. Every picture re-states the whole set, so what the list
-// leaves out stops being a reference right there -- which is what makes this
-// also the answer to "which surface is free to decode into".
+// 8.3.2. Every picture restates the set, so what it leaves out stops being a reference.
 struct ReferenceSet {
   static constexpr size_t kCapacity =
       static_cast<size_t>(video_parser::H265_MAX_DELTA_POCS + video_parser::H265_MAX_LONG_TERM_REF_PICS);
@@ -155,11 +148,8 @@ struct DpbEntry {
   bool is_long_term = false;
 };
 
-// Slots used to be handed out round-robin and a picture stayed flagged as a
-// reference until the next IRAP, so nothing stopped the decoder from writing a
-// picture over a surface that very picture was predicting from. How far back a
-// stream referred decided whether it happened at all, which made it a
-// clip-by-clip fault. The H.264 path grew the same marking; see dx_h264::Dpb.
+// Without marking, a picture stayed a reference until the next IRAP and a decoder could
+// write over a surface that very picture predicted from.
 class Dpb {
 public:
   void configure(uint32_t slot_count) { entries_.assign(slot_count, DpbEntry {}); }
@@ -210,9 +200,7 @@ public:
     entries_[slot] = {poc, is_reference, false};
   }
 
-  // Expected for a moment after a seek into the middle of a sequence. Any other
-  // time a reference has been lost, and the blocks that wanted it come out
-  // carrying whatever was left in the surface.
+  // Expected briefly after a seek. Otherwise those blocks carry whatever the surface held.
   auto missingReferences(const ReferenceSet& set) const -> size_t {
     size_t missing = 0;
     for (size_t i = 0; i < set.count; ++i) {
@@ -233,9 +221,7 @@ private:
   std::vector<DpbEntry> entries_;
 };
 
-// Retiring references before taking a surface, and not after, is what keeps a
-// decoder from writing a picture over one of its own references. That ordering
-// is the whole reason this lives here rather than in each decoder.
+// References retire before a surface is taken, or a picture overwrites its own reference.
 struct PictureStart {
   ReferenceSet reference_set;
   uint32_t slot = 0;
@@ -324,9 +310,7 @@ inline void fillQMatrix(const Sps& sps, const Pps& pps, DXVA_Qmatrix_HEVC& qmatr
   qmatrix.ucScalingListDCCoefSizeID3[1] = sl.scaling_list_dc_coef_32x32[1];
 }
 
-// Every picture still held as a reference goes in, not only the ones this one
-// predicts from: the driver reads surface lifetime out of the list, so anything
-// missing from it is a surface it may reuse.
+// All of them: the driver reads surface lifetime from the list and may reuse what is missing.
 inline void fillReferenceLists(const Dpb& dpb, const ReferenceSet& set, uint32_t current_slot,
                                DXVA_PicParams_HEVC& pic) {
   for (int i = 0; i < MAX_REF_PICS; ++i) {
@@ -463,10 +447,8 @@ inline void fillPicParams(const Sps& sps,
     }
   }
 
-  // How the hardware finds its way past a set written out in the slice header.
-  // A set the slice coded outright predicts from nothing, so the count is zero;
-  // passing the set's own NumDeltaPocs, as this used to, describes a different
-  // set than the one in the bitstream.
+  // A set coded outright in the slice header predicts from nothing, so the count is zero;
+  // the set's own NumDeltaPocs describes a different set.
   const StRefPicSet& st = activeStRefPicSet(sps, sh);
   pic.ucNumDeltaPocsOfRefRpsIdx =
       sh.short_term_ref_pic_set_sps_flag ? 0 : static_cast<UCHAR>(st.num_delta_pocs_of_ref_rps);

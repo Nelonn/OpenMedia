@@ -95,9 +95,7 @@ public:
     return endSegment();
   }
   auto beginSegment() -> OMError override {
-    // `packets_` is deliberately left alone: a caller is allowed to open the next
-    // segment while the last one's packets are still being read out, and clearing
-    // them here dropped whatever had not been taken yet.
+    // Not cleared: the next segment may open while the last one's packets are being read.
     carry_.clear();
     segment_timestamp_.reset();
     clock_set_ = false;
@@ -142,9 +140,8 @@ public:
       if (available.size() < frame_size) break;
       const uint32_t rate_index = (available[2] >> 2) & 15;
       const uint32_t rate = SAMPLE_RATES[rate_index];
-      // The published time base is this rate, so a stream that changes it mid-flight
-      // would make every timestamp already handed out mean something else. Such a
-      // frame is stepped over instead, which costs one frame rather than the read.
+      // The published time base is this rate, so a mid-stream change would redefine every
+      // timestamp already handed out. Costs one frame rather than the read.
       if (sample_rate_ != 0 && sample_rate_ != rate) {
         at += frame_size;
         continue;

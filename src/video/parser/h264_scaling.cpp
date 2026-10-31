@@ -17,10 +17,7 @@ static constexpr int FLAT_8X8[64] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
 };
 
-// Default_4x4_Intra / Default_4x4_Inter (Table 7-3) and
-// Default_8x8_Intra / Default_8x8_Inter (Table 7-4). These are what
-// UseDefaultScalingMatrixFlag and the Table 7-2 fallback rules select; they are
-// *not* the flat lists above.
+// Table 7-3 and 7-4: what UseDefaultScalingMatrixFlag selects, *not* the flat lists above.
 static constexpr int DEFAULT_4X4_INTRA[16] = {
     6, 13, 13, 20, 20, 20, 28, 28, 28, 28, 32, 32, 32, 37, 37, 42,
 };
@@ -91,9 +88,7 @@ auto h264ReadScalingList(BitReader& br, int* list, int size, int& use_default) -
     if (next_scale != 0) {
       const int delta_scale = br.readSE();
       if (delta_scale < -128 || delta_scale > 127) return false;
-      // & 0xff, not % 256: the C++ remainder of a negative value is negative,
-      // which would put out-of-range entries into the matrix handed to the
-      // hardware decoder.
+      // & 0xff, not % 256: a negative remainder would put out-of-range entries in the matrix.
       next_scale = (last_scale + delta_scale + 256) & 0xff;
       if (j == 0 && next_scale == 0) {
         use_default = 1;

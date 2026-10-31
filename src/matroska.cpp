@@ -133,9 +133,7 @@ static auto ebmlDateToIso(std::span<const uint8_t> data) -> std::string {
   return date_time::formatIso8601Utc(seconds + EPOCH_2001_UNIX);
 }
 
-// Matroska tag names are free-form, but the ones worth surfacing are a fixed
-// vocabulary. The same name means different things depending on what the tag
-// targets, so TITLE and ARTIST are resolved against the target type.
+// The same name means different things by target, so TITLE and ARTIST resolve against it.
 static auto metadataKeyForTagName(std::string_view name, uint64_t target_type)
     -> const Key* {
   const bool album_level = target_type >= MKV_TARGET_TYPE_ALBUM;
@@ -252,18 +250,12 @@ class MatroskaDemuxer final : public BaseDemuxer {
   bool current_is_keyframe_ = false;
   int64_t current_timestamp_tc_ = 0;
 
-  // The track a seek is still waiting on a keyframe for, or -1. A seek lands on
-  // a cluster, not on a frame, and the cluster it lands in can begin part way
-  // through a group of pictures: the cue points at a keyframe inside it rather
-  // than at its first block, and without cues a cluster boundary is only a
-  // keyframe by convention. Those leading blocks reference pictures the decoder
-  // was never given and come out broken, so they are dropped here instead.
+  // A cluster can begin mid-GOP: the cue points inside it, and without cues a boundary is a
+  // keyframe only by convention. Leading blocks reference undecoded pictures, so they are dropped.
   int32_t skip_to_keyframe_track_ = -1;
   int skipped_blocks_ = 0;
 
-  // What the skipping above gives up after. A track whose keyframes are not
-  // marked at all would otherwise lose every block to the end of the file;
-  // showing a broken second is better than showing nothing.
+  // A track with unmarked keyframes would lose every block; a broken second beats nothing.
   static constexpr int MAX_SKIPPED_BLOCKS = 512;
 
 public:
@@ -409,11 +401,8 @@ public:
     const mkvparser::Tracks* tracks = segment_->GetTracks();
     if (!tracks) return OM_FORMAT_PARSE_FAILED;
 
-    // Asked for the file as a whole, the seek follows the picture: its cues are
-    // the ones that point at cluster starts a decoder can be entered at, and a
-    // sound track -- every sample of which is a sync sample -- would answer with
-    // whatever lies nearest the target, leaving the picture to decode from the
-    // middle of a group of pictures.
+    // Whole-file seeks follow the picture: sound answers with whatever is nearest, leaving the
+    // picture to decode from mid-GOP.
     long long target_track_num = track_map_.begin()->first;
     for (const auto& [num, idx] : track_map_) {
       if (idx < static_cast<int32_t>(tracks_.size()) &&
@@ -476,20 +465,12 @@ public:
   }
 
 private:
-  // Whether a cluster may be reached by its position rather than by reading up
-  // to it. The parser cannot carry on past a cluster it was handed the position
-  // of unless it knows where the segment ends -- it says so itself, in the one
-  // place it would have to work out how far it may read. A segment of unknown
-  // size is one being written as it is read, and for those the clusters have to
-  // be walked in order, whatever it costs.
+  // The parser cannot continue past a cluster reached by position unless it knows where the
+  // segment ends; one of unknown size has to be walked in order.
   auto canReachClusterByPosition() const -> bool { return segment_->m_size >= 0; }
 
-  // The parser only picks the cues up by itself when they sit before the first
-  // cluster, which in a file muxed for playback they never do: they are written
-  // after the media and the seek head at the front points back at them. Left
-  // unread, seeking has no index at all and falls back to walking the clusters
-  // from the start of the file -- tens of seconds on a long film, and further
-  // into it the longer it takes.
+  // The parser only picks up cues before the first cluster, where playback muxers never put
+  // them. Unread, seeking walks clusters from the start: tens of seconds on a long film.
   void loadCues() {
     if (segment_->GetCues() != nullptr) return;
 
@@ -508,9 +489,8 @@ private:
     }
   }
 
-  // A seek preloads its cluster by position, which leaves it outside the
-  // sequential parse LoadCluster() continues (its position is an out-parameter,
-  // not a request), so only GetNext() knows what follows. Null means exhausted.
+  // A preloaded cluster is outside LoadCluster()'s sequential parse, so only GetNext() knows
+  // what follows. Null means exhausted.
   auto advanceCluster(const mkvparser::Cluster* cluster)
       -> Result<const mkvparser::Cluster*, OMError> {
     const mkvparser::Cluster* next = segment_->GetNext(cluster);
@@ -602,10 +582,8 @@ private:
     long long time_ns = -1;
   };
 
-  // The first cluster whose header lies in [from, end), both relative to the
-  // start of the segment payload. A cluster id is four ordinary bytes and turns
-  // up inside frame data as well, so a candidate only counts once the parser
-  // has read the header and a block entry out of it.
+  // A cluster id is four ordinary bytes and turns up in frame data, so a candidate counts once
+  // its header and a block entry have been read.
   auto probeCluster(long long from, long long end) -> ClusterProbe {
     static constexpr uint8_t CLUSTER_ID[4] = {0x1F, 0x43, 0xB6, 0x75};
     static constexpr size_t WINDOW = 256 * 1024;
@@ -647,12 +625,8 @@ private:
     return {};
   }
 
-  // Without cues the clusters are the only index there is, and walking them
-  // from the front costs the whole file -- half a minute into a long film, and
-  // worse the further in the target lies. Their positions and their timecodes
-  // rise together, though, which is all a binary search needs: each step lands
-  // on a byte offset in the middle of what is left and looks forward from there
-  // for a cluster header to read the time off.
+  // Without cues, walking costs the whole file. Positions and timecodes rise together, which
+  // is all a binary search needs.
   auto seekByClusterScan(long long target_ns, SeekMode mode) -> OMError {
     if (!canReachClusterByPosition()) return seekByClusterWalk(target_ns, mode);
 
@@ -679,9 +653,7 @@ private:
       next_ns = first_ns;
     }
 
-    // Everything below `lo` is known to be at or before the target and
-    // everything at or above `hi` after it; the clusters in between are what
-    // each probe halves.
+    // Below `lo` is at or before the target, at or above `hi` after it.
     long long lo = first->GetPosition() + 1;
     long long hi = (segment_->m_size >= 0) ? segment_->m_size : total - segment_->m_start;
 
@@ -709,10 +681,7 @@ private:
     return OM_SUCCESS;
   }
 
-  // A segment still being written cannot be entered at a position, so its
-  // clusters are read in order until the target is passed. Nothing else can be
-  // done for such a file, and it is the one kind where the cost is bounded in
-  // practice: what has been written so far is all there is.
+  // A segment still being written cannot be entered at a position; what exists bounds the cost.
   auto seekByClusterWalk(long long target_ns, SeekMode mode) -> OMError {
     const mkvparser::Cluster* prev = nullptr;
     const mkvparser::Cluster* next = nullptr;
@@ -743,9 +712,7 @@ private:
     return OM_SUCCESS;
   }
 
-  // Which of the two clusters either side of the target the mode asks for. A
-  // null answer means the seek ran off the end, which readPacket() reports as
-  // the end of the file.
+  // Null means the seek ran off the end, which readPacket() reports as end of file.
   void chooseCluster(const mkvparser::Cluster* prev, long long prev_ns, const mkvparser::Cluster* next,
                      long long next_ns, long long target_ns, SeekMode mode) {
     switch (mode) {
@@ -969,10 +936,8 @@ private:
     return OM_SUCCESS;
   }
 
-  // H.264/H.265/H.266 in Matroska store the same decoder configuration record
-  // MP4 keeps in its sample entry, and the frames are length-prefixed NAL units
-  // rather than Annex-B. Decoders here expect Annex-B, so replace the extradata
-  // with the parameter sets and install a filter for the frames.
+  // Frames are length-prefixed NAL units but decoders here take Annex-B, so the extradata
+  // becomes parameter sets and frames get a filter.
   void applyNalDecoderConfig(Track& track, int32_t stream_index) {
     // Some muxers store the parameter sets as a plain Annex-B stream instead of
     // a configuration record; those frames are already Annex-B too.
@@ -998,11 +963,7 @@ private:
         config->nal_length_size, std::move(config->annexb_extradata));
   }
 
-  // Matroska describes colour in the Colour element of the video track using
-  // the same ISO/IEC 23001-8 codes MP4 keeps in `colr`, plus MasteringMetadata
-  // and MaxCLL/MaxFALL for HDR10. libwebm parses the element for us; all that
-  // is left is the unit conversion, because Matroska stores chromaticities and
-  // luminance as floats while the rest of the pipeline uses the SEI fixed point.
+  // Matroska stores chromaticities and luminance as floats; the pipeline uses SEI fixed point.
   static void applyColour(const mkvparser::VideoTrack* vt, Track& track) {
     const mkvparser::Colour* colour = vt->GetColour();
     if (!colour) return;
@@ -1050,9 +1011,7 @@ private:
     const mkvparser::MasteringMetadata* mm = colour->mastering_metadata;
     if (!mm) return;
 
-    // Chromaticities are 0..1 and stored in 0.00002 units; luminance is cd/m^2
-    // stored in 0.0001 units. The primaries array follows the SEI order: green,
-    // blue, red.
+    // 0.00002 chromaticity and 0.0001 cd/m^2 units, SEI order: green, blue, red.
     auto chromaticity = [](const mkvparser::PrimaryChromaticity* c,
                            uint16_t (&out)[2]) -> bool {
       if (!c || c->x == mkvparser::MasteringMetadata::kValueNotPresent ||
@@ -1097,9 +1056,7 @@ private:
     return buffer;
   }
 
-  // Title, writing application and creation date, all of which describe the
-  // file rather than any one track. mkvparser exposes the first two directly
-  // but not the date, so the element is walked for that.
+  // mkvparser exposes all but the date, so the element is walked for that.
   void parseSegmentInfoMetadata() {
     const mkvparser::SegmentInfo* info = segment_->GetInfo();
     if (!info) return;
@@ -1135,10 +1092,7 @@ private:
     }
   }
 
-  // The Tags element. Each Tag states what it is about through its Targets
-  // child: a TagTrackUID naming one track, or nothing at all, which means the
-  // whole file. mkvparser parses SimpleTags but drops the targets, so the
-  // element is walked here instead.
+  // mkvparser parses SimpleTags but drops the targets, so the element is walked here.
   void parseTagsMetadata() {
     const mkvparser::Tags* tags = segment_->GetTags();
     if (!tags) return;
@@ -1253,9 +1207,7 @@ private:
     return nullptr;
   }
 
-  // Cover art travels as an attachment. mkvparser does not parse the
-  // Attachments element at all, so the segment's top-level children are walked
-  // for it - headers only, so stepping over the clusters costs one read each.
+  // mkvparser skips Attachments. Headers only, so stepping over clusters costs one read each.
   void parseAttachments() {
     if (!mkv_reader_ || segment_->m_size <= 0) return;
 
@@ -1371,9 +1323,7 @@ private:
     return text;
   }
 
-  // Name, language and the flags that say which track a player should pick.
-  // Unlike MP4's track_enabled, FlagDefault really does single one track out of
-  // several, which is what OM_DISPOSITION_DEFAULT means.
+  // Unlike MP4's track_enabled, FlagDefault really singles one track out.
   void applyTrackMetadata(const mkvparser::Track* parser_track, Track& track) {
     if (const char* name = parser_track->GetNameAsUTF8(); name && *name) {
       track.metadata.setString(TITLE, std::string_view(name));

@@ -26,28 +26,17 @@
 #include <utility>
 #include <vector>
 
-// Encoding goes IDR/key frame, then P frames that each predict from the one
-// before, until the next key frame. No B frames: every picture is emitted as
-// soon as it is encoded, in presentation order, so DTS equals PTS and a single
-// reconstructed reference is all the state carried between frames.
-//
-// The H.264, HEVC and AV1 headers are written here and handed to the driver as
-// packed headers wherever it accepts them -- which is what puts VUI colour
-// information and timing into the stream; a driver that takes none writes its
-// own. VP9 headers are always the driver's.
+// No B frames: pictures go out as encoded, so DTS equals PTS and one reconstructed reference
+// is all the state between frames. Our packed headers put VUI colour and timing in the stream.
 
 namespace openmedia {
 
 namespace {
 
-// VA_TIMEOUT_INFINITE, spelled out: the macro arrived together with
-// vaSyncBuffer in VA-API 1.9, and the header this was built against may be
-// older than the libva found at run time.
+// VA_TIMEOUT_INFINITE, spelled out: the header built against may predate VA-API 1.9.
 constexpr uint64_t kWaitForever = 0xffffffffffffffffull;
 
-// ---------------------------------------------------------------------------
-// Bitstream helpers
-// ---------------------------------------------------------------------------
+// --- Bitstream helpers ---
 
 // Bits written so far, and how many of them count: a packed slice header may
 // stop in the middle of a byte, and the driver carries on from there.
@@ -72,9 +61,7 @@ public:
     writer_.align();
   }
 
-  // Consumes the writer: the buffer is moved out from under it, so the only
-  // safe thing left to do with the object is destroy it. Rvalue-only says that
-  // in the type, which is why the callers spell out std::move.
+  // Rvalue-only: the buffer is moved out, so destroying the writer is all that remains.
   auto finish() && -> PackedBits {
     PackedBits out;
     out.bits = writer_.bitPosition();
@@ -89,11 +76,8 @@ private:
   BitWriter writer_;
 };
 
-// A NAL unit in Annex B form: a four byte start code, then the unit with
-// emulation prevention bytes inserted. The partly written last byte of a slice
-// header takes part in the scan too; an escape it causes that turns out not to
-// be needed once the driver has filled the byte is harmless, because decoders
-// drop every 0x03 that follows two zero bytes.
+// An escape caused by a slice header's partial last byte is harmless: decoders drop every
+// 0x03 following two zero bytes.
 auto annexB(const PackedBits& nal) -> PackedBits {
   PackedBits out;
   out.bytes = {0, 0, 0, 1};
@@ -140,9 +124,7 @@ auto leb128(uint64_t value) -> std::vector<uint8_t> {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Levels
-// ---------------------------------------------------------------------------
+// --- Levels ---
 
 struct StreamShape {
   uint32_t width = 0;
@@ -224,9 +206,7 @@ auto guessAV1Level(const StreamShape& s) -> uint8_t {
   return 31; // no constraints
 }
 
-// ---------------------------------------------------------------------------
-// Settings shared by the header writers
-// ---------------------------------------------------------------------------
+// --- Settings shared by the header writers ---
 
 struct ColourInfo {
   uint32_t primaries = 2;
@@ -243,9 +223,7 @@ struct Timing {
   uint32_t den = 1;  // per this many seconds
 };
 
-// ---------------------------------------------------------------------------
-// H.264 (ITU-T H.264 7.3.2)
-// ---------------------------------------------------------------------------
+// --- H.264 (7.3.2) ---
 
 struct H264Headers {
   uint8_t profile_idc = 100;
@@ -373,9 +351,7 @@ struct H264Headers {
   }
 };
 
-// ---------------------------------------------------------------------------
-// H.265 (ITU-T H.265 7.3.2 / 7.3.6)
-// ---------------------------------------------------------------------------
+// --- H.265 (7.3.2, 7.3.6) ---
 
 struct H265Headers {
   uint8_t profile_idc = 1;
@@ -583,9 +559,7 @@ struct H265Headers {
   }
 };
 
-// ---------------------------------------------------------------------------
-// AV1 (AV1 bitstream specification 5.5 / 5.9)
-// ---------------------------------------------------------------------------
+// --- AV1 (5.5, 5.9) ---
 
 struct AV1Tiles {
   uint32_t cols = 1;
@@ -660,10 +634,8 @@ struct AV1Filters {
   uint8_t cdef_uv_sec[8] = {};
 };
 
-// With fixed quantisers nobody else picks the filters. The loop filter level
-// is libaom's LPF_PICK_FROM_Q fit against the AC quantiser; the CDEF strength
-// set is the one Chromium's VA-API AV1 encoder hands the hardware, which then
-// chooses among the eight per superblock.
+// With fixed quantisers nobody else picks filters. Level: libaom's LPF_PICK_FROM_Q fit.
+// CDEF: the set Chromium's VA-API AV1 encoder hands the hardware.
 auto av1FiltersForQ(uint32_t qindex, bool key, uint32_t bit_depth) -> AV1Filters {
   AV1Filters f;
   const int64_t q = av1_quant::acQuant(static_cast<int>(qindex), bit_depth);
@@ -760,9 +732,7 @@ struct AV1Headers {
     return obu(1, std::move(h).finish());
   }
 
-  // uncompressed_header() for the two kinds of frame this encoder makes: a
-  // shown key frame, and a shown inter frame predicting from slot 0 that
-  // refreshes slot 0.
+  // A shown key frame, or a shown inter frame predicting from and refreshing slot 0.
   auto frameHeader(bool key, uint32_t order_hint, uint32_t base_q_idx, const AV1Filters& filters,
                    AV1FrameHeaderLayout& layout) const -> PackedBits {
     HeaderWriter h;
@@ -837,9 +807,7 @@ struct AV1Headers {
   }
 };
 
-// ---------------------------------------------------------------------------
-// HDR metadata
-// ---------------------------------------------------------------------------
+// --- HDR metadata ---
 
 // SEI payloads for mastering display colour volume (137) and content light
 // level (144); both codecs code them the same, in the units the Om structs use.
@@ -928,9 +896,7 @@ auto av1HdrMetadata(const OMMasteringDisplayMetadata& md, const OMContentLightLe
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Rate control
-// ---------------------------------------------------------------------------
+// --- Rate control ---
 
 struct RateControl {
   uint32_t va_mode = VA_RC_CQP;
@@ -947,9 +913,7 @@ struct RateControl {
   auto hasBitrate() const -> bool { return va_mode != VA_RC_CQP && va_mode != VA_RC_ICQ; }
 };
 
-// ---------------------------------------------------------------------------
-// The encoder
-// ---------------------------------------------------------------------------
+// --- The encoder ---
 
 class VAAPIEncoder final : public Encoder {
 public:
@@ -1007,9 +971,7 @@ public:
     mastering_display_ = video.mastering_display.has_value ? video.mastering_display : input_format_.mastering_display;
     content_light_level_ = video.content_light_level.has_value ? video.content_light_level : input_format_.content_light_level;
 
-    // A driver states its own range, where 1 is the best quality and the top of
-    // the range is the fastest, so the 1-7 scale maps onto it backwards.
-    // vaapi.quality_level keeps naming a driver's level directly, and wins.
+    // 1 is a driver's best quality, so the 1-7 scale maps backwards. vaapi.quality_level wins.
     quality_level_ = 0;
     if (const auto* value = options.extra.get(VAAPI_ENC_QUALITY_LEVEL)) {
       if (const auto n = value->getInt64()) quality_level_ = static_cast<uint32_t>(std::max<int64_t>(*n, 0));
@@ -1051,9 +1013,7 @@ public:
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-    // One picture is kept in flight: this call submits its frame and collects
-    // the one before, so the GPU encodes while the caller prepares the next.
-    // An empty frame drains what is left.
+    // One picture in flight, so the GPU encodes while the caller prepares the next.
     std::optional<InFlight> previous = std::exchange(in_flight_, std::nullopt);
     std::vector<Packet> packets = std::exchange(pending_, {});
     const auto* pic = std::get_if<Picture>(&frame.data);
@@ -1068,9 +1028,7 @@ public:
       if (auto packet = collect(*previous)) packets.push_back(std::move(*packet));
     }
     if (!submitted) {
-      // The frame was dropped, which the caller has to hear about. Whatever was
-      // collected alongside it waits for the next call instead of going with an
-      // error the caller may well treat as having returned nothing.
+      // The caller must hear of the dropped frame, and may treat an error as returning nothing.
       pending_ = std::move(packets);
       return Err(OM_CODEC_ENCODE_FAILED);
     }
@@ -1127,9 +1085,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Capabilities
-  // ---------------------------------------------------------------------------
+  // --- Capabilities ---
 
   auto pickProfile(OMProfile requested) -> OMError {
     const auto profiles = vaapi::queryProfiles(display_);
@@ -1180,10 +1136,8 @@ private:
     rc_modes_ = attribute(VAConfigAttribRateControl);
     if (rc_modes_ == VA_ATTRIB_NOT_SUPPORTED) rc_modes_ = VA_RC_CQP;
 
-    // All or nothing, as Chromium does it: a slice header of ours behind a
-    // parameter set the driver wrote itself (or the other way round) only
-    // agrees by luck -- the picture order count type alone differs between
-    // encoders.
+    // All or nothing, as Chromium does: our slice header behind a driver's parameter set only
+    // agrees by luck; POC type alone differs between encoders.
     const uint32_t packed_attr = attribute(VAConfigAttribEncPackedHeaders);
     const uint32_t packed = packed_attr == VA_ATTRIB_NOT_SUPPORTED ? 0 : packed_attr;
     packed_headers_ = 0;
@@ -1312,9 +1266,7 @@ private:
     return rc;
   }
 
-  // ---------------------------------------------------------------------------
-  // Session
-  // ---------------------------------------------------------------------------
+  // --- Session ---
 
   auto surfaceAlignment() const -> uint32_t {
     switch (codec_id_) {
@@ -1361,9 +1313,7 @@ private:
     surface_width_ = vaapi::alignUp(width_, align);
     surface_height_ = vaapi::alignUp(height_, align);
 
-    // Two reconstructed pictures (the reference and the one being made); two
-    // input pictures and coded buffers, one for the picture in flight and one
-    // for the picture being submitted.
+    // Two reconstructed pictures; two inputs and coded buffers, in flight and being submitted.
     recon_ = vaapi::SurfacePool::create(owned_display_, display_, rt_format, surface_width_, surface_height_, 2);
     input_ = vaapi::SurfacePool::create(owned_display_, display_, rt_format, surface_width_, surface_height_, 2);
     if (!recon_ || !input_) return fail(OM_CODEC_OPEN_FAILED, "could not allocate surfaces");
@@ -1434,9 +1384,7 @@ private:
     rc_changed_ = false;
   }
 
-  // ---------------------------------------------------------------------------
-  // Headers
-  // ---------------------------------------------------------------------------
+  // --- Headers ---
 
   void setupHeaders(int32_t level) {
     StreamShape shape;
@@ -1551,9 +1499,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Input
-  // ---------------------------------------------------------------------------
+  // --- Input ---
 
   // The surface to encode from: a VA-API picture on our own display as it is,
   // anything else copied into our input surface.
@@ -1580,9 +1526,7 @@ private:
       fail(OM_CODEC_INVALID_PARAMS, "picture format does not match the encoder's input format");
       return false;
     }
-    // The session was configured for one size and the headers describe that
-    // size; a picture of any other is a caller's mistake, not something to
-    // encode with the difference left as whatever the surface held.
+    // The headers describe the configured size; anything else would encode stale surface bytes.
     if (pic.width != width_ || pic.height != height_) {
       fail(OM_CODEC_INVALID_PARAMS, "picture is {}x{}, the encoder was configured for {}x{}", pic.width, pic.height,
            width_, height_);
@@ -1595,9 +1539,7 @@ private:
     const uint32_t cw = (w + 1) / 2;
     const uint32_t ch = (h + 1) / 2;
 
-    // A picture can reach here with planes that were never allocated, or with
-    // rows shorter than its format needs; either one would be read out of
-    // bounds below.
+    // Unallocated planes or short rows would be read out of bounds below.
     const size_t chroma_row = (nv12_input ? 2 : 1) * cw * bpp;
     const size_t needed[3] = {w * bpp, chroma_row, chroma_row};
     for (uint32_t plane = 0; plane < (nv12_input ? 2u : 3u); ++plane) {
@@ -1719,11 +1661,8 @@ private:
       }
     }
 
-    // The surface is aligned up to the codec's block size and H.264 and HEVC
-    // code all of it, cropping only in the headers, so whatever sits in the
-    // padding is encoded for real: it costs bitrate and reaches the visible
-    // edge through intra prediction and the deblocking filter. Repeating the
-    // last real sample and row is what leaves the least to code.
+    // H.264 and HEVC code the padding too: it costs bitrate and reaches the visible edge through
+    // intra prediction and deblocking. Repeating the last sample leaves the least to code.
     const auto padPlane = [](uint8_t* plane, size_t pitch, size_t unit, uint32_t units, uint32_t padded_units,
                              uint32_t rows, uint32_t padded_rows) {
       if (units == 0 || rows == 0) return;
@@ -1757,13 +1696,8 @@ private:
     return true;
   }
 
-  // ---------------------------------------------------------------------------
-  // One picture
-  // ---------------------------------------------------------------------------
+  // --- One picture ---
 
-  // The picture's buffers go through vaapi::Submission, the same class the
-  // decoder uses: it keeps parameter and slice buffers apart, says which
-  // vaCreateBuffer failed, and always ends a picture it began.
   static auto packed(vaapi::Submission& s, uint32_t type, const PackedBits& bits, bool emulation_bytes) -> bool {
     return s.addPackedHeader(type, bits.bytes.data(), bits.bytes.size(), bits.bits, emulation_bytes);
   }
@@ -1814,9 +1748,8 @@ private:
     VABufferID coded = VA_INVALID_ID;
     int64_t pts = 0;
     bool key = false;
-    // Set once the picture is in the driver's hands and the one before it turns
-    // out to have been truncated: this one predicts from a reconstruction a
-    // decoder cannot rebuild, so its bitstream is well formed and still wrong.
+    // The one before was truncated: this bitstream is well formed but predicts from a
+    // reconstruction no decoder can rebuild.
     bool reference_lost = false;
     // A caller's VA-API surface has to outlive its encoding.
     std::shared_ptr<HardwarePicture> hold;
@@ -1850,9 +1783,7 @@ private:
       return false;
     }
 
-    // execute() waits for anything that did reach the hardware before it
-    // reports a failure, so the input surface and the coded buffer are free to
-    // be used again by the next picture either way.
+    // execute() waits for what reached the hardware, so these are free for the next picture.
     const VAStatus status = buffers.execute(input);
     if (status != VA_STATUS_SUCCESS) {
       fail(OM_CODEC_ENCODE_FAILED, "submitting the picture failed: {}", vaapi::describe(status));
@@ -1882,18 +1813,14 @@ private:
 
   auto collect(const InFlight& job) -> std::optional<Packet> {
     auto& libva = LibVA::getInstance();
-    // The fence that belongs to the coded buffer, where libva has it. The one
-    // of the input surface covers it only by accident: whether the driver ties
-    // the two together is its own business.
+    // The input surface's fence covers the coded buffer only by the driver's accident.
     VAStatus status = libva.vaSyncBuffer ? libva.vaSyncBuffer(display_, job.coded, kWaitForever)
                                          : libva.vaSyncSurface(display_, job.input);
     if (status != VA_STATUS_SUCCESS) {
       fail(OM_CODEC_ENCODE_FAILED, "waiting for the encoded picture failed: {}", vaapi::describe(status));
       return std::nullopt;
     }
-    // Nothing to read: this picture was already queued when its reference was
-    // found to be truncated, and the key frame that repairs the stream is the
-    // one after it. Syncing above is all that was needed, to free the buffer.
+    // Queued before its reference was found truncated; syncing above freed the buffer.
     if (job.reference_lost) return std::nullopt;
 
     std::vector<uint8_t> coded;
@@ -1912,12 +1839,8 @@ private:
     }
     libva.vaUnmapBuffer(display_, job.coded);
 
-    // A truncated picture is not a picture: its reconstruction no longer
-    // matches what a decoder can build from the bitstream, so predicting from
-    // it would carry the damage through the rest of the GOP. Dropping the
-    // reference makes the next submission a key frame -- but the picture that
-    // followed this one is already queued and predicts from the reconstruction
-    // being dropped, so it has to go the same way.
+    // A truncated picture no longer matches what a decoder builds, so the next submission is a
+    // key frame; the one already queued predicts from it and goes the same way.
     if (truncated) {
       log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING,
           "[VAAPI] the {} byte coded buffer overflowed; dropping the picture and resuming from a key frame",
@@ -2290,10 +2213,7 @@ private:
       pic.ref_deltas[i] = kDefaultRefDeltas[i];
     }
     if (packed_headers_ & VA_ENC_PACKED_HEADER_PICTURE) {
-      // Where in the frame header below the driver finds the fields it may
-      // rewrite, and how long that header is. ffmpeg fills these in whatever
-      // the rate control is, because a driver patches the OBU size even when
-      // the quantiser is the encoder's own.
+      // ffmpeg fills these whatever the rate control: a driver patches OBU size regardless.
       pic.bit_offset_qindex = layout.qindex;
       pic.bit_offset_loopfilter_params = layout.loop_filter;
       pic.bit_offset_cdef_params = layout.cdef;
@@ -2323,9 +2243,7 @@ private:
     return true;
   }
 
-  // ---------------------------------------------------------------------------
-  // Output
-  // ---------------------------------------------------------------------------
+  // --- Output ---
 
   // Annex B NAL units of an access unit: (offset of the NAL header, type).
   auto annexBUnits(const std::vector<uint8_t>& data) const -> std::vector<std::pair<size_t, int>> {
@@ -2435,9 +2353,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // State
-  // ---------------------------------------------------------------------------
+  // --- State ---
 
   bool initialized_ = false;
   OMCodecId codec_id_ = OM_CODEC_NONE;

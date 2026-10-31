@@ -11,9 +11,6 @@
 
 namespace openmedia::hls {
 
-// HLS is two documents deep: a master playlist lists variants, and each variant's
-// segments live in a media playlist fetched separately -- hence two parse calls with a
-// fetch in between. A single-variant stream is published as a media playlist alone.
 enum class PlaylistKind : uint8_t {
   Unknown, // not a playlist, or nothing in it says which kind
   Master,
@@ -91,9 +88,7 @@ struct MediaPlaylist {
 
   std::vector<MediaSegment> segments;
 
-  // Either promise that the playlist will not change: `#EXT-X-ENDLIST`, or a type
-  // of VOD, which says outright that the playlist is finished whether or not the
-  // tag announcing it is there.
+  // `#EXT-X-ENDLIST` or a type of VOD: either promises the playlist will not change.
   auto isLive() const -> bool { return !endlist && type != PlaylistType::Vod; }
 
   auto totalDuration() const -> double; // seconds
@@ -108,9 +103,7 @@ struct Resolution {
 // `#EXT-X-STREAM-INF`, one rendition of the whole presentation.
 struct Variant {
   std::string url; // resolved; the media playlist to fetch next
-  // Where the same rendition is published besides `url`, in playlist order. A
-  // variant repeated with its attributes unchanged is another address for that one
-  // quality, not another quality (RFC 8216 6.3.1), so such entries collapse here.
+  // Other addresses of this rendition, in playlist order (RFC 8216 6.3.1).
   std::vector<std::string> backup_urls;
   uint32_t bandwidth = 0;
   uint32_t average_bandwidth = 0;
@@ -165,9 +158,7 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
 
 // Exposed so they can be tested on their own.
 
-// `KEY=VALUE` separated by commas. A quoted value may hold commas of its own, which
-// `CODECS="avc1.4d401f,mp4a.40.2"` always does and a naive split always gets wrong.
-// Quotes are removed.
+// `KEY=VALUE`, comma-separated; quotes are removed and may hold commas (`CODECS="a,b"`).
 auto parseAttributes(std::string_view list) -> std::vector<std::pair<std::string, std::string>>;
 
 // `<length>[@<offset>]`. With no offset the range follows `previous_end`, the end of
@@ -177,9 +168,7 @@ auto parseByteRange(std::string_view text, int64_t previous_end) -> ByteRange;
 // Milliseconds since the Unix epoch, or -1.
 auto parseIso8601Ms(std::string_view text) -> int64_t;
 
-// `IV=0x...` into the 16 bytes of a cipher block. False when the attribute is
-// absent or not 16 bytes of hex, which is what says the vector has to be derived
-// from the media sequence number instead.
+// False when absent or malformed, meaning the IV derives from the media sequence number.
 auto parseHexIv(std::string_view text, uint8_t out[16]) -> bool;
 
 } // namespace openmedia::hls

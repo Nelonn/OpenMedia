@@ -116,9 +116,7 @@ private:
   auto pushAnimation(WebPMux* mux, const Dictionary& metadata) -> OMError {
     WebPMuxAnimParams params = {};
     params.loop_count = metadata.getInt32(ANIMATION_LOOP_COUNT, 0);
-    // libwebp packs the canvas colour as 0xBBGGRRAA; the metadata key uses the
-    // 0xAARRGGBB everything else in the library speaks, and defaults to the
-    // opaque white libwebp's own tools pick.
+    // libwebp packs 0xBBGGRRAA; the metadata key is 0xAARRGGBB, defaulting to libwebp's white.
     const auto argb = static_cast<uint32_t>(
         metadata.getInt64(ANIMATION_BACKGROUND_COLOR, 0xFFFFFFFF));
     params.bgcolor = ((argb & 0x000000FFu) << 24) | // blue
@@ -138,9 +136,7 @@ private:
       info.y_offset = 0;
       info.duration = static_cast<int>(frameDurationMs(i));
       info.id = WEBP_CHUNK_ANMF;
-      // Every packet is a full-canvas keyframe, so replacing the canvas
-      // outright reproduces it exactly; blending would composite frames with
-      // alpha over their predecessor instead.
+      // Each packet is full-canvas; blending would composite alpha over its predecessor.
       info.dispose_method = WEBP_MUX_DISPOSE_NONE;
       info.blend_method = WEBP_MUX_NO_BLEND;
 

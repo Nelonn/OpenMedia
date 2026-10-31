@@ -68,9 +68,7 @@ struct State {
     have_prev_poc = false;
   }
 
-  // `nal_data` must cover exactly one NAL unit starting at its header byte:
-  // read_pps uses more_rbsp_data(), which needs the rbsp_stop_one_bit of this
-  // unit and not of whatever follows it in the packet.
+  // Exactly one NAL: read_pps's more_rbsp_data() needs this unit's stop bit.
   void storeNal(std::span<const uint8_t> nal_data) {
     if (nal_data.empty()) return;
     h264::Bitstream bs;
@@ -137,15 +135,8 @@ struct State {
     }
   }
 
-  // 8.2.1. All three pic_order_cnt_types, because only type 0 keeps the count
-  // in the slice header: types 1 and 2 derive it from frame_num, and returning
-  // slice.pic_order_cnt_lsb for them handed back a hard 0 for every picture in
-  // the stream — the field is never read when the SPS does not use type 0. A
-  // constant POC leaves DXVA's CurrFieldOrderCnt and FieldOrderCntList flat,
-  // which is what the driver uses to tell the pictures in the DPB apart.
-  //
-  // Type 2 in particular is what NVENC and the Windows game capture encoders
-  // emit for their B-frame-free streams, so this was not an exotic corner.
+  // 8.2.1. Types 1 and 2 derive it from frame_num; returning pic_order_cnt_lsb gave them a
+  // constant 0, and DXVA tells DPB pictures apart by POC. NVENC and game capture emit type 2.
   auto computePoc(const h264::SliceHeader& slice, bool is_idr, bool is_reference) -> int32_t {
     if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !pps_valid[slice.pic_parameter_set_id]) {
       return slice.pic_order_cnt_lsb;
@@ -202,11 +193,8 @@ struct State {
       return is_reference ? 2 * abs_frame_num : 2 * abs_frame_num - 1;
     }
 
-    // Type 0. prevPicOrderCntMsb/Lsb come from the previous *reference* picture
-    // in decoding order; letting non-reference pictures update them made the MSB
-    // step at the wrong moment once pic_order_cnt_lsb wrapped, which put the
-    // reordering queue and the DXVA field order counts out of step with the
-    // stream.
+    // From the previous *reference* picture: letting others update them stepped the MSB at the
+    // wrong moment once the LSB wrapped.
     const int max_pic_order_cnt_lsb = 1 << (s.log2_max_pic_order_cnt_lsb_minus4 + 4);
     int pic_order_cnt_msb = 0;
     if (have_prev_poc) {
@@ -292,11 +280,7 @@ inline auto describe(ParameterSetStatus status) -> std::string_view {
   return "";
 }
 
-// The parameter sets a frame decodes against.
-//
-// D3D11 and D3D12 both have to resolve and vet exactly these before they can
-// fill in a DXVA picture parameter structure, and a caller that leaves one of
-// the checks out ends up reading a parameter set the stream never sent.
+// D3D11 and D3D12 share this; a caller skipping a check reads a set the stream never sent.
 struct ActiveParameterSets {
   const h264::SPS* sps = nullptr;
   const h264::PPS* pps = nullptr;
@@ -349,10 +333,8 @@ inline auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
   }
 }
 
-// The colour description a stream states in its VUI, which is where it lives for
-// H.26x: containers often say nothing, and a hardware decoder that is handed the
-// bitstream whole reports nothing either. Left as it was when the stream stays
-// silent, so a container that did describe its colour keeps the last word.
+// Containers often say nothing and hardware reports nothing. A silent stream leaves what
+// the container described.
 inline auto applyColorDescription(const State& state, VideoFormat& format) -> bool {
   for (uint32_t i = 0; i < 32; ++i) {
     if (!state.sps_valid[i]) continue;
@@ -370,22 +352,15 @@ inline auto applyColorDescription(const State& state, VideoFormat& format) -> bo
   return false;
 }
 
-// The luma bit depth of the first sequence parameter set the stream carries, or
-// zero while none has been seen. A decoder has to know it before it opens, as
-// 10-bit content needs a 10-bit surface to come out of.
+// Needed before opening: 10-bit content needs a 10-bit surface.
 inline auto lumaBitDepth(const State& state) -> uint8_t {
   for (uint32_t i = 0; i < 32; ++i)
     if (state.sps_valid[i]) return static_cast<uint8_t>(state.sps[i].bit_depth_luma_minus8 + 8);
   return 0;
 }
 
-// How many decoded pictures may be held back to put them into output order.
-//
-// A stream that carries bitstream_restriction_flag states this outright. Without
-// it this used to return 0, meaning no reordering at all, so a stream with
-// B-frames was emitted in decode order and its timestamps ran backwards. The
-// fallback is the DPB capacity the stream's own level guarantees, which is what
-// a decoder is entitled to assume when the stream stays silent.
+// Falls back to the DPB capacity the stream's level guarantees. Returning 0 emitted B-frame
+// streams in decode order, with timestamps running backwards.
 inline auto reorderDepth(const h264::SPS& sps) -> size_t {
   if (sps.vui_parameters_present_flag && sps.vui.bitstream_restriction_flag) {
     return static_cast<size_t>(std::clamp(sps.vui.num_reorder_frames, 0, 16));
@@ -412,16 +387,8 @@ struct DpbEntry {
   int32_t pic_num = 0;
 };
 
-// The decoded picture buffer and the reference picture marking process of
-// ITU-T H.264 8.2.5.
-//
-// There used to be no marking at all: slots were handed out round-robin and
-// every picture decoded into one stayed flagged as a reference until the next
-// IDR. Once more pictures had been decoded than the stream's max_num_ref_frames,
-// the reference list handed to DXVA described pictures the stream had long since
-// retired, and the driver answered by emitting a copy of a reference instead of
-// a decoded picture. Streams without B-frames never got far enough into the list
-// for it to matter, which is why only some clips broke.
+// 8.2.5. Without marking, every picture stayed a reference until the next IDR, so past
+// max_num_ref_frames DXVA got a list of retired pictures and emitted copies of references.
 class Dpb {
 public:
   void configure(uint32_t slot_count, uint32_t max_num_ref_frames, uint32_t max_frame_num) {
@@ -437,9 +404,7 @@ public:
   auto entries() const -> const std::vector<DpbEntry>& { return entries_; }
   auto slotCount() const -> uint32_t { return static_cast<uint32_t>(entries_.size()); }
 
-  // 8.2.4.1: short-term pictures are addressed relative to the picture being
-  // decoded, so their PicNums have to be refreshed against its frame_num before
-  // any marking operation can resolve one.
+  // 8.2.4.1: PicNums are relative to the picture being decoded.
   void updatePicNums(uint32_t frame_num) {
     for (auto& entry : entries_) {
       if (!entry.is_reference || entry.is_long_term) continue;
@@ -455,9 +420,7 @@ public:
     for (uint32_t i = 0; i < entries_.size(); ++i) {
       if (!entries_[i].is_reference) return i;
     }
-    // Every slot is spoken for, meaning the stream keeps more references live
-    // than its own max_num_ref_frames allows. Evicting the oldest short-term
-    // picture keeps decoding instead of failing the frame outright.
+    // The stream keeps more references than it declared; evicting beats failing the frame.
     return oldestShortTermSlot().value_or(0u);
   }
 
@@ -617,15 +580,8 @@ private:
   uint32_t max_frame_num_ = 16;
 };
 
-// An IDR restarts the stream: the reference buffer is emptied and the picture
-// counts begin again from it. The count parseFrame worked out for this frame
-// was derived against the stretch that just ended, so it has to be taken again
-// once the state is cleared -- which is the part a caller doing this by hand is
-// most likely to leave out.
-//
-// `Dpb` is passed separately because `State` holds the parameter sets and the
-// parser's own bookkeeping, while the reference buffer belongs to whichever
-// decoder owns the surfaces.
+// The count parseFrame derived belongs to the stretch that just ended, so it is taken again.
+// `Dpb` is separate because the reference buffer belongs to the surfaces' owner.
 inline void restartAtIdr(State& state, Dpb& dpb, ParsedFrame& frame) {
   dpb.reset();
   state.resetPoc();
@@ -684,10 +640,8 @@ inline void fillPicParams(const h264::SPS& sps,
     pic.FieldOrderCntList[i][1] = 0;
     pic.FrameNumList[i] = 0;
   }
-  // The list is packed: every entry the DPB still marks as a reference, in slot
-  // order, with the unused tail left at 0xff. Long-term pictures are flagged as
-  // such and carry their LongTermFrameIdx in place of a frame_num, which is what
-  // the driver needs to build the slice reference lists itself.
+  // Long-term pictures carry LongTermFrameIdx instead of a frame_num, which the driver needs
+  // to build the slice reference lists itself.
   size_t ref_index = 0;
   for (uint32_t slot = 0; slot < dpb.slotCount() && ref_index < MAX_REF_FRAMES; ++slot) {
     const auto& entry = dpb.entries()[slot];

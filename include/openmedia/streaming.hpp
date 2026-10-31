@@ -68,11 +68,8 @@ struct OPENMEDIA_ABI SegmentEncryption {
   bool iv_explicit = false;
   uint64_t sequence = 0; // the segment's media sequence number
 
-  // Whether the cipher covers the whole segment, which is what `AES-128` means and
-  // what StreamOptions::decrypt answers for. False for the sample-level schemes
-  // (`SAMPLE-AES`, `SAMPLE-AES-CTR`), where the container is parsed as-is and
-  // individual packets report SampleEncryption for the caller to handle. A reader
-  // that cannot report sample protection returns OM_FORMAT_ENCRYPTED.
+  // True for `AES-128`, handled by StreamOptions::decrypt. False for sample-level schemes, where
+  // packets report SampleEncryption; a reader that cannot returns OM_FORMAT_ENCRYPTED.
   bool whole_segment = true;
 };
 
@@ -141,18 +138,15 @@ struct OPENMEDIA_ABI StreamOptions {
   uint32_t max_width = 0;
   uint32_t max_height = 0;
   bool with_subtitles = true;
-  // The most any one track may hold in segments handed over and not yet read, so
-  // that a downloader running away with itself is reported rather than answered
-  // with however much memory it asks for. Zero lifts the limit.
+  // Per track, in segments handed over and not yet read; a runaway downloader gets reported.
+  // Zero lifts the limit.
   size_t max_buffered_bytes = 64u << 20;
   // Called on a buffer miss instead of reporting OM_IO_NOT_ENOUGH_DATA.
   FetchFn fetch;
   // The same, read as each segment arrives. Preferred over `fetch` when both are set.
   StreamFetchFn stream_fetch;
-  // Applied to a segment the playlist protects end to end. Unset, such a segment
-  // reports OM_FORMAT_ENCRYPTED. A segment read piece by piece cannot go through it
-  // -- a block cipher has no answer for half a segment -- so a protected segment is
-  // read whole however it is delivered.
+  // For segments protected end to end; unset, they report OM_FORMAT_ENCRYPTED. They are read
+  // whole however delivered: a block cipher has no answer for half a segment.
   SegmentDecryptFn decrypt;
 };
 
@@ -243,9 +237,7 @@ public:
   virtual auto selectRepresentation(int32_t track_index, std::string_view id) -> OMError = 0;
 };
 
-// ---------------------------------------------------------------------------
-// MPEG-DASH
-// ---------------------------------------------------------------------------
+// --- MPEG-DASH ---
 
 /**
  * Opens an MPD the caller has already fetched -- the library downloads nothing.
@@ -256,9 +248,7 @@ OPENMEDIA_ABI auto openDashManifest(std::span<const uint8_t> mpd_xml,
                                     const StreamOptions& options = {})
     -> Result<std::unique_ptr<SegmentedDemuxer>, OMError>;
 
-// ---------------------------------------------------------------------------
-// HLS
-// ---------------------------------------------------------------------------
+// --- HLS ---
 
 /**
  * One `#EXT-X-KEY` or `#EXT-X-SESSION-KEY` as a playlist declared it.
@@ -273,18 +263,14 @@ struct OPENMEDIA_ABI HlsKey {
   std::string key_format; // KEYFORMAT=; "identity" when the tag did not say
   std::string key_format_versions;
   std::string iv; // IV=, as written; empty when it is per-segment or derived
-  // A `#EXT-X-SESSION-KEY` from the master playlist, which names the keys the
-  // presentation uses without naming a segment. A player asks for its licence up
-  // front from these rather than waiting for a media playlist to arrive.
+  // Master playlist `#EXT-X-SESSION-KEY`: a licence can be requested before any media playlist.
   bool session = false;
 };
 
 /** One rendition a master playlist offers, as the playlist describes it. */
 struct OPENMEDIA_ABI HlsVariant {
   std::string url; // the media playlist this rendition's segments are listed in
-  // The same rendition published elsewhere, for when `url` cannot be reached: a
-  // master playlist repeating a variant unchanged is naming another address rather
-  // than another quality (RFC 8216 6.3.1).
+  // Other addresses of this rendition (RFC 8216 6.3.1).
   std::vector<std::string> backup_urls;
   std::string codecs;
   uint32_t bandwidth = 0;

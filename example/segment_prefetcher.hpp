@@ -77,9 +77,7 @@ public:
       for (size_t i = 0; i < plans.size(); ++i) {
         const openmedia::SegmentPlan& plan = plans[i];
         if (known(plan.request)) continue;
-        // An initialization segment is wanted whole -- it is where the track list
-        // comes from, and half a track list is not one -- and so is anything behind
-        // the segment being read.
+        // Wanted whole: an initialization segment is where the track list comes from.
         const bool piecewise = i == 0 && !plan.initialization && stream_fetch_ && !piecewise_;
         if (piecewise) piecewise_ = plan.request;
         pending_.push_back({plan.request, piecewise});
@@ -164,10 +162,7 @@ public:
   }
 
 private:
-  // How much of a segment being read in pieces is held between the two threads.
-  // Enough that the demux thread always has something to get on with, and not so
-  // much that the segment ends up in memory twice over -- which would give back
-  // exactly what reading it in pieces was for.
+  // So the demux thread always has work, without the segment sitting in memory twice.
   static constexpr size_t PIECE_WATERMARK = 2u << 20;
   static constexpr size_t PIECE_SIZE = 64u << 10;
 
@@ -235,9 +230,7 @@ private:
       const std::lock_guard lock(mutex_);
       if (!retire(job.request)) continue;
       if (result.isErr()) {
-        // Nothing is retried here: the demuxer will ask for the same segment again
-        // on its next upcomingSegments(), and a retry policy belongs where the
-        // fetch function is, not in a queue that cannot tell a 404 from a timeout.
+        // No retry here: the demuxer asks again, and a queue cannot tell a 404 from a timeout.
         continue;
       }
       ready_.push_back({job.request, std::move(result).unwrap()});
@@ -245,13 +238,9 @@ private:
     }
   }
 
-  // Reads one segment and hands it over as it comes. A failure part way through
-  // still ends the segment: the demuxer reads it as far as it got and moves on,
-  // which is what it does with a segment that held nothing for a track.
+  // A failure part way still ends the segment: the demuxer reads what arrived and moves on.
   void readInPieces(const openmedia::SegmentRequest& request, std::stop_token stop) {
-    // Only if this is still the segment being read in pieces: a reset() may have
-    // moved on to another one while this download was running, and that one's turn
-    // is not this one's to end.
+    // A reset() may have moved on to another segment during this download.
     const auto release = [&] {
       if (piecewise_ && *piecewise_ == request) piecewise_.reset();
     };

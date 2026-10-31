@@ -11,13 +11,8 @@ namespace openmedia {
 
 auto nalToRbsp(std::span<const uint8_t> nal) -> std::vector<uint8_t>;
 
-// Reusable NAL -> RBSP conversion buffer.
-//
-// A slice header occupies only the first few hundred bytes of a NAL, so
-// `convert` can stop early and report whether it reached the end; callers that
-// run out of bits retry with a larger limit instead of unescaping the whole
-// slice payload up front. Reusing one buffer across NALs also keeps the parser
-// allocation-free once it is warm.
+// A slice header is a few hundred bytes, so `convert` can stop early and callers retry with
+// a larger limit instead of unescaping the whole payload.
 class RbspBuffer {
   std::vector<uint8_t> rbsp_;
   std::vector<uint32_t> escapes_;

@@ -10,12 +10,7 @@
 
 namespace openmedia {
 
-// Parameter sets carried by an ISO-BMFF decoder configuration record
-// (avcC / hvcC / vvcC), rewritten as an Annex-B byte stream.
-//
-// MP4 keeps these records in the sample entry and Matroska in CodecPrivate, so
-// both demuxers parse the same bytes; the parsers live here rather than in
-// either one.
+// MP4's sample entry and Matroska's CodecPrivate hold the same bytes, hence shared here.
 struct NalDecoderConfig {
   std::vector<uint8_t> annexb_extradata;
   uint8_t nal_length_size = 4;
@@ -113,11 +108,8 @@ inline auto parseHevcDecoderConfig(std::span<const uint8_t> body)
   return config;
 }
 
-// VvcDecoderConfigurationRecord, ISO/IEC 14496-15:2022 §11.2.4.2.
-//
-// Unlike avcC/hvcC the record has no configurationVersion byte: it opens with
-// reserved '11111'b | LengthSizeMinusOne(2) | ptl_present_flag(1). In MP4 the
-// record sits inside a FullBox, so the caller strips version/flags first.
+// 14496-15:2022 11.2.4.2. No configurationVersion byte, unlike avcC/hvcC; in MP4 the caller
+// strips the FullBox's version/flags first.
 inline auto parseVvcDecoderConfig(std::span<const uint8_t> body)
     -> std::optional<NalDecoderConfig> {
   if (body.size() < 2) return std::nullopt;

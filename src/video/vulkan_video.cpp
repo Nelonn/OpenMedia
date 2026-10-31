@@ -19,38 +19,12 @@
 #include <util/bit_reader.hpp>
 #include <cstdio>
 
-// ---------------------------------------------------------------------------
-// Known bad: AV1 decoding through Vulkan Video on AMD / Windows.
-//
-// This driver only decodes the FIRST TILE of an AV1 frame. Measured on a
-// Radeon 890M, same source clip and encoder, the tile layout being the only
-// difference between the two rows:
-//
-//   1 tile  : whole frame decoded, ~94% of pixels exact vs dav1d
-//   2x2 tile: 48 of 1080 rows decoded, the rest left untouched
-//   4K, 8x4 : 112 of 2160 rows decoded
-//
-// The same clips decode bit exact through dx11_av1 on this very GPU, and
-// H.264 through Vulkan Video is bit exact too, so neither the hardware nor
-// the shared Vulkan plumbing in this file is at fault. Prefer dx11_av1 on
-// Windows.
-//
-// Ruled out by experiment, so do not spend time on them again:
-//   * Bitstream layout. Uploading only the tile payloads packed back to back
-//     (what DXVA wants) instead of the whole packet with absolute offsets
-//     produces byte identical output. The driver does honour pTileOffsets[0] —
-//     tile 0 lands correctly either way — it just ignores the rest.
-//   * frameHeaderOffset: every interpretation gives byte identical output.
-//   * filmGrainSupport, DPB_AND_OUTPUT_COINCIDE vs DISTINCT, passing
-//     pSegmentation as null, CDEF strengths in coded vs derived form, coded
-//     extent and picture access granularity, bitstream buffer size.
-//   * The tile offsets and sizes themselves: all 32 were verified to cover the
-//     tile group payload byte for byte, and dx11_av1 consumes the exact same
-//     extraction without trouble.
-//
-// The validation layer is silent throughout. Still unexplained is the ~6% of
-// pixels that differ even in the single tile case; that one may yet be ours.
-// ---------------------------------------------------------------------------
+// Known bad: AV1 through Vulkan Video on AMD/Windows decodes only the FIRST TILE (Radeon
+// 890M: 2x2 tiles give 48 of 1080 rows; 1 tile is ~94% exact vs dav1d). dx11_av1 is exact on
+// the same GPU, as is H.264 here, so prefer dx11_av1 on Windows.
+// Ruled out: tile payload layout, frameHeaderOffset, filmGrainSupport, DPB coincide vs
+// distinct, null pSegmentation, CDEF form, extent and granularity, buffer size, and the
+// offsets themselves. Validation layers are silent. The ~6% single-tile diff is unexplained.
 
 namespace openmedia {
 
@@ -142,9 +116,7 @@ class VulkanDecoder final : public Decoder {
   uint32_t padded_width_ = 0;
   uint32_t padded_height_ = 0;
   uint8_t bit_depth_ = 8;
-  // Chroma format of the stream. Derived from the bitstream, never assumed:
-  // H.26x carry chroma_format_idc in the SPS, AV1 and VP9 carry subsampling
-  // flags in their colour config.
+  // From the bitstream, never assumed.
   uint8_t subsampling_x_ = 1;
   uint8_t subsampling_y_ = 1;
   bool mono_chrome_ = false;
@@ -309,10 +281,7 @@ public:
     else if (codec_id_ == OM_CODEC_VP9) decode_caps.pNext = &vp9_caps;
 
     if (VK(vkGetPhysicalDeviceVideoCapabilitiesKHR)(hw_context_->vk_physical_device, &video_profile_, &video_caps) != VK_SUCCESS) {
-      // A profile the driver has no support for at all. The usual cause is a
-      // chroma format the hardware cannot decode: 4:2:2 and 4:4:4 decode is
-      // absent from most Vulkan Video implementations. Say so rather than
-      // reporting a generic acceleration failure.
+      // Usually a chroma format the hardware cannot decode: 4:2:2 and 4:4:4 are mostly absent.
       if (video_profile_.chromaSubsampling != VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR)
         return OM_CODEC_NOT_SUPPORTED;
       return OM_CODEC_HWACCEL_FAILED;
@@ -751,11 +720,8 @@ public:
       }
       const auto& hdr = av1_parser_.hdrMetadata();
       if (hdr.has_mdcv) {
-        // OMMasteringDisplayMetadata is defined in the H.26x SEI convention:
-        // chromaticity in 0.00002 units, luminance in 0.0001 units, primaries
-        // ordered green-blue-red. AV1 codes the same information as 0.16 fixed
-        // point with 24.8 / 18.14 luminance and red-green-blue order, so copying
-        // it across verbatim reported a 1000 nit master as 25.6 nits.
+        // AV1 codes 0.16 chromaticity, 24.8/18.14 luminance and RGB order; copied verbatim, a 1000
+        // nit master read as 25.6 nits.
         auto av1_chroma = [](uint16_t v) -> uint16_t {
           return static_cast<uint16_t>((static_cast<uint32_t>(v) * 50000u + 32768u) / 65536u);
         };
@@ -1025,10 +991,7 @@ private:
     return OM_FORMAT_NV12;
   }
 
-  // Asks the driver which formats it can actually produce for this profile and
-  // usage instead of assuming a 4:2:0 layout. Returns VK_FORMAT_UNDEFINED when
-  // the combination is unsupported, which is how an unsupported chroma format
-  // surfaces as a clean decoder-open failure.
+  // UNDEFINED is how an unsupported chroma format becomes a clean decoder-open failure.
   auto pickVideoFormat(VkImageUsageFlags usage, const VkVideoProfileListInfoKHR& profiles) const -> VkFormat {
     VkPhysicalDeviceVideoFormatInfoKHR info = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR};
     info.pNext = const_cast<VkVideoProfileListInfoKHR*>(&profiles);
@@ -1467,9 +1430,7 @@ private:
     VK(vkQueueSubmit)(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
     VK(vkWaitForFences)(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
     VK(vkResetFences)(hw_context_->vk_device, 1, &decode_fence_);
-    // Only a picture that is kept as a reference activates its DPB slot;
-    // a non-reference picture leaves the slot inactive, so binding it by
-    // index on a later frame is invalid.
+    // A non-reference picture leaves the slot inactive; binding it later is invalid.
     dpb_slot_active_[slot_idx] = parsed.is_reference;
   }
 
@@ -1799,9 +1760,7 @@ private:
     VK(vkQueueSubmit)(hw_context_->video_decode_queue, 1, &submit, decode_fence_);
     VK(vkWaitForFences)(hw_context_->vk_device, 1, &decode_fence_, VK_TRUE, UINT64_MAX);
     VK(vkResetFences)(hw_context_->vk_device, 1, &decode_fence_);
-    // Only a picture that is kept as a reference activates its DPB slot;
-    // a non-reference picture leaves the slot inactive, so binding it by
-    // index on a later frame is invalid.
+    // A non-reference picture leaves the slot inactive; binding it later is invalid.
     dpb_slot_active_[slot_idx] = is_reference;
   }
 
@@ -2350,9 +2309,7 @@ private:
     uint8_t refresh = parsed.header.refresh_frame_flags;
     if (parsed.header.frame_type == video_parser::AV1_KEY_FRAME) refresh = 0xFF;
     slot->is_reference = (refresh != 0);
-    // A decode operation only activates its DPB slot when the picture actually
-    // refreshes a reference. Output-only frames (refresh_frame_flags == 0)
-    // leave the slot inactive, so it must not be bound by index next time.
+    // Output-only frames leave the slot inactive; binding it later is invalid.
     dpb_slot_active_[slot_idx] = (refresh != 0);
     for (uint32_t i = 0; i < 8; ++i) {
       if ((refresh >> i) & 1) {

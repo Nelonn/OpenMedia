@@ -254,9 +254,7 @@ public:
     if (auto* v = std::get_if<Rational>(&data_)) return *v;
     return std::nullopt;
   }
-  // A view into the stored blob, valid for as long as this Value is. Returning
-  // the BinaryData itself would copy every byte on each read, which for cover
-  // art is megabytes.
+  // Returning BinaryData itself would copy every byte per read: megabytes for cover art.
   auto getBinary() const noexcept -> std::optional<std::span<const uint8_t>> {
     if (auto* v = std::get_if<std::shared_ptr<BinaryData>>(&data_)) {
       if (*v) return (*v)->span();
@@ -411,9 +409,7 @@ private:
 
   auto mask() const noexcept -> size_t { return entries_.size() - 1; }
 
-  // Returns slot index for insertion (stops at first empty or tombstone, or
-  // the existing matching key). Bounded by table size — cannot loop forever
-  // because growIfNeeded guarantees load factor < 0.75.
+  // growIfNeeded keeps the load factor under 0.75, so this cannot loop forever.
   auto findSlotForInsert(const Key& key) const noexcept -> size_t {
     const size_t m = mask();
     size_t slot = key.hash() & m;

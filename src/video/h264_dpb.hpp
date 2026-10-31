@@ -7,14 +7,8 @@
 #include <cstdint>
 #include <vector>
 
-// The parts of H.264 decoding that a hardware accelerator which takes
-// ready-made reference lists (VA-API) leaves to the caller: picture order
-// counts (8.2.1), reference list construction and modification (8.2.4),
-// reference picture marking (8.2.5) and frame_num gaps (8.2.5.2).
-//
-// DXVA builds the lists inside the driver, which is why dx_h264::Dpb gets by
-// without most of this. Frame pictures only -- progressive and MBAFF; field
-// pictures are turned away before they get here.
+// What VA-API, taking ready-made reference lists, leaves to the caller: 8.2.1, 8.2.4, 8.2.5.
+// DXVA builds lists in the driver. Frame pictures only; field pictures never get here.
 namespace openmedia::h264_dpb {
 
 struct PictureOrder {
@@ -29,9 +23,7 @@ class PocState {
 public:
   void reset() { *this = {}; }
 
-  // `frame_num` and the delta fields come from the slice header; for a
-  // non-existing frame (8.2.5.2) the caller passes a header with those set and
-  // everything else zero.
+  // For a non-existing frame (8.2.5.2) the header has those fields set and the rest zero.
   auto compute(const h264::SPS& sps, const h264::SliceHeader& slice, bool is_idr, bool is_reference) const
       -> PictureOrder {
     PictureOrder order;
@@ -95,10 +87,8 @@ public:
     return order;
   }
 
-  // Called once the picture has been decoded and marked. `order` is what
-  // compute() returned; a picture with memory_management_control_operation 5
-  // has its counts rebased so that the smaller one is 0 (8.2.1), and it is the
-  // rebased values the next picture derives from.
+  // memory_management_control_operation 5 rebases the counts so the smaller is 0 (8.2.1), and
+  // the next picture derives from the rebased values.
   void commit(const h264::SPS& sps, const h264::SliceHeader& slice, bool is_reference,
               PictureOrder& order) {
     if (slice.mmco5) {
@@ -179,21 +169,16 @@ public:
     }
   }
 
-  // 8.2.5.2. Called before a non-IDR picture is decoded. Inferred frames take
-  // part in the sliding window and in list initialisation like any other, but
-  // a conforming stream never predicts from one, so they have no surface.
-  // `infer_order` computes the counts an inferred frame would have had, which
-  // is what places it among the others in a B list.
+  // 8.2.5.2. Inferred frames take part in the window and in lists but are never predicted from
+  // by a conforming stream, so they have no surface.
   template<typename InferOrder>
   void fillFrameNumGap(const h264::SPS& sps, int frame_num, InferOrder&& infer_order) {
     if (!have_prev_ref_frame_num_) return;
     const int max_frame_num = 1 << (sps.log2_max_frame_num_minus4 + 4);
     if (frame_num == prev_ref_frame_num_ || frame_num == (prev_ref_frame_num_ + 1) % max_frame_num) return;
 
-    // Only the last max_num_ref_frames inferred frames can still be in the
-    // buffer once the gap has been filled; the ones before them would be slid
-    // straight back out. Skipping them also bounds the work a corrupt or
-    // seek-damaged frame_num can cause.
+    // Earlier inferred frames would be slid straight back out; skipping also bounds what a
+    // corrupt or seek-damaged frame_num can cost.
     const int max_refs = std::max(sps.num_ref_frames, 1);
     int missing = (frame_num - prev_ref_frame_num_ - 1 + max_frame_num) % max_frame_num;
     int unused = (prev_ref_frame_num_ + 1) % max_frame_num;
@@ -251,9 +236,8 @@ public:
     if (list1.size() > 1 && list0 == list1) std::swap(list1[0], list1[1]);
   }
 
-  // 8.2.4.2 (truncation / padding to num_ref_idx_lX_active_minus1 + 1) and
-  // 8.2.4.3 (modification). Returns false when a modification names a picture
-  // the buffer does not hold -- a broken stream, or one entered mid-GOP.
+  // 8.2.4.2 and 8.2.4.3. False when a modification names a picture not held: a broken stream,
+  // or one entered mid-GOP.
   auto finishList(RefList& list, const h264::SliceHeader& slice, int which, int max_frame_num) const -> bool {
     const int active = which == 0 ? slice.num_ref_idx_l0_active_minus1 + 1 : slice.num_ref_idx_l1_active_minus1 + 1;
     list.resize(static_cast<size_t>(active), -1);
@@ -343,9 +327,7 @@ public:
     }
     if (!current_long_term) pictures_.push_back(current);
 
-    // A stream that keeps more references than it declared would otherwise
-    // grow the buffer without bound; drop the oldest short-term ones as the
-    // sliding window would.
+    // A stream keeping more references than declared would grow the buffer without bound.
     while (static_cast<int>(pictures_.size()) > max_refs) {
       if (!removeOldestShortTerm()) break;
     }

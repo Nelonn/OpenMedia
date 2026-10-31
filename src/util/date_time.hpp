@@ -6,9 +6,6 @@
 
 namespace openmedia {
 
-// Containers each count from their own epoch - Matroska from 2001, MP4 from
-// 1904 - so the conversion to a civil date is shared rather than reimplemented
-// per demuxer.
 namespace date_time {
 
 struct CivilDate {

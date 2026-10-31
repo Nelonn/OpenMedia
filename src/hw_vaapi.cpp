@@ -48,10 +48,8 @@ int HWVAAPIContext_copyToHost(OMVAAPIContext* context,
 
   if (libva.vaSyncSurface(display, surface) != VA_STATUS_SUCCESS) return 0;
 
-  // Deriving tells what the surface holds (NV12 or P010) without copying.
-  // Reading through the derived mapping is slow on Intel, where it goes
-  // through write-combined, tiled memory, so it is only the fallback; a
-  // linear image filled by vaGetImage is what gets read.
+  // The derived mapping goes through write-combined, tiled memory on Intel, so it only says
+  // what the surface holds; a linear image filled by vaGetImage is what gets read.
   VAImage derived = {};
   derived.image_id = VA_INVALID_ID;
   uint32_t fourcc = VA_FOURCC_NV12;

@@ -5,9 +5,7 @@
 namespace openmedia::dash::xml {
 namespace {
 
-// An MPD nests Period > AdaptationSet > Representation > SegmentTemplate and
-// little else, so a handful of levels is all a well-formed one needs. The limit
-// is here to keep a hostile document from recursing the parser off the stack.
+// Bounds recursion on a hostile document; a real MPD nests a handful of levels.
 constexpr size_t MAX_DEPTH = 64;
 
 auto isSpace(char c) -> bool {
@@ -41,11 +39,8 @@ void appendUtf8(std::string& out, uint32_t cp) {
   }
 }
 
-// Resolves the five predefined entities and numeric character references. An
-// unrecognised entity is left as written: a manifest is not a document to be
-// rendered, and a literal ampersand-name inside a URL is likelier than a DTD
-// nobody shipped. Entity declarations are not honoured at all, which also takes
-// external entity expansion off the table.
+// An unknown entity is left as written. Declarations are ignored, which also rules out
+// external entity expansion.
 auto decodeEntities(std::string_view raw) -> std::string {
   std::string out;
   out.reserve(raw.size());
@@ -98,10 +93,7 @@ auto trim(std::string_view text) -> std::string_view {
   return text.substr(begin, end - begin);
 }
 
-// `xsi:type` and `dash:BaseURL` name the same things as `type` and `BaseURL`. An
-// MPD declares its own default namespace, and the schema gives no element or
-// attribute a meaning that depends on a prefix, so the prefix carries no
-// information worth the lookups it would cost to honour.
+// No MPD element or attribute changes meaning with its prefix, so `xsi:type` is `type`.
 auto stripPrefix(std::string_view name) -> std::string_view {
   const size_t colon = name.rfind(':');
   return colon == std::string_view::npos ? name : name.substr(colon + 1);
@@ -129,10 +121,8 @@ public:
     return doc_.compare(pos_, prefix.size(), prefix) == 0;
   }
 
-  // Everything that is neither an element nor character data: the declaration,
-  // comments, processing instructions, the doctype, and CDATA sections, whose
-  // contents do belong to the enclosing element and so are appended to `text`.
-  // Returns false when there was nothing of the sort at the cursor.
+  // Declaration, comments, PIs, doctype, and CDATA (whose contents are appended to `text`).
+  // False when none of them is at the cursor.
   auto skipMarkupNoise(std::string& text) -> bool {
     if (startsWith("<!--")) {
       const size_t end = doc_.find("-->", pos_ + 4);

@@ -6,15 +6,8 @@
 
 namespace openmedia {
 
-// The numeric genre list ID3v1 defined and Winamp extended. It long outlived
-// ID3v1 itself: MP4's `gnre` atom, WMA and several tagging tools still store a
-// genre as an index into it, so the table is shared rather than owned by any
-// one demuxer.
-//
-// Entries 0-79 are the original ID3v1 set; 80-125 are the Winamp extension.
-// The list continues past 125 in the wild, but those later entries are
-// inconsistently implemented and one of them is an ethnic slur, so lookup stops
-// here and callers fall back to reporting the raw number.
+// MP4's `gnre` and WMA still index this. Lookup stops at the Winamp extension (125): later
+// entries are inconsistent and one is an ethnic slur, so callers report the raw number.
 inline constexpr std::string_view ID3V1_GENRES[] = {
     "Blues",             "Classic Rock",     "Country",           "Dance",
     "Disco",             "Funk",             "Grunge",            "Hip-Hop",

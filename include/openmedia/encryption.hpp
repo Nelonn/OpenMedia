@@ -6,10 +6,8 @@
 #include <openmedia/media.h>
 #include <vector>
 
-// Common Encryption, ISO/IEC 23001-7. The cipher covers only the media samples,
-// so the container parses as usual and just the payloads need a key. Obtaining
-// that key is the caller's business: licence init data is in the track and
-// container metadata under `ENCRYPTION_INIT_DATA`.
+// ISO/IEC 23001-7. Only payloads need a key, which is the caller's to obtain; licence init
+// data is in the metadata under `ENCRYPTION_INIT_DATA`.
 OM_ENUM(OMEncryptionScheme, uint8_t) {
     OM_ENCRYPTION_NONE = 0,
 
@@ -64,12 +62,8 @@ struct OPENMEDIA_ABI SampleEncryption {
   // Empty means the whole payload is protected.
   std::vector<SubsampleEntry> subsamples;
 
-  // Non-zero when the payload is framed as the container stored it rather than as
-  // the demuxer normally hands it out: NAL units behind length prefixes this many
-  // bytes wide, instead of Annex-B start codes. It happens where reframing would
-  // have invalidated the description above -- a sample protected end to end has its
-  // length fields enciphered too -- so a decryptor deciphers first and reframes
-  // after. Zero means the payload is framed as every other packet of the track.
+  // Non-zero: NAL units behind prefixes this wide, as stored, rather than Annex-B. Happens where
+  // reframing would invalidate the map above, so decipher first and reframe after.
   uint8_t nal_length_size = 0;
 };
 

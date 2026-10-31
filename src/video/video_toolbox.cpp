@@ -1152,9 +1152,7 @@ public:
     CFPtr<CFDictionaryRef> specification(CFDictionaryCreate(kCFAllocatorDefault, specification_keys,
                                                             specification_values, require_hardware ? 2 : 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
     if (!specification) return OM_COMMON_OUT_OF_MEMORY;
-    // Select an encoder capable of the source precision at session creation.
-    // Creating an unspecified 8-bit session first can make Main10 unavailable
-    // even though the system has a suitable encoder.
+    // Chosen at creation: an unspecified 8-bit session first can make Main10 unavailable.
     OSType source_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     switch (input_format_.format) {
       case OM_FORMAT_P010:
@@ -1211,9 +1209,7 @@ public:
       if (is_high_bit_depth) {
         OSStatus err = VTSessionSetProperty(session_, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel);
         if (err != noErr && !require_hardware) {
-          // Some Intel Macs select an 8-bit-only hardware component although
-          // the system's software component supports Main10. Preserve precision
-          // and native CVPixelBuffer input when choosing the latter.
+          // Some Intel Macs pick an 8-bit-only hardware component though software supports Main10.
           closeSession();
           CFPtr<CFMutableDictionaryRef> software(CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
                                                                            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
@@ -1290,9 +1286,7 @@ public:
       if (data) VTSessionSetProperty(session_, kVTCompressionPropertyKey_ContentLightLevelInfo, data.get());
     }
 
-    // VideoToolbox publishes no preset scale, only which side of the trade-off
-    // to take, so the scale collapses to that: below the middle asks for speed,
-    // the middle and above ask for the picture. macOS 11 and newer.
+    // VideoToolbox only offers a side of the trade-off, so the scale collapses to it. macOS 11+.
     if (const auto preset = enc_preset::requested(options.extra)) {
       if (__builtin_available(macOS 11.0, *)) {
         VTSessionSetProperty(session_, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,

@@ -129,9 +129,7 @@ class Dav1dDecoder final : public Decoder {
     return OM_PRIMARIES_UNKNOWN;
   }
 
-  // What the stream says of its colour: the sequence header's description, and the HDR metadata
-  // that came with this picture. AV1 writes the mastering display in fixed point -- chromaticities
-  // in 0.16, luminance in 24.8 and 18.14 -- and OpenMedia in SMPTE ST 2086's units.
+  // AV1 uses 0.16 chromaticity and 24.8/18.14 luminance; OpenMedia uses ST 2086 units.
   static void describeColor(const Dav1dPicture& pic, Picture& out) {
     if (const Dav1dSequenceHeader* seq = pic.seq_hdr) {
       out.color_space = toColorSpace(seq->mtrx);
@@ -169,9 +167,7 @@ class Dav1dDecoder final : public Decoder {
     Picture out_pic(pixel_format, pic.p.w, pic.p.h);
     describeColor(pic, out_pic);
 
-    // Rows are copied by what they hold in bytes -- two a sample past eight bits -- from dav1d's
-    // stride into the picture's own. Chroma planes round up: an odd width or height still has a
-    // chroma sample for its last column or row.
+    // Chroma rounds up: an odd size still has a chroma sample for its last column or row.
     const uint32_t bytes_per_sample = pic.p.bpc > 8 ? 2 : 1;
     const uint32_t luma_w = static_cast<uint32_t>(pic.p.w);
     const uint32_t luma_h = static_cast<uint32_t>(pic.p.h);

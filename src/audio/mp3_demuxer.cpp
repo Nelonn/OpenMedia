@@ -276,9 +276,7 @@ public:
       return OM_IO_SEEK_FAILED;
     }
 
-    // Derive pts_counter_ from the actual landing position rather than the
-    // requested timestamp, so subsequent packets are time-stamped consistently
-    // with where we actually landed.
+    // From the landing position rather than the request, so timestamps match where we landed.
     if (bitrate_kbps > 0) {
       pts_counter_ = static_cast<int64_t>(
           static_cast<double>(final_pos) / (static_cast<double>(bitrate_kbps) * 125.0) * static_cast<double>(sample_rate));

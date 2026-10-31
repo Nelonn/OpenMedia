@@ -44,10 +44,7 @@ auto makePacket(const ogg_packet& op, int32_t stream_index, int64_t duration) ->
   return pkt;
 }
 
-// RFC 6716 section 3.1: the TOC byte's configuration number picks the frame
-// length, its low two bits the frame count, and count code 3 moves that count
-// into the byte behind it. Returns 48 kHz samples, the unit Opus granule
-// positions are counted in.
+// RFC 6716 3.1. In 48 kHz samples, the unit of Opus granule positions.
 auto opusPacketSamples(std::span<const uint8_t> bytes) -> int64_t {
   static constexpr int32_t SILK_SIZES[4] = {480, 960, 1920, 2880};
   static constexpr int32_t CELT_SIZES[4] = {120, 240, 480, 960};
@@ -81,11 +78,8 @@ struct VorbisModes {
   uint32_t index_bits = 0;
 };
 
-// Vorbis I section 4.2.4. The mode table closes the setup header, behind
-// codebooks that cannot be skipped without decoding them, so it is read from
-// the back instead. Reversing the bytes is all that takes: Vorbis packs its
-// bits low end first, so an MSB-first read of the reversed bytes walks the
-// stream backwards and still hands back each field the right way round.
+// Vorbis I 4.2.4. The mode table sits behind codebooks that cannot be skipped undecoded, so
+// it is read from the back: bits pack low end first, so reversed bytes read MSB-first work.
 auto parseVorbisModes(std::span<const uint8_t> setup) -> std::optional<VorbisModes> {
   constexpr uint32_t COUNT_BITS = 6;
   constexpr uint32_t MAX_MODES = 64;
@@ -99,10 +93,8 @@ auto parseVorbisModes(std::span<const uint8_t> setup) -> std::optional<VorbisMod
   for (uint32_t i = 0; i < 8 && !framed; ++i) framed = reader.readBit() != 0;
   if (!framed) return std::nullopt;
 
-  // Nothing says where the table starts, so every position that could hold the
-  // mode count is tried and the last one agreeing with the number of modes read
-  // so far wins: an earlier agreement is just as likely to be codebook data that
-  // happens to fit. ffmpeg's parser and liboggz settle it the same way.
+  // The last position agreeing with the mode count wins: an earlier match may be codebook
+  // data. ffmpeg's parser and liboggz settle it the same way.
   std::vector<uint8_t> blockflag;
   size_t count = 0;
   while (blockflag.size() < MAX_MODES) {
@@ -418,9 +410,7 @@ public:
 
     if (input_->canSeek()) {
       probeDuration();
-      // The probe leaves the read position at the end of the file. The header
-      // packets are already queued for delivery, so only that position and
-      // libogg's page assembly need putting back.
+      // Header packets are already queued, so only the position and page assembly go back.
       for (Stream& stream : streams_) {
         ogg_stream_reset(&stream.state);
       }
@@ -444,9 +434,7 @@ public:
     if (stream == nullptr) return OM_FORMAT_STREAM_NOT_FOUND;
 
     if (timestamp <= 0) {
-      // Rewinding to the very start replays the codec headers, which is how a
-      // decoder set up from the packet stream rather than from extradata gets
-      // configured again.
+      // Replays the headers, which configures a decoder set up from the packet stream.
       return rewindTo(0) ? OM_SUCCESS : OM_IO_SEEK_FAILED;
     }
     // A codec this demuxer cannot time gives no granule scale to measure a
@@ -461,9 +449,8 @@ public:
         stream_idx < 0 ? timestamp : granuleToMicroseconds(timestamp, time_base);
     const int64_t target = stream_idx < 0 ? microsecondsToGranule(timestamp, time_base) : timestamp;
 
-    // Every Ogg audio packet depends on the one before it, so there is no sync
-    // point to round to: all modes but NEXT_SYNC land on the page boundary at or
-    // before the target, backed off by the codec's pre-roll.
+    // Every packet depends on the one before, so there is no sync point: all modes but NEXT_SYNC
+    // land on a page boundary backed off by the pre-roll.
     const int64_t search = mode == SeekMode::NEXT_SYNC
                                ? target
                                : std::max<int64_t>(0, target - stream->preroll);
@@ -532,9 +519,7 @@ private:
     Page info;
     if (!nextPage(page, INT64_MAX, info)) return false;
 
-    // A logical stream is introduced by a beginning-of-stream page, and the spec
-    // groups all of them at the head of the file. A serial that turns up without
-    // one belongs to a chained stream, which this demuxer does not follow.
+    // A serial turning up without a BOS page belongs to a chained stream, which is not followed.
     const bool bos = ogg_page_bos(&page) != 0;
     Stream* stream = bos && !headers_done_ ? &streamFor(info.serial) : findStream(info.serial);
     if (stream == nullptr) return true;
@@ -543,10 +528,8 @@ private:
     if (!stream->header_complete) {
       processHeaders(*stream);
     }
-    // Every stream has its headers and the run of beginning-of-stream pages is
-    // behind us, so the header region of the file ends with this page. Waiting
-    // for that run to end matters when the first stream is a codec whose headers
-    // this demuxer cannot count, such as a video track alongside the audio.
+    // Waiting for the BOS run to end matters when a stream's headers cannot be counted, such as
+    // video alongside the audio.
     if (!headers_done_ && !bos && pending_headers_ == 0) {
       headers_done_ = true;
       data_offset_ = info.end;
@@ -671,9 +654,8 @@ private:
     if (mode >= stream.modes.blockflag.size()) return 0;
 
     const int32_t blocksize = stream.blocksize[stream.modes.blockflag[mode]];
-    // Vorbis I section 1.3.2: a packet renders the overlap of its own block with
-    // the previous one, so the first packet of a stream returns no audio at all -
-    // which is also what the decoder does after a reset or a seek.
+    // Vorbis I 1.3.2: a packet renders its overlap with the previous one, so the first returns
+    // no audio, as the decoder does after a reset or seek.
     const int64_t samples =
         stream.previous_blocksize != 0 ? (stream.previous_blocksize + blocksize) / 4 : 0;
     stream.previous_blocksize = blocksize;
@@ -688,10 +670,8 @@ private:
     }
   }
 
-  // A page's granule position is the one authority on where its packets sit: it
-  // ends the last of them, so the rest are timed back from it. Re-basing on every
-  // page is also what lets a seek land with exact timestamps without having to
-  // know what the position was before it.
+  // A page's granule position ends its last packet, so the rest are timed back from it, which
+  // also lets a seek land exactly without knowing the position before it.
   void drainPage(Stream& stream, const Page& info) {
     std::vector<Packet>& packets = page_packets_;
     packets.clear();
@@ -707,10 +687,8 @@ private:
     }
     if (packets.empty()) return;
 
-    // An encoder that starts a stream partway into its first packet says so with
-    // a first granule position short of the audio the page carries. Those samples
-    // are not played, so the shortfall comes off the packets that hold them
-    // rather than shifting everything behind them.
+    // A first granule short of the page's audio means an encoder started partway into a packet.
+    // Those samples are not played, so they come off the packets holding them.
     int64_t shortfall = stream.anchored || info.granule < 0
                             ? 0
                             : std::max<int64_t>(0, total - info.granule);
@@ -737,9 +715,7 @@ private:
       stream.anchored = true;
     }
 
-    // A page can carry a second of audio, so a seek that stopped at its boundary
-    // would hand back far more than the pre-roll. Now that the timestamps are
-    // known, the part ahead of the target is dropped rather than delivered.
+    // A page can carry a second of audio, far more than the pre-roll.
     auto begin = packets.begin();
     if (stream.discard_until > 0) {
       begin = std::ranges::find_if(packets, [&](const Packet& pkt) {
@@ -821,10 +797,7 @@ private:
     return false;
   }
 
-  // Narrows the file down to the page boundaries bracketing `search`: the last
-  // place decoding can start at or before it, and the first one past it. Each
-  // round either raises the lower bound past the page it just read or drops the
-  // upper bound to that page's start, so the range always shrinks.
+  // Each round raises the lower bound past its page or drops the upper to its start.
   auto bisect(int serial, int64_t search) -> std::pair<Landing, std::optional<Landing>> {
     Landing before {data_offset_, 0};
     std::optional<Landing> after;

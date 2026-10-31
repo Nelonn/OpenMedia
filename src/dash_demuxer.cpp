@@ -12,11 +12,7 @@
 namespace openmedia {
 namespace {
 
-// A DASH representation, answering the questions the segment demuxer asks.
-//
-// It holds the representation by value: the manifest it was parsed out of is a
-// local variable in openDashManifest(), and a representation is a few strings and
-// a timeline, which is cheaper to own than to keep a manifest alive for.
+// Holds the representation by value: the manifest is a local in openDashManifest().
 class DashSegmentIndex final : public SegmentIndex {
   dash::Representation rep_;
 
@@ -37,10 +33,6 @@ public:
     out.request = segment->request;
     out.time = segment->time;
     out.duration = segment->duration;
-    // One initialization section for the whole representation: an MPD states it
-    // once, in `Initialization`, and changing it means a new Period rather than a
-    // new segment. Repeated per segment all the same, so the reader need not ask
-    // which of the two shapes it is looking at.
     out.init = rep_.initSegment();
     // A period starts the timeline over; the first segment of a representation is
     // where the reader is handed a clock it has not been following.
@@ -65,11 +57,8 @@ public:
   auto height() const -> uint32_t override { return rep_.height; }
 };
 
-// Whether a representation addresses its media in pieces this demuxer can read one
-// at a time. `SegmentBase` names the whole resource as a single segment, and its
-// `sidx` -- which says where the subsegments inside it begin -- is not read yet; so
-// reading it would mean pulling an entire film into memory to play its first frame,
-// and refusing is the honest answer until the index is parsed.
+// `SegmentBase` names the whole resource as one segment and its `sidx` is not read yet,
+// so playing it would pull the entire film into memory.
 auto isReadableInPieces(const dash::Representation& rep) -> bool {
   return rep.addressing != dash::Addressing::Single;
 }
@@ -79,9 +68,7 @@ auto sourceFromManifest(dash::Manifest manifest, bool& dropped_whole_file) -> Se
   source.duration_ns = manifest.duration_ns;
   source.live = manifest.dynamic;
 
-  // One period is played, the first. Advancing across a period boundary means new
-  // initialization segments and a new track list, which is a different
-  // presentation as far as every consumer of tracks() is concerned.
+  // Only the first period: crossing one means a new track list, a different presentation.
   if (manifest.periods.empty()) return source;
   dash::Period& period = manifest.periods.front();
   if (period.duration_ns > 0) source.duration_ns = period.duration_ns;
@@ -102,10 +89,7 @@ auto sourceFromManifest(dash::Manifest manifest, bool& dropped_whole_file) -> Se
   return source;
 }
 
-// Registered so a manifest opened through FormatRegistry behaves like any other
-// container: the stream it is given is the MPD, and the segments beside it are read
-// off the same filesystem. A caller that wants segments from anywhere else goes
-// through openDashManifest() and says how.
+// The FormatRegistry entry: segments are read off the filesystem beside the MPD.
 class DashFormatDemuxer final : public Demuxer {
   std::unique_ptr<Demuxer> inner_;
   std::vector<Track> no_tracks_;
@@ -116,12 +100,8 @@ public:
     close();
     if (!input || !input->isValid()) return OM_IO_INVALID_STREAM;
 
-    // A manifest names its segments relative to itself, and this wrapper reads them
-    // off the filesystem beside it. A stream that cannot say where it came from
-    // leaves no "beside" to read from: resolving against the working directory
-    // instead would open whatever files happen to sit there, which is not where this
-    // manifest came from. Such a manifest is opened through openDashManifest(), which
-    // takes its URL as an argument rather than guessing at one.
+    // Resolving against the working directory would open unrelated files. A stream with no
+    // source path goes through openDashManifest(), which takes the URL.
     const std::string source = input->sourcePath();
     if (source.empty()) return OM_COMMON_INVALID_ARGUMENT;
 

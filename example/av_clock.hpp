@@ -4,16 +4,9 @@
 #include <chrono>
 #include <mutex>
 
-// Master clock for A/V sync.
-//
-// The clock is a line through one anchor: position = anchor.pts + (now - anchor.time).
-// Audio is the master. The audio sink re-anchors the clock on every callback to
-// the sample that is audible right now, and between callbacks the line fills
-// the gap, so the position is continuous rather than a staircase of buffers.
-//
-// Until audio is running (or when there is none) the video renderer anchors the
-// clock to its first frame, and the clock simply runs on the wall clock. Once
-// audio has anchored it, video can no longer move it.
+// position = anchor.pts + (now - anchor.time). The audio sink re-anchors on every callback, so
+// the position is continuous rather than a staircase of buffers. Without audio, the renderer
+// anchors to its first frame; once audio has anchored, video can no longer move it.
 class AVClock {
 public:
   using Clock = std::chrono::steady_clock;

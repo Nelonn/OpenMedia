@@ -3,10 +3,7 @@
 #include <openmedia/video.hpp>
 #include <cstdint>
 
-// ISO/IEC 23001-8 (also ITU-T H.273) colour description codes. The same three
-// tables are used by MP4 `colr`, Matroska `Colour`, H.264/H.265 VUI, AV1
-// sequence headers and VP9 headers, so every demuxer and parser maps through
-// here instead of keeping its own partial copy.
+// ISO/IEC 23001-8 tables, shared so no demuxer or parser keeps a partial copy.
 
 namespace openmedia::color_codes {
 

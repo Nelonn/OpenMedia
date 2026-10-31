@@ -160,12 +160,6 @@ void registerBuiltInCodecs(CodecRegistry* registry) noexcept {
   registry->registerCodec(&CODEC_XEVE);
 #endif
 
-#if defined(_WIN32)
-  //registry->registerCodec(&CODEC_WMF_VIDEO_H264);
-  //registry->registerCodec(&CODEC_WMF_VIDEO_H265);
-  //registry->registerCodec(&CODEC_WMF_VIDEO_AV1);
-#endif
-
 #if defined(__APPLE__)
   registry->registerCodec(&CODEC_VIDEOTOOLBOX_H263);
   registry->registerCodec(&CODEC_VIDEOTOOLBOX_H264);

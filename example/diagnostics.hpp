@@ -194,9 +194,7 @@ private:
   const char* last_source_ = nullptr;
 };
 
-// A decoder that hands pictures back in decode order makes playback jump back
-// and forth, and from here that shows up as presentation timestamps running
-// backwards. The first step back is named, the rest counted.
+// Decode-order pictures show up as PTS running backwards. The first step back is named.
 class FrameOrderReporter {
 public:
   void report(int64_t pts) {

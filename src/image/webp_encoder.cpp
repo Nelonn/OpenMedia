@@ -12,10 +12,8 @@ namespace openmedia {
 
 namespace {
 
-// WebPPicture owns heap buffers the moment an import succeeds, and WebPEncode
-// can allocate more of its own while converting between ARGB and YUV, so every
-// exit from encode() has to go through WebPPictureFree. Freeing a picture that
-// only borrows our plane pointers is a no-op, so this is safe either way.
+// WebPEncode can allocate during ARGB/YUV conversion, so every exit frees. Freeing a picture
+// that only borrows our planes is a no-op.
 struct PictureGuard {
   WebPPicture* picture;
   ~PictureGuard() { WebPPictureFree(picture); }
@@ -55,10 +53,7 @@ public:
 
     const auto& extra = options.extra;
 
-    // A still image has no bitrate to hit, so CRF is the only rate control
-    // WebP can honour. A default-constructed RateControlParams reads as CRF 0,
-    // which would silently ask for the worst picture the encoder can make -
-    // treat that as "unset" and fall back to libwebp's own default of 75.
+    // A default RateControlParams reads as CRF 0, the worst picture; treated as unset.
     float quality = 75.0f;
     if (const auto* crf = std::get_if<CrfParams>(&options.rate_control.params);
         crf != nullptr && crf->quality > 0.0f) {
@@ -198,9 +193,7 @@ public:
         }
         break;
       case OM_FORMAT_YUV420P:
-        // Lossy WebP's native input: hand over the planes as they are and skip
-        // a conversion. Under a lossless config libwebp converts to ARGB
-        // itself, which is why this is not gated on config_.lossless.
+        // Not gated on lossless: libwebp converts to ARGB itself then.
         wpic.use_argb = 0;
         wpic.colorspace = WEBP_YUV420;
         wpic.y = pic.planes.data[0];

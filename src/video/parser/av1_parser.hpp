@@ -311,9 +311,7 @@ struct AV1FrameHeader {
   bool render_and_frame_size_different = false;
   bool use_superres = false;
   uint8_t superres_denom = AV1_SUPERRES_NUM;
-  // coded_denom as it appears in the bitstream (SuperresDenom - 9). Accelerator
-  // structures such as StdVideoDecodeAV1PictureInfo want this, not the
-  // reconstructed denominator.
+  // SuperresDenom - 9, which accelerator structures want rather than the denominator.
   uint8_t coded_denom = 0;
   uint32_t mi_cols = 0;
   uint32_t mi_rows = 0;
@@ -378,11 +376,7 @@ struct AV1ParsedFrame {
   uint32_t tile_end = 0;
 };
 
-// Splits a packet into temporal units and decodes sequence/frame headers.
-//
-// Stateful: the sequence header persists across packets, reference slots feed
-// frame_size_with_refs() and set_frame_refs(), and film grain / CDF state is
-// keyed off the reference pool. Call reset() on seek.
+// Stateful, across packets: call reset() on seek.
 class AV1ObuParser {
 public:
   auto parse(std::span<const uint8_t> packet) -> std::vector<AV1ParsedFrame>;

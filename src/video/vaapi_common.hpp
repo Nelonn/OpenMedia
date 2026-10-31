@@ -27,9 +27,7 @@ constexpr auto alignUp(T value, T alignment) -> T {
   return ((value + alignment - 1) / alignment) * alignment;
 }
 
-// A VADisplay the codec opened itself, when the caller did not hand one in.
-// Shared with every surface pool created on it, so that pictures still held by
-// the caller keep the display alive after the codec is gone.
+// Shared with surface pools, so pictures the caller holds outlive the codec.
 using OwnedDisplay = std::shared_ptr<OMVAAPIContext>;
 
 inline auto openDisplay() -> OwnedDisplay {
@@ -67,12 +65,8 @@ inline auto pixelFormatForFourcc(uint32_t fourcc) -> OMPixelFormat {
   return fourcc == VA_FOURCC_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
 }
 
-// The surfaces a codec decodes into or encodes from.
-//
-// A surface is busy while the codec still refers to it -- which the codec
-// answers for itself -- or while a picture wrapping it is alive somewhere,
-// which is what the counts here are for. Pictures reach the caller's render
-// thread, so the counts are guarded.
+// Busy while the codec refers to a surface or a picture wrapping it is alive. Pictures reach
+// the caller's render thread, so the counts are guarded.
 class SurfacePool : public std::enable_shared_from_this<SurfacePool> {
 public:
   static auto create(OwnedDisplay owner, VADisplay display, uint32_t rt_format, uint32_t width, uint32_t height,
@@ -141,10 +135,7 @@ public:
     return true;
   }
 
-  // The index of a surface nothing holds. `held` answers for the codec's own
-  // references; `exclude` is a surface already taken for the current picture.
-  // Runs out only when the caller keeps more pictures than the pool was sized
-  // for, in which case the pool grows rather than failing the picture.
+  // Runs out only when the caller keeps more pictures than planned, and then the pool grows.
   template<typename Held>
   auto acquire(Held&& held, int exclude = -1) -> int {
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -180,10 +171,8 @@ public:
       --outstanding_[static_cast<size_t>(index)];
   }
 
-  // Copies the visible part of a surface into system memory. Uses an image of
-  // the pool's own size, created once: vaGetImage into a linear image reads far
-  // faster than mapping the (tiled, write-combined) surface itself on Intel,
-  // and vaDeriveImage is only the fallback.
+  // vaGetImage into a linear image reads far faster than mapping the tiled, write-combined
+  // surface on Intel; vaDeriveImage is the fallback.
   auto download(int index, uint32_t width, uint32_t height, Picture& out) -> bool;
 
 private:
@@ -214,9 +203,6 @@ private:
   bool get_image_works_ = true;
 };
 
-// What the caller gets for a decoded surface. Returning the surface to the pool
-// is the only thing the destructor has to do; the pool keeps the display and
-// the surface itself alive.
 class PooledPicture final : public VAAPIHardwarePicture {
 public:
   PooledPicture(std::shared_ptr<SurfacePool> pool, int index)
@@ -330,9 +316,7 @@ inline auto SurfacePool::download(int index, uint32_t width, uint32_t height, Pi
   return true;
 }
 
-// The buffers of one picture, destroyed together once the picture has been
-// submitted -- or abandoned. Parameter buffers go to the driver first and the
-// slice parameter/data pairs after them, the order ffmpeg and Chromium both use.
+// Parameter buffers first, then slice parameter/data pairs, as ffmpeg and Chromium do.
 class Submission {
 public:
   Submission(VADisplay display, VAContextID context) : display_(display), context_(context) {}
@@ -368,9 +352,7 @@ public:
     return addParam(VAEncMiscParameterBufferType, data.data(), data.size());
   }
 
-  // A header the codec wrote itself, as the parameter/data pair the driver
-  // expects. `bit_length` may end mid-byte, which is how a packed slice header
-  // tells the driver where to carry on.
+  // `bit_length` may end mid-byte: how a packed slice header tells the driver where to carry on.
   auto addPackedHeader(uint32_t type, const uint8_t* bytes, size_t byte_count, size_t bit_length,
                        bool has_emulation_bytes) -> bool {
     VAEncPackedHeaderParameterBuffer param = {};
@@ -383,9 +365,7 @@ public:
 
   auto failed() const -> bool { return failed_; }
 
-  // vaBeginPicture/vaRenderPicture/vaEndPicture on `target`. A picture that
-  // began is always ended, even when rendering failed: a context left inside a
-  // picture refuses the next vaBeginPicture.
+  // A picture that began is always ended: a context left inside one refuses vaBeginPicture.
   auto execute(VASurfaceID target) -> VAStatus {
     if (failed_) return VA_STATUS_ERROR_ALLOCATION_FAILED;
     auto& libva = LibVA::getInstance();
@@ -402,9 +382,7 @@ public:
     destroy();
     const VAStatus result = render != VA_STATUS_SUCCESS ? render : status;
     if (result != VA_STATUS_SUCCESS) {
-      // Part of the picture may have reached the hardware before the error.
-      // Waiting for it here is what lets the caller reuse `target`, and the
-      // buffers the picture pointed at, without racing the driver.
+      // Lets the caller reuse `target` and the buffers without racing the driver.
       libva.vaSyncSurface(display_, target);
     }
     return result;

@@ -27,9 +27,7 @@ using namespace openmedia;
 
 enum class HwApi { Vulkan, DX11, DX12, Cuda, VAAPI };
 
-// A hardware backend is picked as a whole, never per codec: the player prefers
-// every decoder registered under `decoder_prefix` and falls back to software
-// for codecs the backend cannot handle.
+// Picked as a whole, never per codec; codecs the backend lacks fall back to software.
 struct Backend {
   std::string_view name;
   std::string_view decoder_prefix;

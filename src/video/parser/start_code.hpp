@@ -31,17 +31,9 @@ private:
   FindFn find_ = nullptr;
 };
 
-// Returns the bytes consumed: the index just past the 0x01 on a hit, `size`
-// otherwise. `bit_buffer` carries the two bytes either side of the call, so a
-// start code split across calls is still found.
-//
-// nextStartCodeC is the definition and the rest must agree with it byte for
-// byte. The trap: each byte is compared against the two preceding it *in the
-// stream*, and the byte-wise align instructions of AVX2 and AVX-512 work inside
-// 128 bit lanes only, so reaching past a lane needs a lane crossing step first.
-// Without it four positions per vector compare against an older block, which
-// loses and invents start codes -- rarely, and only in buffers long enough to
-// reach the vector loop. NEON and SVE have no lanes to cross.
+// Bytes consumed: just past the 0x01 on a hit, else `size`. `bit_buffer` carries a split start
+// code across calls. All versions must agree with nextStartCodeC byte for byte: AVX2 and
+// AVX-512 byte aligns work in 128-bit lanes, so reaching past one needs a lane crossing step.
 auto nextStartCodeC(const uint8_t* data, size_t size, uint32_t& bit_buffer, bool& found_start_code) -> size_t;
 auto nextStartCodeSSSE3(const uint8_t* data, size_t size, uint32_t& bit_buffer, bool& found_start_code) -> size_t;
 auto nextStartCodeAVX2(const uint8_t* data, size_t size, uint32_t& bit_buffer, bool& found_start_code) -> size_t;

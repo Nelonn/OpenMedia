@@ -4,9 +4,7 @@
 
 namespace h264 {
 
-// 7.4.5: memory_management_control_operation and the ref pic list modification
-// lists are self-terminating, so they need an explicit cap to stay finite on a
-// corrupt stream; MAX_REF_PIC_LIST_MODIFICATIONS in h264_types.hpp is that cap.
+// 7.4.5: these lists are self-terminating, so a corrupt stream needs an explicit cap.
 
 enum class SliceParse {
   ok,
@@ -170,9 +168,7 @@ static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, con
   const SPS& sps = sps_table[pps.seq_parameter_set_id];
   if (sps.seq_parameter_set_id != pps.seq_parameter_set_id) return fail();
 
-  // 7.4.3: first_mb_in_slice must address a macroblock of this picture. Checked
-  // against the frame-sized value so field pictures are not rejected; that is
-  // still tight enough to keep the value usable as a decode surface offset.
+  // Against the frame size, so field pictures are not rejected.
   const int64_t pic_size_in_mbs = static_cast<int64_t>(sps.pic_width_in_mbs_minus1 + 1) *
                                   static_cast<int64_t>(sps.pic_height_in_map_units_minus1 + 1) *
                                   (2 - sps.frame_mbs_only_flag);
@@ -271,9 +267,7 @@ auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_t
   const std::span<const uint8_t> nal_body{bs.current(), bs.remaining()};
   bs.finish();
 
-  // Unescape a prefix instead of the whole NAL: the header is a few hundred
-  // bytes at most, while the slice payload behind it can be megabytes. Only a
-  // header that genuinely runs past the prefix pays for a second pass.
+  // The header is a few hundred bytes, the payload megabytes; only a long header pays twice.
   for (size_t limit = 256;; limit *= 8) {
     const bool complete = scratch.convert(nal_body, limit);
     if (scratch.rbsp().empty()) return false;

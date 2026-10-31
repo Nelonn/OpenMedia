@@ -10,10 +10,7 @@ struct OPENMEDIA_ABI Packet {
   std::shared_ptr<Buffer> buffer;
   std::span<uint8_t> bytes;
 
-  // Set when `bytes` is ciphertext that has to go through a decryption module
-  // before it can be decoded, and null otherwise -- which covers every packet of
-  // an unprotected track and the clear lead of a protected one. Shared rather
-  // than owned so that a Packet stays copyable.
+  // Set when `bytes` is ciphertext; null for clear tracks and a protected track's clear lead.
   std::shared_ptr<const SampleEncryption> encryption;
 
   int64_t pts = -1;

@@ -7,12 +7,8 @@
 #include <optional>
 #include <stop_token>
 
-// Bounded thread-safe queue. Blocking calls give up as soon as their stop
-// token is triggered, so shutting a pipeline down is just request_stop().
-//
-// Besides the item count, items can be weighed against a cost budget (bytes,
-// for packets). An empty queue accepts anything, so one oversized item can
-// never wedge its producer.
+// Blocking calls give up on their stop token, so shutdown is just request_stop(). An empty
+// queue accepts anything, so one oversized item can never wedge its producer.
 template <typename T>
 class BlockingQueue {
 public:

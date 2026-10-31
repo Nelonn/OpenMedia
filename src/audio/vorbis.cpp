@@ -370,9 +370,7 @@ private:
     anchored_at_ = -1;
   }
 
-  // Frames are timed from the last packet that carried a timestamp plus the
-  // samples emitted since. A Matroska block splits into several frames that all
-  // repeat the block's timestamp, so re-anchoring on a repeat would stall time.
+  // A Matroska block's frames repeat its timestamp, so re-anchoring on a repeat would stall time.
   void anchorTimeline(int64_t packet_pts) {
     if (packet_pts < 0 || packet_pts == anchored_at_) return;
 

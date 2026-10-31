@@ -13,11 +13,8 @@
 #include <thread>
 #include <vector>
 
-// SDL playback fed from a ring buffer, and the source of the master clock:
-// every callback tells the clock which timestamp is audible right now.
-//
-// Playback starts paused and resumes once the buffer is primed, so a slow
-// start does not begin with an underrun.
+// Every callback tells the clock which timestamp is audible. Starts paused until primed,
+// so a slow start does not begin with an underrun.
 class AudioSink {
 public:
   explicit AudioSink(AVClock& clock) : clock_(clock) {}

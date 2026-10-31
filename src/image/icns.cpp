@@ -88,13 +88,8 @@ static constexpr uint8_t MAC_PALETTE_4[16][3] = {
     {0x00, 0x00, 0x00},
 };
 
-// 8-bit Mac palette — first 256 entries of the standard Mac System Palette.
-// Only the first few and last few are distinctive; the bulk is a 6x6x6 cube.
-// This is a compact generator rather than a 256-entry table.
 static void mac8bppColor(uint8_t idx, uint8_t& r, uint8_t& g, uint8_t& b) {
-  // The Mac 256-color system palette is defined by the original Quickdraw
-  // color manager.  Indices 0–215 are a 6x6x6 RGB cube; 216–255 are grays
-  // and special colors.  The exact mapping matches libicns / Apple sources.
+  // QuickDraw's system palette: 0-215 a 6x6x6 cube, 216-255 grays. Matches libicns.
   static constexpr uint8_t LEVELS[6] = {0xFF, 0xCC, 0x99, 0x66, 0x33, 0x00};
   if (idx <= 215) {
     uint8_t i = idx;
@@ -195,9 +190,7 @@ class ICNSDemuxer final : public BaseDemuxer {
   // All parsed elements from the file (includes metadata chunks)
   std::vector<ParsedElement> all_elements_;
 
-  // Subset of all_elements_ that are actual image-bearing entries
-  // (priority >= 0), sorted by descending priority.  Track index N
-  // corresponds to image_elements_[N].
+  // Track index N is image_elements_[N]; sorted by descending priority.
   std::vector<ParsedElement> image_elements_;
 
   // Index of the next track whose packet has not yet been emitted.
@@ -268,13 +261,11 @@ public:
     const int track_idx = next_track_idx_++;
     const ParsedElement& el = image_elements_[static_cast<size_t>(track_idx)];
 
-    // Read raw element payload
     std::vector<uint8_t> raw(el.data_len);
     input_->seek(static_cast<int64_t>(el.data_offset), Whence::BEG);
     size_t bytes_read = input_->read({raw.data(), raw.size()});
     raw.resize(bytes_read);
 
-    // Decode/convert based on element type
     std::vector<uint8_t> decoded;
     OMError err = decodeElement(el, raw, decoded);
     if (err != OM_SUCCESS) return Err(err);

@@ -293,7 +293,6 @@ private:
     frame.dts = (av_frame->pkt_dts != AV_NOPTS_VALUE) ? static_cast<uint64_t>(av_frame->pkt_dts) : 0;
 
     if (media_type == AVMEDIA_TYPE_VIDEO) {
-      // Video frame conversion
       Picture picture;
       picture.format = avPixelFormatToOmPixelFormat(static_cast<AVPixelFormat>(av_frame->format));
       picture.width = static_cast<uint32_t>(av_frame->width);
@@ -749,9 +748,8 @@ void registerFFmpegCodecs(CodecRegistry* registry) noexcept {
 
     desc->vendor = "FFmpeg";
     
-    // av_codec_iterate yields each implementation separately (e.g. "vvc" and
-    // "libvvenc"), so a descriptor only gets the role its own AVCodec fills and
-    // opens exactly that implementation rather than the default one for the id.
+    // av_codec_iterate yields each implementation ("vvc", "libvvenc"), so a descriptor opens
+    // exactly its own AVCodec rather than the id's default.
     if (loader.av_codec_is_decoder(codec)) {
       desc->decoder_factory = [codec] {
         return std::make_unique<FFmpegDecoder>(codec);

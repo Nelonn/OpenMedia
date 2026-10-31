@@ -78,11 +78,6 @@ struct VP9SegmentationParams {
   int16_t feature_data[VP9_MAX_SEGMENTS][VP9_SEG_LVL_MAX] = {};
 };
 
-// VP9 spec 6.2 uncompressed_header(), fully decoded.
-//
-// This carries everything DXVA_PicParams_VP9, VADecPictureParameterBufferVP9
-// and StdVideoDecodeVP9PictureInfo need; the accelerators only differ in how
-// the fields are packed.
 struct VP9FrameHeader {
   bool valid = false;
 
@@ -149,11 +144,7 @@ struct VP9ParsedFrame {
   VP9FrameHeader header;
 };
 
-// Splits superframes and decodes each frame's uncompressed header.
-//
-// The parser is stateful: frame_size_with_refs() takes the frame dimensions
-// from a reference slot, so the sizes stored in those slots have to be tracked
-// across frames. Call reset() on seek.
+// Stateful: frame_size_with_refs() reads sizes from reference slots. Call reset() on seek.
 class VP9FrameParser {
 public:
   auto parse(std::span<const uint8_t> packet) -> std::vector<VP9ParsedFrame>;
@@ -177,9 +168,7 @@ private:
 
   RefSlot ref_slots_[VP9_NUM_REF_FRAMES] = {};
 
-  // The loop filter deltas and the segmentation features are only coded when
-  // they change; every other frame inherits them from the one before, until
-  // setup_past_independence() (spec 8.4.1) puts them back to their defaults.
+  // Coded only on change; inherited until setup_past_independence() (8.4.1) resets them.
   VP9LoopFilterParams loop_filter_state_;
   VP9SegmentationParams segmentation_state_;
 

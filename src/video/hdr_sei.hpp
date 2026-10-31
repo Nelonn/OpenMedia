@@ -7,13 +7,8 @@
 
 namespace openmedia::hdr_sei {
 
-// HDR10 static metadata lives in SEI messages inside the elementary stream:
-// mastering_display_colour_volume (payload type 137, ST.2086) and
-// content_light_level_info (payload type 144, CEA-861.3). Hardware decoders
-// hand the bitstream straight to the GPU without telling us what was in it, so
-// the messages have to be picked out here or the metadata is lost.
-//
-// Both H.264 and H.265 use the same payload layout; only the NAL header differs.
+// Hardware decoders take the bitstream without reporting these messages, so the metadata
+// is picked out here. H.264 and H.265 share the payload layout.
 
 inline constexpr uint8_t SEI_MASTERING_DISPLAY_COLOUR_VOLUME = 137;
 inline constexpr uint8_t SEI_CONTENT_LIGHT_LEVEL_INFO = 144;
@@ -96,9 +91,7 @@ inline void parseMessages(std::span<const uint8_t> rbsp,
 
 } // namespace detail
 
-// Scans an Annex-B access unit for HDR10 SEI and updates the two structures in
-// place. Values already present are left alone when the frame carries none, so
-// metadata sent once on a keyframe keeps applying.
+// Left alone when a frame carries none, so metadata sent once on a keyframe keeps applying.
 inline void parseAnnexB(std::span<const uint8_t> data, bool hevc,
                         OMMasteringDisplayMetadata& mastering,
                         OMContentLightLevel& light) {
@@ -114,7 +107,6 @@ inline void parseAnnexB(std::span<const uint8_t> data, bool hevc,
     const size_t nal_start = pos + 3;
     if (nal_start >= data.size()) return;
 
-    // Find the next start code to bound this NAL.
     size_t next = data.size();
     for (size_t i = nal_start; i + 3 <= data.size(); ++i) {
       if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {

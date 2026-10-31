@@ -4,9 +4,7 @@ namespace h264 {
 
 static auto read_hrd(BitReader& br, HRDParameters& hrd) -> bool {
   hrd.cpb_cnt_minus1 = static_cast<int>(br.readUE());
-  // Reject rather than clamp: the loop below must consume exactly as many
-  // entries as the stream carries or every later field is read at the wrong
-  // bit position.
+  // Reject, not clamp: reading a different count misplaces every later field.
   if (hrd.cpb_cnt_minus1 < 0 || hrd.cpb_cnt_minus1 > 31) return false;
   hrd.bit_rate_scale = static_cast<int>(br.readBits(4));
   hrd.cpb_size_scale = static_cast<int>(br.readBits(4));

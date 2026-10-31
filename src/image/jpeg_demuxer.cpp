@@ -17,9 +17,7 @@ class JPEGDemuxer final : public BaseDemuxer {
            marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
   }
 
-  // Returns the next marker code, or 0 at EOF. A marker is 0xFF followed by a
-  // non-zero code; any number of 0xFF fill bytes may precede it, and a 0xFF
-  // 0x00 pair is stuffed data, so both are skipped.
+  // 0 at EOF. 0xFF fill bytes may precede a marker, and 0xFF 0x00 is stuffed data.
   auto readMarker() -> uint8_t {
     uint8_t byte;
     for (;;) {

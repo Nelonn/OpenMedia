@@ -18,11 +18,8 @@ void FormatDetector::addDetector(FormatDetectFn detector) {
   detectors_.push_back(std::move(detector));
 }
 
-// A DASH manifest has no magic number, because it is XML: what identifies it is
-// the name of its root element. That element may sit behind a byte-order mark, an
-// XML declaration, a doctype, comments and any amount of whitespace, so the check
-// is for the element itself rather than for anything at a fixed offset. A prefixed
-// root -- `<dash:MPD` -- names the same element.
+// No magic number: the root element may sit behind a BOM, declaration, doctype, comments and
+// whitespace. A prefixed `<dash:MPD` is the same element.
 static auto isDashManifest(std::span<const uint8_t> data) -> bool {
   size_t i = 0;
   if (data.size() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
@@ -52,9 +49,7 @@ static auto isDashManifest(std::span<const uint8_t> data) -> bool {
   return false;
 }
 
-// An HLS playlist is identified by its first line, which the format requires to be
-// `#EXTM3U`. A plain `.m3u` without that line is a playlist for a music player
-// rather than a stream, and is not this.
+// A `.m3u` without `#EXTM3U` is a music player's playlist, not a stream.
 static auto isHlsPlaylist(std::span<const uint8_t> data) -> bool {
   size_t i = 0;
   if (data.size() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;

@@ -48,21 +48,9 @@ using Microsoft::WRL::ComPtr;
 
 namespace openmedia {
 
-// Hardware video encoding on Windows does not go through D3D11 — the D3D11
-// video API only decodes and post-processes. What "dx11 encode" means here is
-// a Media Foundation encoder transform bound to our D3D11 device, so encoded
-// frames can be fed straight from a D3D11 texture without a round trip through
-// system memory.
-//
-// Vendor encoder MFTs are asynchronous: they must be unlocked, then driven by
-// METransformNeedInput / METransformHaveOutput events rather than by calling
-// ProcessInput and ProcessOutput in a loop. Software MFTs stay synchronous, so
-// both models are supported here.
-// MFShutdown() tears the platform down for the whole process, dropping
-// references Media Foundation holds internally — including ones to our D3D11
-// device. Tying that to an encoder's lifetime meant destroying an encoder left
-// the shared device over-released and the next teardown crashed. Start the
-// platform once and leave it up; Windows reclaims it at process exit.
+// D3D11 only decodes, so "dx11 encode" is a Media Foundation MFT bound to our device.
+// MFShutdown() tears down the whole process's platform and over-released our shared device,
+// crashing the next teardown, so the platform is started once and left up.
 static void ensureMediaFoundation() {
   static const bool started = [] { return SUCCEEDED(MFStartup(MF_VERSION)); }();
   (void) started;
@@ -148,11 +136,7 @@ class DX11Encoder final : public Encoder {
     return true;
   }
 
-  // Collects the parameter sets out of the first keyframe. The MFT's
-  // MF_MT_MPEG_SEQUENCE_HEADER blob is not trustworthy on its own — the HEVC
-  // encoder reports SPS and PPS but omits the VPS, which makes the result
-  // unusable as MP4 extradata. What the encoder actually puts in the bitstream
-  // always is.
+  // MF_MT_MPEG_SEQUENCE_HEADER is not trustworthy: the HEVC encoder omits the VPS there.
   void captureExtradataFromKeyframe(std::span<const uint8_t> data) {
     std::vector<uint8_t> sets;
 
@@ -238,9 +222,7 @@ class DX11Encoder final : public Encoder {
     }
   }
 
-  // Bitrate alone is not enough to get sensible output; the rate control mode
-  // and GOP length have to be pushed through ICodecAPI or the MFT falls back to
-  // whatever the driver defaults to.
+  // Without ICodecAPI the MFT falls back to the driver's default rate control and GOP.
   void apply_rate_control(const EncoderOptions& options) {
     if (!codec_api_) return;
 
@@ -283,10 +265,8 @@ class DX11Encoder final : public Encoder {
                                   std::max(1, options.format.video.framerate.den)) * 2;
     if (gop > 0) set_u32(CODECAPI_AVEncMPVGOPSize, gop);
 
-    // How much the encoder may spend per frame, as Media Foundation states it:
-    // 0 is all speed, 100 all quality, and a driver that has nothing to spend
-    // it on ignores the hint. MF_LOW_LATENCY is set separately and still
-    // applies, so this buys a better picture rather than a deeper pipeline.
+    // 0 is all speed, 100 all quality. MF_LOW_LATENCY still applies, so this buys a better
+    // picture rather than a deeper pipeline.
     if (const auto preset = enc_preset::requested(options.extra)) {
       set_u32(CODECAPI_AVEncCommonQualityVsSpeed,
               static_cast<uint32_t>(enc_preset::scaleTo(*preset, 0, 100)));
@@ -353,10 +333,7 @@ class DX11Encoder final : public Encoder {
     }
   }
 
-  // HDR10 static metadata. Media Foundation carries ST.2086 mastering display
-  // and CEA-861.3 light levels as media-type attributes; without them the
-  // encoder emits a bitstream that is technically PQ but carries no mastering
-  // information, which players treat as unmastered HDR.
+  // Without these, players treat the PQ stream as unmastered HDR.
   static void apply_hdr_metadata(IMFMediaType* type,
                                  const OMMasteringDisplayMetadata& mastering,
                                  const OMContentLightLevel& light) {
@@ -398,12 +375,8 @@ class DX11Encoder final : public Encoder {
   }
 
 
-  // The encoder MFTs accept the HDR media-type attributes but do not write the
-  // corresponding ST.2086 / CEA-861.3 messages into the elementary stream, so a
-  // standalone .h265 or .obu carries PQ signalling with no mastering data. Build
-  // the messages here and put them in front of every keyframe, which is what
-  // software encoders do and what players expect when there is no container to
-  // carry the metadata.
+  // The MFTs accept the HDR attributes but do not write the messages, so a standalone stream
+  // carries PQ with no mastering data. Put in front of every keyframe, as software encoders do.
   static void appendBE16(std::vector<uint8_t>& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v >> 8));
     out.push_back(static_cast<uint8_t>(v & 0xFF));
@@ -461,9 +434,7 @@ class DX11Encoder final : public Encoder {
         emit_obu(1, body); // METADATA_TYPE_HDR_CLL
       }
       if (have_md) {
-        // AV1 uses a different fixed point to the H.26x SEI, and orders the
-        // primaries red-green-blue where the SEI orders them green-blue-red.
-        // The stored values follow the SEI convention, so convert both.
+        // AV1 uses another fixed point and red-green-blue order; stored values follow the SEI.
         const auto& md = hdr_mastering_display_;
         auto chroma = [](uint16_t v) -> uint16_t {          // 1/50000 -> 0.16
           return static_cast<uint16_t>((static_cast<uint32_t>(v) * 65536u + 25000u) / 50000u);
@@ -885,10 +856,7 @@ public:
   }
 };
 
-// Recycles the textures handed out with hardware pictures, so a decoder that
-// runs for an hour does not ask the driver for a new 1080p surface sixty times
-// a second. Held through a shared_ptr by every picture it issued, which is what
-// lets a caller keep a frame alive after the decoder itself has gone.
+// Pictures hold this through a shared_ptr, so a caller can keep a frame after the decoder.
 class DX11PicturePool {
 public:
   DX11PicturePool(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& desc)
@@ -1053,22 +1021,16 @@ public:
           if (!h264_.sps_valid[i]) continue;
           padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
           padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-          // max_num_ref_frames slots for the reference pictures the DPB holds,
-          // one for the picture being decoded, and one more so a non-reference
-          // picture always has somewhere to go that no reference occupies.
+          // One extra so a non-reference picture has somewhere to go that no reference occupies.
           dpb_slot_count_ =
               std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 2, 3, 17);
           h264_dpb_.configure(dpb_slot_count_,
                               static_cast<uint32_t>(h264_.sps[i].num_ref_frames),
                               1u << (h264_.sps[i].log2_max_frame_num_minus4 + 4));
           bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-          // The DXVA profiles used below are 4:2:0 only; accepting a 4:2:2 or
-          // 4:4:4 stream here would decode into an NV12/P010 surface and hand
-          // back a wrong picture instead of failing over to software.
+          // 4:2:0 profiles only: a 4:2:2 stream would come back wrong instead of failing to software.
           if (h264_.sps[i].chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
-          // A caller feeding a live elementary stream has no container to read
-          // the picture size from, so it is taken from the sequence parameter
-          // set the stream itself carries.
+          // A live elementary stream has no container to state the size.
           if (width_ == 0 || height_ == 0) {
             const auto& sps = h264_.sps[i];
             const uint32_t coded_width = padded_width_;
@@ -1247,14 +1209,8 @@ private:
     std::string_view what; // names the buffer if the driver's is too small
   };
 
-  // Copies each payload into the driver's buffer of its type and builds the
-  // descriptor that goes with it.
-  //
-  // The driver decides how big its buffers are, so the capacity check belongs
-  // here rather than repeated at each of the eight call sites this replaces —
-  // and with it the message saying which buffer fell short and by how much,
-  // which is the one thing that distinguishes a clip the driver cannot take
-  // from one it simply decodes slowly.
+  // The driver decides buffer sizes, so the capacity check lives here, with the message
+  // telling a clip the driver cannot take from one it simply decodes slowly.
   auto uploadDecoderBuffers(std::span<const BufferUpload> uploads,
                             D3D11_VIDEO_DECODER_BUFFER_DESC* descs, UINT& count) -> OMError {
     count = 0;
@@ -1287,11 +1243,8 @@ private:
     return OM_SUCCESS;
   }
 
-  // DecoderBeginFrame answers E_PENDING while the GPU still has the surface, and
-  // the caller is expected to come back rather than treat it as a failure. We
-  // used to give up on the frame, which turns a busy GPU into lost pictures —
-  // the more work in flight, the more of them, so it shows up as a frame rate
-  // that will not come up rather than as an error.
+  // E_PENDING means the GPU still has the surface. Giving up turned a busy GPU into lost
+  // pictures, which looks like a frame rate that will not come up.
   auto beginFrame(uint32_t slot) -> HRESULT {
     // D3D9 error code, still what some drivers answer through the D3D11 video
     // API. Chromium waits on it exactly as it waits on E_PENDING.
@@ -1315,10 +1268,7 @@ private:
 
     auto parsed = h264_.parseFrame(packet.bytes);
     if (parsed.slice_offsets.empty()) {
-      // No slice in the access unit: either the packet held only parameter sets
-      // and SEI, or the slice header would not parse. The first is normal, the
-      // second silently costs a picture, so only complain once the parser has
-      // parameter sets and should have been able to read it.
+      // Only parameter sets and SEI is normal; an unparsable slice header silently costs a picture.
       if (h264_.has_sps && h264_.has_pps) {
         rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 packet of {} bytes carried no decodable slice",
                     packet.bytes.size());
@@ -1344,10 +1294,7 @@ private:
       dx_h264::restartAtIdr(h264_, h264_dpb_, parsed);
     }
 
-    // Resolve the short-term pictures against this frame_num before anything
-    // reads or marks them, then take a slot the DPB is not holding a reference
-    // in — including for non-reference pictures, which must not be decoded over
-    // a surface the stream still refers to.
+    // A non-reference picture also must not decode over a surface the stream still refers to.
     h264_dpb_.updatePicNums(static_cast<uint32_t>(parsed.slice.frame_num));
     const uint32_t current_slot = h264_dpb_.acquireSlot();
 
@@ -1372,16 +1319,11 @@ private:
                              current_slot, static_cast<uint32_t>(hr)));
     }
 
-    // Once the frame is open the decoder stays in it until DecoderEndFrame, and
-    // a decoder left mid-frame fails every DecoderBeginFrame afterwards — one
-    // bad frame would take the rest of the stream down with it. So every exit
-    // from here on closes the frame first.
+    // A decoder left mid-frame fails every DecoderBeginFrame after it, so every exit closes it.
     const auto endFrame = [&] { video_context_->DecoderEndFrame(decoder_.Get()); };
 
-    // DXVA wants the bitstream buffer a multiple of 128 bytes, zero-padded, with
-    // the padding counted into the last slice. Handing over an unpadded buffer
-    // leaves it up to the driver whether the trailing partial block is read at
-    // all, which is why only some frames used to come out decoded.
+    // A multiple of 128 bytes, zero-padded and counted into the last slice. Unpadded, the driver
+    // may ignore the trailing block, which is why only some frames came out decoded.
     const size_t bitstream_size = parsed.bitstream.size();
     const size_t padded_size = (bitstream_size + 127u) & ~size_t(127u);
     if (!slices.empty()) {
@@ -1554,11 +1496,8 @@ private:
     if (!found_config) return false;
     if (FAILED(video_device_->CreateVideoDecoder(&decoder_desc, &decoder_config_, &decoder_))) return false;
 
-    // Bit 14 of ConfigDecoderSpecific is the driver asking for one Texture2D per
-    // reference picture rather than one array texture. Handed an array texture
-    // anyway, such a driver decodes into it wrongly without failing -- blocks
-    // simply come out carrying the wrong content. Chromium reads the same bit
-    // (D3D11VideoDecoder::use_single_video_decoder_texture_).
+    // Bit 14 asks for one texture per reference. Given an array anyway, such a driver silently
+    // decodes wrong content. Chromium reads the same bit (use_single_video_decoder_texture_).
     const bool texture_per_slot = (decoder_config_.ConfigDecoderSpecific & (1u << 14)) != 0;
     openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO,
                    "dx11: decoding into {} ({} surfaces of {}x{}), start codes found with {}",
@@ -1607,9 +1546,7 @@ private:
     if (!h265_) return Err(OM_CODEC_DECODE_FAILED);
     auto frames = h265_->parse(packet.bytes, true);
     if (frames.empty()) {
-      // Parameter sets and SEI alone are normal; a slice header that would not
-      // parse costs a picture the stream goes on referring to. Only the second is
-      // worth a word, and only once the parser could have read one.
+      // An unparsable slice header costs a picture the stream goes on referring to.
       if (h265_->hasSps() && h265_->hasPps()) {
         rejectFrame(OM_CODEC_DECODE_FAILED, "H.265 packet of {} bytes carried no decodable slice",
                     packet.bytes.size());
@@ -1662,14 +1599,10 @@ private:
                                current_slot, static_cast<uint32_t>(hr)));
       }
 
-      // As in the H.264 path: the decoder stays inside the frame until
-      // DecoderEndFrame, and one left open fails every DecoderBeginFrame after
-      // it, so a single bad frame would silently end the stream.
+      // A decoder left mid-frame fails every DecoderBeginFrame after it.
       const auto endFrame = [&] { video_context_->DecoderEndFrame(decoder_.Get()); };
 
-      // ffmpeg pads HEVC to a 128 byte block and asserts on it; Chromium commits
-      // exactly what it wrote and also works, so drivers differ on whether they
-      // care. Padding is the side that costs nothing.
+      // ffmpeg pads to 128 bytes and Chromium does not; drivers differ, and padding costs nothing.
       const size_t bitstream_size = slice_data.bitstream.size();
       const size_t padded_size = dx_h264::alignUp(bitstream_size, size_t {128});
       slices.back().SliceBytesInBuffer += static_cast<UINT>(padded_size - bitstream_size);
@@ -1730,9 +1663,7 @@ private:
   }
 
 
-  // Collects the tile payloads of one frame. DXVA wants the tile data packed
-  // contiguously with offsets relative to the start of that packed buffer,
-  // unlike Vulkan which indexes into the original packet.
+  // DXVA wants tiles packed with offsets into that buffer, unlike Vulkan's into the packet.
   struct AV1TileRef {
     const uint8_t* data = nullptr;
     uint32_t size = 0;
@@ -2306,21 +2237,15 @@ private:
     return mapReadback(index);
   }
 
-  // Copies the decoded surface out of the DPB into a pooled texture the caller
-  // owns. The copy stays on the GPU, so unlike a read-back it costs no
-  // synchronisation; it is needed because the DPB slice itself is reused within
-  // a few frames and the caller may hold the picture for as long as it likes.
+  // On the GPU, so no synchronisation; the DPB slice is reused within a few frames.
   auto makeHardwarePicture(uint32_t slot) -> std::optional<Picture> {
     if (!picture_pool_) {
       D3D11_TEXTURE2D_DESC desc = {};
       slots_[slot].texture->GetDesc(&desc);
       desc.ArraySize = 1;
       desc.Usage = D3D11_USAGE_DEFAULT;
-      // Bound as a decoder surface as well as a shader resource: that is the one shape a video
-      // processor will read, and a caller that converts the picture -- which a player showing it
-      // on a graphics device does -- would otherwise have to copy the whole frame into a surface
-      // of its own first, a second full pass over every picture. DX11PicturePool drops the flag
-      // again where the driver refuses it.
+      // The one shape a video processor reads; otherwise a player needs a second full-frame copy.
+      // DX11PicturePool drops the flag where the driver refuses it.
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
       desc.CPUAccessFlags = 0;
       desc.MiscFlags = 0;
@@ -2379,12 +2304,8 @@ private:
     return true;
   }
 
-  // Reads back the copy queued `kReadbackLatency` frames ago. By now the GPU
-  // has had a whole frame to finish it, so the map returns without waiting.
-  //
-  // Mapping the copy that was just issued instead cost ~6 ms per frame of hard
-  // GPU synchronisation on a 1080p60 clip — a third of the frame budget, and
-  // enough of a pipeline stall that the render thread started missing vsync.
+  // Mapping the copy just issued cost ~6 ms of GPU sync per frame on 1080p60, enough to miss
+  // vsync. By now the GPU has had a whole frame to finish it.
   auto mapReadback(uint32_t index) -> std::optional<Picture> {
     if (index >= staging_.size()) return std::nullopt;
     ID3D11Texture2D* staging = staging_[index].Get();

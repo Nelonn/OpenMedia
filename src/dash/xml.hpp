@@ -9,10 +9,8 @@
 
 namespace openmedia::dash::xml {
 
-// A tree rather than a pull parser: an MPD declares SegmentTemplate, BaseURL and half
-// its attributes at one level for the levels below to inherit, and a tree answers that
-// by walking up. Names point into the document; values and text are entity-decoded, so
-// they have to be owned.
+// A tree rather than a pull parser because MPD levels inherit attributes from above.
+// Names point into the document; values are entity-decoded, so they are owned.
 struct Node {
   std::string_view name; // namespace prefix stripped
   std::vector<std::pair<std::string_view, std::string>> attributes;

@@ -269,10 +269,8 @@ public:
     };
 
     param.iUsageType = static_cast<EUsageType>(extra.getInt32(OPENH264_ENC_USAGE_TYPE, CAMERA_VIDEO_REAL_TIME));
-    // Three complexity modes to put the 1-7 scale on, and software H.264 in
-    // real time cannot afford much of it: an absent preset keeps the lowest
-    // mode this encoder has always used, and only the top of the scale reaches
-    // HIGH. openh264.complexity still names a mode outright.
+    // Software H.264 in real time cannot afford much, so absent keeps the lowest mode and only
+    // the top of the scale reaches HIGH.
     const int32_t complexity = enc_preset::scaleTo(enc_preset::requestedOr(extra, enc_preset::kFastest),
                                                    LOW_COMPLEXITY, HIGH_COMPLEXITY);
     param.iComplexityMode = static_cast<ECOMPLEXITY_MODE>(extra.getInt32(OPENH264_ENC_COMPLEXITY, complexity));

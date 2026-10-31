@@ -114,10 +114,8 @@ public:
             static_cast<uint32_t>(toUInt(value.substr(x + 1)))};
   }
 
-  // A decimal frame rate has lost the ratio it came from, so the two families that
-  // occur are reconstructed: whole rates and `n * 1000/1001`. The tolerance allows
-  // for how a playlist writes them -- `29.970`, not `29.97002997` -- rather than
-  // for floating-point error.
+  // A decimal rate has lost its ratio, so whole rates and n*1000/1001 are reconstructed.
+  // The tolerance is for `29.970`-style rounding, not floating-point error.
   auto framerate(std::string_view key) const -> Rational {
     const double value = real(key);
     if (value <= 0) return {};
@@ -170,9 +168,7 @@ auto parseKeyTag(std::string_view value, std::string_view playlist_url) -> Key {
   return key;
 }
 
-// Whether two `#EXT-X-STREAM-INF` entries describe the same rendition, decided by
-// every attribute that says anything about it: a variant repeated with nothing
-// changed is another place to fetch that rendition from, not another quality.
+// A variant repeated with nothing changed is another address, not another quality.
 auto isSameRendition(const Variant& a, const Variant& b) -> bool {
   return a.iframes_only == b.iframes_only && a.bandwidth == b.bandwidth &&
          a.average_bandwidth == b.average_bandwidth && a.codecs == b.codecs &&
@@ -427,9 +423,6 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
       }
       playlist.renditions.push_back(std::move(rendition));
     } else if (name == "#EXT-X-SESSION-KEY") {
-      // The same tag as `#EXT-X-KEY`, hoisted up here so a licence can be asked for
-      // before any media playlist has been fetched. A repeat of one already listed
-      // says nothing new.
       Key key = parseKeyTag(value, playlist_url);
       if (key.isEncrypted() &&
           std::find(playlist.session_keys.begin(), playlist.session_keys.end(), key) ==
@@ -443,9 +436,7 @@ auto parseMaster(std::span<const uint8_t> document, std::string_view playlist_ur
 
   if (playlist.variants.empty()) return Err(OM_FORMAT_NO_STREAMS);
 
-  // Failover entries folded into the rendition they duplicate, in playlist order.
-  // Left flat they read as a ladder of identical rungs: a CDN with several origins
-  // publishes a seven-rung ladder as eighty-five variants.
+  // Unfolded, a CDN with several origins publishes a seven-rung ladder as 85 variants.
   std::vector<Variant> renditions;
   renditions.reserve(playlist.variants.size());
   for (Variant& variant : playlist.variants) {
@@ -489,9 +480,7 @@ auto parseMedia(std::span<const uint8_t> document, std::string_view playlist_url
   int64_t program_date_time_ms = -1;
   bool have_sequence_start = false;
 
-  // `#EXT-X-BYTERANGE` with no offset continues from the previous range over the
-  // same resource, and which resource that is only becomes known on the URI line
-  // below -- so the tag's text is held until then rather than resolved on sight.
+  // The range's resource is only known on the URI line below, so the text is held until then.
   std::string pending_range;
   std::string range_url;
   int64_t range_end = 0;

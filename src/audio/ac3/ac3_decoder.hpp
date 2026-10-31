@@ -12,9 +12,8 @@ class BitReader;
 
 namespace openmedia::ac3 {
 
-// Speaker locations. Bit positions follow the WAVEFORMATEXTENSIBLE channel
-// mask, extended the same way as FFmpeg's AV_CH_* constants, so ascending bit
-// order is the conventional interleaving order.
+// Bits follow the WAVEFORMATEXTENSIBLE mask, extended like FFmpeg's AV_CH_*, so ascending
+// bit order is the conventional interleaving order.
 enum ChannelMask : uint64_t {
   CH_FRONT_LEFT = 1ull << 0,
   CH_FRONT_RIGHT = 1ull << 1,
@@ -77,19 +76,14 @@ void channelLocations(const FrameHeader& header, uint64_t* locations);
 // Checks the CRC covering the whole syncframe (crc2 for AC-3, crc for E-AC-3).
 auto checkFrameCrc(std::span<const uint8_t> frame) -> bool;
 
-// Destination of decoded PCM: an interleaved buffer with `stride` floats per
-// sample frame. slots[ch] is the position of coded channel ch within a sample
-// frame, or -1 to drop the channel.
+// slots[ch] is coded channel ch's position within a sample frame, or -1 to drop it.
 struct PcmTarget {
   float* data = nullptr;
   int stride = 0;
   const int* slots = nullptr;
 };
 
-// Decoder for a single AC-3 bitstream or one E-AC-3 substream.
-//
-// Channels are numbered in coded order: the full bandwidth channels as given
-// by acmod (for example L C R Ls Rs) followed by the LFE channel.
+// Channels are numbered in coded order: acmod's full bandwidth channels, then LFE.
 class SubstreamDecoder {
 public:
   SubstreamDecoder();

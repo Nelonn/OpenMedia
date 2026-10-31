@@ -39,10 +39,8 @@ public:
       return OM_CODEC_INVALID_PARAMS;
     }
 
-    // libFLAC decodes a native stream, so the extradata has to look like one.
-    // Containers such as MP4 carry only the bare 34-byte STREAMINFO body, and
-    // those get the "fLaC" marker plus a last-block STREAMINFO header put back
-    // in front; native FLAC already ships the full header and is fed in place.
+    // libFLAC decodes a native stream, so MP4's bare 34-byte STREAMINFO gets "fLaC" and a
+    // last-block header put back in front; native FLAC already ships them.
     std::array<uint8_t, 8 + STREAM_INFO_SIZE> synthesized_header;
     if (options.extradata.size() >= 4 &&
         std::memcmp(options.extradata.data(), "fLaC", 4) == 0) {
@@ -95,9 +93,7 @@ public:
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
     decoded_frames_.clear();
 
-    // A drain call carries no bytes. Feeding it to libFLAC would only latch the
-    // decoder into END_OF_STREAM, where process_single() is a no-op until the
-    // next flush().
+    // Feeding no bytes would latch libFLAC into END_OF_STREAM until the next flush().
     if (packet.bytes.empty()) {
       return Ok(std::move(decoded_frames_));
     }

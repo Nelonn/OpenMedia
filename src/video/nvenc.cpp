@@ -105,10 +105,8 @@ public:
       default: return OM_CODEC_NOT_SUPPORTED;
     }
 
-    // A preset GUID only says how much work per frame; what that work is spent
-    // on is the tuning, and the two are chosen together. Low latency keeps the
-    // encoder frame-in frame-out -- no lookahead, no reordering -- so a sender
-    // can walk the preset up without paying for it in delay.
+    // Low latency keeps the encoder frame-in frame-out, so a sender can raise the preset
+    // without paying in delay.
     const NV_ENC_TUNING_INFO tuning = options.extra.getBool("low_latency", false)
                                           ? NV_ENC_TUNING_INFO_LOW_LATENCY
                                           : NV_ENC_TUNING_INFO_HIGH_QUALITY;
@@ -128,7 +126,6 @@ public:
     init_params.presetGUID = preset;
     init_params.tuningInfo = tuning;
 
-    // Set VUI for color space
     if (options.format.codec_id == OM_CODEC_H264) {
       config.encodeCodecConfig.h264Config.h264VUIParameters.colourDescriptionPresentFlag = 1;
       config.encodeCodecConfig.h264Config.h264VUIParameters.colourPrimaries = (NV_ENC_VUI_COLOR_PRIMARIES) map_color_primaries(options.format.video.color_primaries);

@@ -33,9 +33,7 @@ namespace openmedia {
 
 namespace {
 
-// Surfaces beyond what the stream itself needs: the picture being decoded is
-// counted separately, these are for the caller. A caller that takes surfaces
-// rather than copies holds on to them for as long as it is showing them.
+// A caller that takes surfaces holds them for as long as it is showing them.
 constexpr size_t kHostOutputSlack = 2;
 constexpr size_t kHardwareOutputSlack = 8;
 
@@ -162,9 +160,7 @@ struct HevcRef {
   bool long_term = false;
 };
 
-// A reference slot of VP9 or AV1. AV1 with film grain produces two surfaces
-// per frame: the clean one later frames predict from and the grained one that
-// is shown, possibly again later through show_existing_frame.
+// AV1 film grain gives two surfaces per frame: clean to predict from, grained to show.
 struct SlotRef {
   int surface = -1;
   int display = -1;
@@ -215,9 +211,7 @@ public:
     output_format_.mastering_display = video.mastering_display;
     output_format_.content_light_level = video.content_light_level;
 
-    // Wherever the out-of-band configuration says what the stream needs, check
-    // it now: a decoder that fails here can be replaced by a software one,
-    // whereas one that fails on the first picture just shows nothing.
+    // A decoder failing now can be replaced by a software one; failing on the first picture shows nothing.
     std::optional<SessionParams> expected;
     if (codec_id_ == OM_CODEC_H264) {
       h264_.parseExtradata(options.extradata);
@@ -330,9 +324,7 @@ private:
     return OM_CODEC_NOT_SUPPORTED;
   }
 
-  // ---------------------------------------------------------------------------
-  // Session: VA config, context and surfaces
-  // ---------------------------------------------------------------------------
+  // --- Session: VA config, context and surfaces ---
 
   auto hasProfile(VAProfile profile) const -> bool {
     return std::find(profiles_.begin(), profiles_.end(), profile) != profiles_.end();
@@ -357,9 +349,7 @@ private:
 
   auto slack() const -> size_t { return hardware_output_ ? kHardwareOutputSlack : kHostOutputSlack; }
 
-  // Makes sure a session exists that can decode pictures described by `want`.
-  // A session that is large enough is kept; anything else starts a new one,
-  // and with it every reference the old one held is gone.
+  // A new session loses every reference the old one held.
   auto ensureSession(const SessionParams& want) -> OMError {
     auto& libva = LibVA::getInstance();
     if (pool_ && context_ != VA_INVALID_ID && session_.profile == want.profile &&
@@ -488,9 +478,7 @@ private:
 
   auto vaSurface(int index) const -> VASurfaceID { return pool_ ? pool_->surface(index) : VA_INVALID_SURFACE; }
 
-  // ---------------------------------------------------------------------------
-  // Output
-  // ---------------------------------------------------------------------------
+  // --- Output ---
 
   auto makeFrame(int index, uint32_t width, uint32_t height, int64_t pts, int64_t dts, bool keyframe)
       -> std::optional<Frame> {
@@ -515,9 +503,7 @@ private:
     return frame;
   }
 
-  // Pictures are carried as surfaces until they leave the decoder; a caller
-  // that wants system memory gets the copy made only then. By that time the GPU
-  // is long done with the picture, so the read-back does not wait on it.
+  // Copied only on leaving the decoder, when the GPU is long done, so read-back does not wait.
   void finishOutput(std::vector<Frame>& frames) {
     if (hardware_output_) return;
     std::vector<Frame> ready;
@@ -549,9 +535,7 @@ private:
     for (auto& held : reorder_.drain()) output.push_back(std::move(held));
   }
 
-  // ---------------------------------------------------------------------------
-  // H.264
-  // ---------------------------------------------------------------------------
+  // --- H.264 ---
 
   auto firstH264Sps() const -> const h264::SPS* {
     for (uint32_t i = 0; i < 32; ++i) {
@@ -724,9 +708,8 @@ private:
     const bool is_idr = first.header.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
     const bool is_reference = first.header.idc != h264::NAL_REF_IDC_PRIORITY_DISPOSABLE;
 
-    // After a seek the stream is entered at a random access point: an IDR, or
-    // an all-intra picture (open GOP streams mark those with a recovery point
-    // SEI). Anything before it predicts from pictures that were never decoded.
+    // Anything before a random access point predicts from pictures never decoded. Open GOP
+    // streams mark all-intra ones with a recovery point SEI.
     if (waiting_for_key_) {
       const bool intra = std::all_of(slices.begin(), slices.end(), [](const H264Slice& s) { return isIntraSlice(s.slice); });
       if (!is_idr && !intra) return OM_SUCCESS;
@@ -849,9 +832,7 @@ private:
 
     const VAStatus status = submission.execute(vaSurface(surface));
 
-    // The picture is marked even when the driver rejected it: the stream goes
-    // on referring to it by frame_num, and a buffer that lost track of it
-    // would mis-address every reference after it.
+    // Even when the driver rejected it: the stream goes on referring to it by frame_num.
     h264_poc_.commit(sps, head, is_reference, order);
     h264_dpb_.markCurrent(sps, head, is_idr, is_reference, surface, order);
 
@@ -896,10 +877,8 @@ private:
     for (auto& ref : out.RefPicList0) invalidate(ref);
     for (auto& ref : out.RefPicList1) invalidate(ref);
 
-    // Entries past the pictures the buffer holds are "no reference picture"
-    // and legitimately so -- num_ref_idx_active may well exceed what exists
-    // early in a stream. Only a modification naming a picture that is gone
-    // means a reference was lost.
+    // num_ref_idx_active may exceed what exists early on; only a modification naming a missing
+    // picture means a reference was lost.
     const auto& refs = h264_dpb_.pictures();
     const auto fill = [&](const h264_dpb::RefList& list, VAPictureH264 (&into)[32]) {
       for (size_t i = 0; i < list.size() && i < 32; ++i) {
@@ -954,9 +933,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // H.265
-  // ---------------------------------------------------------------------------
+  // --- H.265 ---
 
   auto firstH265Sps() const -> const dx_h265::Sps* {
     if (!h265_ || !h265_->hasSps()) return nullptr;
@@ -980,9 +957,7 @@ private:
     }
   }
 
-  // Main and Main 10. Range extensions (4:2:2, 4:4:4, 12-bit) would need the
-  // RExt parameter buffers, which in turn need the range extension syntax the
-  // parser does not read.
+  // Main and Main 10: RExt buffers need range extension syntax the parser does not read.
   auto h265Session(const dx_h265::Sps& sps) const -> std::optional<SessionParams> {
     if (sps.chroma_format_idc != 1 || sps.separate_colour_plane_flag) return std::nullopt;
     if (sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return std::nullopt;
@@ -1177,10 +1152,7 @@ private:
       slice.slice_data_offset = 0;
       slice.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
       slice.slice_data_byte_offset = segment.slice_data_byte_offset - 3;
-      // Emulation prevention bytes inside the header: the RBSP header ends a
-      // byte past header_bit_size (byte_alignment), everything beyond that in
-      // the escaped offset is escapes. Chromium passes it; some drivers use it
-      // to find the slice data without re-parsing the header.
+      // Chromium passes it; some drivers use it to find slice data without re-parsing the header.
       {
         const uint32_t rbsp_bytes = 2u + (segment.header_bit_size + 8u) / 8u;
         const uint32_t escaped = slice.slice_data_byte_offset;
@@ -1419,9 +1391,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // VP9
-  // ---------------------------------------------------------------------------
+  // --- VP9 ---
 
   auto decodeVP9(const Packet& packet, std::vector<Frame>& output) -> OMError {
     if (!vp9_) return OM_CODEC_DECODE_FAILED;
@@ -1469,9 +1439,7 @@ private:
     SessionParams params;
     params.profile = h.bit_depth == 10 ? VAProfileVP9Profile2 : VAProfileVP9Profile0;
     params.rt_format = h.bit_depth == 10 ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
-    // Inter frames may be smaller than their references (reference scaling);
-    // keeping the surfaces at the largest size seen avoids tearing the
-    // references down for those.
+    // Reference scaling allows smaller inter frames; this avoids tearing references down for them.
     params.width = vaapi::alignUp(std::max(h.frame_width, session_.profile == params.profile ? session_.width : 0u), 16u);
     params.height = vaapi::alignUp(std::max(h.frame_height, session_.profile == params.profile ? session_.height : 0u), 16u);
     params.surfaces = video_parser::VP9_NUM_REF_FRAMES + 1 + slack();
@@ -1565,9 +1533,7 @@ private:
     return OM_SUCCESS;
   }
 
-  // VA-API wants the per-segment dequantisers and loop filter levels worked
-  // out rather than the feature data (libvpx vp9_loop_filter_frame_init and
-  // vp9_get_qindex).
+  // VA-API wants worked-out values, not feature data (libvpx vp9_loop_filter_frame_init).
   static void fillVP9Segments(const video_parser::VP9FrameHeader& h, VASliceParameterBufferVP9& slice) {
     const auto& seg = h.segmentation;
     const auto& lf = h.loop_filter;
@@ -1611,9 +1577,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // AV1
-  // ---------------------------------------------------------------------------
+  // --- AV1 ---
 
   void updateAV1Format(const video_parser::AV1SequenceHeader& seq) {
     const auto& cc = seq.color_config;
@@ -1632,10 +1596,7 @@ private:
   void updateAV1HdrMetadata() {
     const auto& hdr = av1_->hdrMetadata();
     if (hdr.has_mdcv) {
-      // OMMasteringDisplayMetadata follows the H.26x SEI conventions: 0.00002
-      // chromaticity units, 0.0001 cd/m2 luminance, green-blue-red order. AV1
-      // codes 0.16 fixed point chromaticity, 24.8 / 18.14 luminance and
-      // red-green-blue order.
+      // AV1 codes 0.16 chromaticity, 24.8/18.14 luminance and RGB order, unlike the SEI convention.
       auto chroma = [](uint16_t v) {
         return static_cast<uint16_t>((static_cast<uint32_t>(v) * 50000u + 32768u) / 65536u);
       };
@@ -2075,9 +2036,7 @@ private:
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // State
-  // ---------------------------------------------------------------------------
+  // --- State ---
 
   bool initialized_ = false;
   OMCodecId codec_id_ = OM_CODEC_NONE;

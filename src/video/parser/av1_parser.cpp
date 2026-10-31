@@ -83,9 +83,7 @@ auto resolveDivisor(int32_t d, uint32_t& shift) -> int32_t {
   return d < 0 ? -factor : factor;
 }
 
-// setup_shear (spec 7.11.3.6): whether a global motion model describes a warp
-// the predictor can actually carry out. Hardware decoders are told, rather than
-// left to work it out, and fall back to translation for an invalid one.
+// 7.11.3.6. Hardware decoders are told, and fall back to translation for an invalid warp.
 auto shearParamsValid(const int32_t (&mat)[6]) -> bool {
   if (mat[2] <= 0) return false;
   constexpr int32_t kOne = 1 << kWarpedModelPrecBits;
@@ -182,9 +180,7 @@ private:
   BitReader bits_;
 };
 
-// ---------------------------------------------------------------------------
-// Sequence header
-// ---------------------------------------------------------------------------
+// --- Sequence header ---
 
 namespace {
 
@@ -360,9 +356,7 @@ auto AV1ObuParser::parseSequenceHeader(std::span<const uint8_t> payload) -> bool
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Frame header
-// ---------------------------------------------------------------------------
+// --- Frame header ---
 
 auto AV1ObuParser::getRelativeDist(int32_t a, int32_t b) const -> int32_t {
   if (!seq_.enable_order_hint) return 0;
@@ -491,9 +485,7 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
       h.show_frame = true;
       if (seq_.film_grain_params_present)
         h.film_grain = ref_film_grain_[h.frame_to_show_map_idx];
-      // Showing a key frame runs the reference frame loading process (7.21)
-      // and then refreshes every slot with it, so the state saved alongside
-      // the frame has to come along or the slots end up with defaults.
+      // 7.21: otherwise the refreshed slots end up with defaults.
       h.loop_filter = ref_loop_filter_[h.frame_to_show_map_idx];
       h.segmentation = ref_segmentation_[h.frame_to_show_map_idx];
       h.global_motion = ref_global_motion_[h.frame_to_show_map_idx];
@@ -868,9 +860,7 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
   h.delta_q_present = h.quantization.base_q_idx > 0 ? r.flag() : false;
   if (h.delta_q_present) h.delta_q_res = static_cast<uint8_t>(r.f(2));
 
-  // delta_lf_params() starts by zeroing these. Leaving them inherited from the
-  // primary reference frame (loaded above) would switch on per-superblock loop
-  // filter deltas for a frame that never coded any.
+  // Inherited values would enable per-superblock deltas for a frame that coded none.
   h.loop_filter.delta_lf_present = false;
   h.loop_filter.delta_lf_res = 0;
   h.loop_filter.delta_lf_multi = false;
@@ -947,10 +937,7 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
       cdef.damping = static_cast<uint8_t>(r.f(2)) + 3;
       cdef.bits = static_cast<uint8_t>(r.f(2));
       for (uint32_t i = 0; i < (1u << cdef.bits); ++i) {
-        // These are kept as the coded syntax elements (0..3). The spec turns a
-        // coded 3 into a strength of 4, but that is a decoder-internal
-        // derivation: DXVA and the Vulkan StdVideo structures both want the
-        // two-bit value straight from the bitstream.
+        // Coded (0..3): the spec's 3-to-4 mapping is decoder-internal; DXVA and Vulkan want the raw value.
         cdef.y_pri_strength[i] = static_cast<uint8_t>(r.f(4));
         cdef.y_sec_strength[i] = static_cast<uint8_t>(r.f(2));
         if (cc.num_planes > 1) {
@@ -1067,12 +1054,8 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
   {
     auto& gm = h.global_motion;
 
-    // PrevGmParams: setup_past_independence() seeds it with the *identity*
-    // warp, not zeros. load_previous() replaces it with the primary reference
-    // frame's saved parameters (already loaded into gm above). Getting this
-    // wrong does not desync the bitstream — the subexp codes are the same
-    // length either way — it just decodes every global motion parameter to the
-    // wrong value, which shows up as drifting/warped inter frames.
+    // Seeded with the *identity* warp, not zeros. Wrong here does not desync the bitstream, it
+    // decodes every parameter wrong: drifting, warped inter frames.
     AV1GlobalMotionParams prev;
     for (uint32_t ref = AV1_LAST_FRAME; ref <= AV1_ALTREF_FRAME; ++ref) {
       for (uint32_t i = 0; i < 6; ++i)
@@ -1222,9 +1205,7 @@ auto AV1ObuParser::parseFrameHeader(std::span<const uint8_t> payload,
   return h;
 }
 
-// ---------------------------------------------------------------------------
-// Metadata (HDR)
-// ---------------------------------------------------------------------------
+// --- Metadata (HDR) ---
 
 void AV1ObuParser::parseMetadata(std::span<const uint8_t> payload) {
   if (payload.empty()) return;
@@ -1261,9 +1242,7 @@ void AV1ObuParser::parseMetadata(std::span<const uint8_t> payload) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Reference state
-// ---------------------------------------------------------------------------
+// --- Reference state ---
 
 void AV1ObuParser::updateRefSlots(const AV1FrameHeader& h) {
   if (!h.valid) return;
@@ -1319,9 +1298,7 @@ void AV1ObuParser::reset() {
   current_frame_id_ = 0;
 }
 
-// ---------------------------------------------------------------------------
-// OBU layer
-// ---------------------------------------------------------------------------
+// --- OBU layer ---
 
 auto AV1ObuParser::readLeb128(std::span<const uint8_t> data, size_t& bytes_read) -> uint64_t {
   uint64_t value = 0;
@@ -1339,10 +1316,7 @@ auto AV1ObuParser::parse(std::span<const uint8_t> packet) -> std::vector<AV1Pars
   std::vector<AV1ParsedFrame> frames;
   if (packet.empty()) return frames;
 
-  // A temporal unit may carry more than one frame — most commonly a coded
-  // frame with show_frame=0 followed by a show_existing_frame that displays an
-  // earlier one. Each frame header therefore starts a new output entry;
-  // accumulating them into a single entry would silently drop all but the last.
+  // A hidden frame then a show_existing_frame is common; one entry would drop all but the last.
   AV1ParsedFrame current;
   current.bitstream.assign(packet.begin(), packet.end());
   bool have_frame_header = false;

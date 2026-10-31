@@ -5,9 +5,7 @@
 
 namespace openmedia::video_parser {
 
-// Upper bound on bytes held back between parse() calls while waiting for the
-// start code that terminates the trailing NAL. A stream that never produces one
-// is corrupt; dropping is better than growing without limit.
+// A stream never producing the terminating start code is corrupt; drop rather than grow.
 static constexpr size_t MAX_PENDING_BYTES = 8u << 20;
 
 static auto isAnnexB(std::span<const uint8_t> data) noexcept -> bool {

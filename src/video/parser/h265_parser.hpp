@@ -38,10 +38,7 @@ enum NalUnitType {
   NAL_SUFFIX_SEI = 40,
 };
 
-// 7.4.3.2.1: num_short_term_ref_pic_sets <= 64, num_long_term_ref_pics_sps <= 32,
-// and a short term set holds at most sps_max_dec_pic_buffering_minus1 <= 15
-// pictures per direction. These bound every fixed-size array below, so the
-// parser rejects anything larger rather than clamping it.
+// 7.4.3.2.1 limits; they bound the arrays below, so anything larger is rejected, not clamped.
 inline constexpr int H265_MAX_SHORT_TERM_REF_PIC_SETS = 64;
 inline constexpr int H265_MAX_LONG_TERM_REF_PICS_SPS = 32;
 inline constexpr int H265_MAX_REF_PICS_PER_DIRECTION = 16;
@@ -86,9 +83,7 @@ struct H265LongTermRef {
   int delta_poc_msb_cycle_lt = 0;
 };
 
-// 6.5.3 up-right diagonal scan: raster position (y * size + x) of the i-th
-// coefficient of a (1 << kLog2Size) square block. Scaling lists are coded in
-// this order, and H265ScalingListData keeps them that way.
+// 6.5.3: raster position of the i-th coefficient; scaling lists are coded in this order.
 template<int kLog2Size>
 struct H265DiagonalScan {
   static constexpr int kSize = 1 << kLog2Size;
@@ -124,9 +119,7 @@ struct H265ScalingListData {
   uint8_t scaling_list_dc_coef_32x32[2];
 };
 
-// Table 7-5 / 7-6: what a list takes when scaling_list_pred_matrix_id_delta
-// is 0, and what every list is when the SPS enables scaling lists without
-// sending any.
+// Table 7-5/7-6: for scaling_list_pred_matrix_id_delta 0, and an SPS enabling lists but sending none.
 void h265DefaultScalingListData(H265ScalingListData& sl);
 
 struct H265PredWeightTable {
@@ -183,10 +176,7 @@ struct H265SliceHeader {
   int five_minus_max_num_merge_cand = 0;
   // Bit position of the end of the slice header within the RBSP.
   uint32_t header_bit_size = 0;
-  // Byte offset from the start of the NAL unit *including its start code* to
-  // the first byte of slice data. Accounts for the start code, the two byte NAL
-  // header and any emulation prevention bytes inside the header, which is what
-  // VA-API and DXVA want for slice_data_byte_offset.
+  // *Including* start code, NAL header and emulation bytes: what VA-API and DXVA want.
   uint32_t slice_data_byte_offset = 0;
 };
 
@@ -197,9 +187,7 @@ struct H265ParsedFrame {
   int nal_unit_type = 0;
   int poc = 0;
   bool is_irap = false;
-  // NoRaslOutputFlag of an IRAP picture (8.1.3): the stream starts over here,
-  // and the RASL pictures that follow it predict from pictures that were never
-  // decoded, so a decoder has to drop them.
+  // 8.1.3: following RASL pictures predict from pictures never decoded, so they are dropped.
   bool no_rasl_output_flag = false;
   bool is_reference = false;
   bool parameter_sets_changed = false;
@@ -208,9 +196,7 @@ struct H265ParsedFrame {
 class H265AccessUnitParser {
 public:
   void reset();
-  // For a seek: forgets the picture order count history and anything buffered
-  // from the old position, but keeps the parameter sets, which an MP4 or MKV
-  // stream only sends once, out of band.
+  // Keeps parameter sets, which MP4 or MKV send only once, out of band.
   void restart();
   void parseExtradata(std::span<const uint8_t> extradata);
   auto parse(std::span<const uint8_t> packet, bool end_of_packet = true) -> std::vector<H265ParsedFrame>;
@@ -344,11 +330,8 @@ public:
     bool entropy_coding_sync_enabled_flag = false;
     int num_tile_columns_minus1 = 0;
     int num_tile_rows_minus1 = 0;
-    // 7.4.3.3 infers both to be 1 when the tiles syntax that carries them is
-    // absent, so parsePps starts them there. Handed uniform_spacing_flag = 0 with
-    // a single tile, a decoder reads tile widths that are not there and lays the
-    // picture out one coding tree block wide -- and with wavefronts that is the
-    // substream layout too.
+    // 7.4.3.3 infers both as 1 when absent. With 0 and one tile, a decoder lays the picture out
+    // one CTB wide, and wavefront substreams with it.
     bool uniform_spacing_flag = true;
     int column_width_minus1[H265_MAX_TILE_COLUMNS] = {};
     int row_height_minus1[H265_MAX_TILE_ROWS] = {};

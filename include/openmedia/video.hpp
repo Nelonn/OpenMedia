@@ -134,9 +134,7 @@ struct OPENMEDIA_ABI OMContentLightLevel {
   bool has_value = false;
 };
 
-// Edges to discard before display, in stored pixels. Unlike the metadata
-// structs above this needs no has_value: all zero is both "nothing was
-// signalled" and "show the whole coded picture", which are the same thing.
+// In stored pixels. All zero means "nothing signalled" and "show the whole picture" alike.
 struct OPENMEDIA_ABI OMCrop {
   uint32_t left;
   uint32_t top;

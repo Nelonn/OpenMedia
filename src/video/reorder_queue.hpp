@@ -9,13 +9,8 @@
 
 namespace openmedia {
 
-// Hardware decoders hand pictures back in decode order, which for anything with
-// B-frames means emitting them as they come makes the timestamps run backwards.
-// Every stream states how far it may reorder -- H.264 in the VUI or, failing
-// that, through the DPB capacity its level guarantees; HEVC outright in the SPS
-// -- and once that many are in hand the earliest can no longer be overtaken.
-//
-// The D3D11 and D3D12 decoders both need exactly this.
+// Hardware decoders return decode order. Once a stream's stated reorder depth is in hand
+// the earliest can no longer be overtaken.
 class ReorderQueue {
 public:
   // A depth of zero means the stream never reorders.
@@ -27,10 +22,8 @@ public:
     return one(takeSmallest());
   }
 
-  // Releases everything still held, in presentation order. Used at a stream
-  // restart, where the picture counts begin again and comparing across the
-  // boundary would order pictures against ones they have nothing to do with,
-  // and when the decoder is drained at end of stream.
+  // Used at a restart, where counts begin again and do not compare across the boundary, and
+  // when draining at end of stream.
   auto drain() -> std::vector<Frame> {
     std::stable_sort(entries_.begin(), entries_.end(),
                      [](const Entry& a, const Entry& b) { return a.poc < b.poc; });
@@ -58,9 +51,7 @@ private:
     return output;
   }
 
-  // min_element keeps the first of equal counts, so pictures a stream gives the
-  // same count -- which is every picture of a stream whose counts we could not
-  // derive -- come back out in the order they arrived.
+  // min_element keeps the first of equal counts, so underivable streams keep arrival order.
   auto takeSmallest() -> Frame {
     const auto oldest = std::min_element(entries_.begin(), entries_.end(),
                                          [](const Entry& a, const Entry& b) { return a.poc < b.poc; });

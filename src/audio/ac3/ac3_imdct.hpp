@@ -5,12 +5,7 @@
 
 namespace openmedia::ac3 {
 
-// Inverse MDCT with windowing and overlap-add (A/52 Section 7.9).
-//
-// Every call consumes the 256 transform coefficients of one audio block and
-// emits 256 PCM samples to `out`, `stride` floats apart, so a channel can be
-// written straight into an interleaved buffer. `delay` carries the second
-// windowed half of the previous block for the channel.
+// A/52 7.9. `delay` carries the second windowed half of the channel's previous block.
 class Imdct {
 public:
   Imdct();

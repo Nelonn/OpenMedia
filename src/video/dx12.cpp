@@ -108,9 +108,7 @@ public:
           if (!h264_.sps_valid[i]) continue;
           padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
           padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-          // max_num_ref_frames slots for the reference pictures the DPB holds,
-          // one for the picture being decoded, and one more so a non-reference
-          // picture always has somewhere to go that no reference occupies.
+          // One extra so a non-reference picture has somewhere to go that no reference occupies.
           dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 2, 3, 17);
           h264_dpb_.configure(dpb_slot_count_,
                               static_cast<uint32_t>(h264_.sps[i].num_ref_frames),
@@ -254,10 +252,7 @@ private:
 
     memcpy(bitstream_ptr_, parsed.bitstream.data(), parsed.bitstream.size());
 
-    // Resolve the short-term pictures against this frame_num before anything
-    // reads or marks them, then take a slot the DPB is not holding a reference
-    // in — including for non-reference pictures, which must not be decoded over
-    // a surface the stream still refers to.
+    // A non-reference picture also must not decode over a surface the stream still refers to.
     h264_dpb_.updatePicNums(static_cast<uint32_t>(parsed.slice.frame_num));
     const uint32_t current_slot = h264_dpb_.acquireSlot();
 

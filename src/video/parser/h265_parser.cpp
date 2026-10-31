@@ -231,10 +231,8 @@ void H265AccessUnitParser::appendAnnexB(std::span<const uint8_t> packet, std::ve
 
 auto H265AccessUnitParser::findNalUnits(std::span<const uint8_t> packet) -> std::vector<NalUnit> {
   std::vector<size_t> starts;
-  // `packet` is one contiguous buffer that already carries whatever was held
-  // over from the previous call, so the scanner starts from a clean window.
-  // A four byte start code is found as its trailing three bytes; the extra zero
-  // stays with the preceding NAL, where it is trailing_zero_8bits.
+  // `packet` already holds what was carried over, so the window starts clean. A four byte
+  // start code's extra zero stays with the preceding NAL as trailing_zero_8bits.
   scanner_.reset();
   size_t offset = 0;
   while (offset < packet.size()) {
@@ -344,9 +342,7 @@ auto H265AccessUnitParser::parseScalingListData(openmedia::BitReader& br, H265Sc
         for (int i = 0; i < coef_count; ++i) {
           const int delta_coef = br.readSE();
           if (delta_coef < -128 || delta_coef > 127) return false;
-          // & 0xff, not % 256: the C++ remainder of a negative value is
-          // negative, which would put out-of-range entries into the matrix
-          // handed to the hardware decoder.
+          // & 0xff, not % 256: a negative remainder would put out-of-range entries in the matrix.
           next_coef = (next_coef + delta_coef + 256) & 0xff;
           if (size_id == 0) sl.scaling_list_4x4[matrix_id][i] = static_cast<uint8_t>(next_coef);
           else if (size_id == 1) sl.scaling_list_8x8[matrix_id][i] = static_cast<uint8_t>(next_coef);
@@ -1042,9 +1038,7 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
     }
   }
 
-  // entry_point_offsets and the header extension sit between the slice header
-  // proper and byte_alignment(); skipping them would leave header_bit_size, and
-  // every slice data offset derived from it, short.
+  // Sit before byte_alignment(); skipping them leaves header_bit_size and data offsets short.
   if (pps.tiles_enabled_flag || pps.entropy_coding_sync_enabled_flag) {
     const int num_entry_point_offsets = static_cast<int>(br.readUE());
     if (num_entry_point_offsets < 0 || num_entry_point_offsets > MAX_ENTRY_POINT_OFFSETS) return fail();
@@ -1091,9 +1085,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data, H265Slice
   if (!isVclNal(nal_unit_type_)) return true;
   if (!has_sps_ || !has_pps_) return false;
 
-  // Unescape a prefix instead of the whole NAL: the header is a few hundred
-  // bytes at most, while the slice payload behind it can be megabytes. Only a
-  // header that genuinely runs past the prefix pays for a second pass.
+  // The header is a few hundred bytes, the payload megabytes; only a long header pays twice.
   for (size_t limit = 256;; limit *= 8) {
     const bool complete = rbsp_scratch_.convert(payload, limit);
     if (rbsp_scratch_.rbsp().empty()) return false;
@@ -1141,9 +1133,7 @@ auto H265AccessUnitParser::computePoc(const Sps& sps, const H265SliceHeader& sh,
     }
   }
 
-  // 8.3.1. Letting a RASL, RADL or sub-layer non-reference picture through moves
-  // the reference the msb is derived against, which changes the outcome for the
-  // picture that straddles a wrap of the low bits.
+  // 8.3.1. These pictures would move the msb's reference and change a picture straddling a wrap.
   const bool eligible_for_prev_tid0 =
       temporal_id_ == 0 && !isSubLayerNonReference(nal_type) && (nal_type < NAL_RADL_N || nal_type > NAL_RASL_R);
   if (eligible_for_prev_tid0) {

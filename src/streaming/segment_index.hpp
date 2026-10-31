@@ -17,10 +17,7 @@ struct Segment {
   int64_t time = 0;      // media time of the first sample, in `timescale` units
   uint64_t duration = 0; // in `timescale` units, 0 when nothing says
 
-  // The initialization section these bytes decode against, or nothing where they
-  // carry their own header. Per segment rather than per index because a playlist
-  // may replace it part-way through, and the segments after that point decode
-  // against parameter sets the ones before it never had.
+  // Per segment because a playlist may replace it part-way through.
   std::optional<SegmentRequest> init;
 
   // Announced but not available (`#EXT-X-GAP`), so there is nothing to fetch and
@@ -40,19 +37,13 @@ struct Segment {
   std::shared_ptr<const SegmentEncryption> encryption;
 };
 
-// One way of naming a presentation's segments: given an ordinal, which bytes, at what
-// media time, for how long -- and the reverse, for seeking. A DASH representation
-// answers from a template or a timeline, an HLS media playlist from the list it already
-// is, and neither shape reaches any further into the demuxer. Ordinals count from zero
-// whatever the source numbers its own segments.
+// Given an ordinal: which bytes, at what media time, for how long, and the reverse for
+// seeking. Ordinals count from zero whatever the source numbers its own segments.
 class SegmentIndex {
 public:
   virtual ~SegmentIndex() = default;
 
-  // The initialization section the presentation opens with, or nothing where the
-  // media carries its own header. Only which of those two shapes it is matters
-  // here -- what a given segment decodes against is Segment::init, which may
-  // differ further in.
+  // What the presentation opens with; a given segment decodes against Segment::init.
   virtual auto initSegment() const -> std::optional<SegmentRequest> = 0;
 
   // Nothing where the source does not bound them: a live timeline, or a template
@@ -100,9 +91,7 @@ struct SegmentSource {
   // Where the manifest asks playback to begin (`#EXT-X-START`). 0 means the start,
   // which is also what a manifest that does not say means.
   int64_t start_offset_ns = 0;
-  // The longest any one segment may be (`#EXT-X-TARGETDURATION`), which bounds how
-  // long a live playlist stays current and so how often the caller has to fetch it
-  // again. 0 when nothing says.
+  // How long a live playlist stays current (`#EXT-X-TARGETDURATION`). 0 when nothing says.
   int64_t target_duration_ns = 0;
 };
 

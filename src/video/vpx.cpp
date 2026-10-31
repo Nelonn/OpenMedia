@@ -210,10 +210,8 @@ public:
     cfg.g_timebase.num = options.format.video.framerate.den;
     cfg.g_timebase.den = options.format.video.framerate.num;
 
-    // libvpx defaults to a single thread, which cannot keep up with anything
-    // much above 720p in real time. VP9 only splits work across threads where
-    // the picture can be divided into tile columns, and a tile column is at
-    // least 256 pixels wide, so the count is capped by the width.
+    // One thread cannot keep up above 720p. VP9 threads by tile column, at least 256 pixels
+    // wide, so the width caps the count.
     const int64_t requested_threads = options.extra.getInt64("threads", 0);
     unsigned int threads = requested_threads > 0 ? static_cast<unsigned int>(requested_threads)
                                                  : std::thread::hardware_concurrency();
@@ -229,9 +227,7 @@ public:
     }
     cfg.g_threads = threads;
 
-    // Keyframe interval, in frames. Left alone, libvpx keeps kf_max_dist at its
-    // default of 9999: a live stream then runs for minutes without a keyframe,
-    // and a receiver that joined late has nothing to start decoding from.
+    // By default kf_max_dist is 9999: a late joiner has nothing to start from for minutes.
     const int64_t gop = options.extra.getInt64("gop_size", 0);
     if (gop > 0) {
       cfg.kf_mode = VPX_KF_AUTO;
@@ -240,9 +236,7 @@ public:
     }
 
     if (options.extra.getBool("low_latency", false)) {
-      // A frame handed in has to come back out as a packet. Any lookahead is
-      // latency, and so is a buffer model sized for file encoding: these are
-      // the window sizes a conferencing encoder uses.
+      // Lookahead is latency, as is a file-sized buffer model; these are conferencing windows.
       cfg.g_lag_in_frames = 0;
       cfg.g_pass = VPX_RC_ONE_PASS;
       cfg.rc_buf_sz = 1000;
@@ -278,13 +272,8 @@ public:
       return OM_CODEC_OPEN_FAILED;
     }
 
-    // Encoding speed. 0 is the slowest and is what the default leaves it at,
-    // which is nowhere near real time; the realtime deadline only has an effect
-    // from about 5 upwards. So real time gets the 5-9 band, with the 1-7 scale
-    // running the other way round through it -- 9 is libvpx's fastest step --
-    // and the middle of the scale landing on the 7 used here all along. The
-    // picture this buys is paid for in CPU, which a software encoder may not
-    // have: too high a preset shows up as dropped frames, not as worse video.
+    // The realtime deadline only acts from about 5 up, so the 1-7 scale runs backwards through
+    // 5-9. Too high a preset shows up as dropped frames, not worse video.
     const bool realtime = options.extra.getBool("low_latency", false);
     const int64_t realtime_cpu_used =
         enc_preset::scaleTo(enc_preset::requestedOr(options.extra, enc_preset::kBalanced), 9, 5);
@@ -301,9 +290,7 @@ public:
       vpx_codec_control(&ctx_, VP9E_SET_COLOR_SPACE, static_cast<int>(color_space_));
       vpx_codec_control(&ctx_, VP9E_SET_COLOR_RANGE, static_cast<int>(color_range_));
       vpx_codec_control(&ctx_, VP9E_SET_TILE_COLUMNS, tile_columns_log2);
-      // Rows within a tile in parallel, which is what makes more threads than
-      // tile columns worth having. Frame-parallel decoding is off: it costs
-      // compression and the threading here does not need it.
+      // Makes threads beyond tile columns worthwhile. Frame-parallel decoding costs compression.
       vpx_codec_control(&ctx_, VP9E_SET_ROW_MT, 1U);
       vpx_codec_control(&ctx_, VP9E_SET_FRAME_PARALLEL_DECODING, 0U);
       // Screen content: flat areas, hard edges and text rather than camera
@@ -398,9 +385,7 @@ public:
     img.range = (pic.color_range == OM_COLOR_RANGE_FULL) ? VPX_CR_FULL_RANGE
                                                          : VPX_CR_STUDIO_RANGE;
 
-    // VP9 has no SEI, so HDR10 static metadata lives in the container (the
-    // SmpteSt2086 elements in WebM). Keep what the picture carries so getInfo()
-    // can hand it to the muxer; libvpx itself has nowhere to put it.
+    // No SEI in VP9, and libvpx has nowhere for this, so it goes to the muxer via getInfo().
     if (pic.mastering_display.has_value) mastering_display_ = pic.mastering_display;
     if (pic.content_light_level.has_value) content_light_level_ = pic.content_light_level;
 

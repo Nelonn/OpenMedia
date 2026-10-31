@@ -35,9 +35,8 @@
 
 using namespace openmedia;
 
-// Deep enough for a whole interleaving chunk of one stream: the demuxer blocks
-// on whichever queue is full, and if audio sat behind that chunk the master
-// clock would stop and nothing would ever drain. The byte budget bounds memory.
+// Deep enough for a whole interleaving chunk: the demuxer blocks on a full queue, and audio
+// behind that chunk would stop the master clock so nothing ever drains.
 using PacketQueue = BlockingQueue<Packet>;
 inline auto makePacketQueue() -> PacketQueue {
   return PacketQueue(1024, 32u << 20, [](const Packet& p) { return p.bytes.size(); });
@@ -270,9 +269,7 @@ private:
     const DetectedFormat detected = detector_.detect({probe, input->read(probe)});
     input->seek(0, Whence::BEG);
 
-    // A manifest or a playlist is not opened from its own bytes alone: the media it
-    // describes is fetched separately, and this player does that on a loader thread
-    // rather than on the thread that has frames to deliver.
+    // The media a manifest describes is fetched separately, on a loader thread.
     if (detected.isContainer() &&
         (detected.container == OM_CONTAINER_DASH || detected.container == OM_CONTAINER_HLS)) {
       return openSegmented(path, *input, detected.container);
@@ -306,13 +303,8 @@ private:
     }
     if (document.empty()) return fail("Empty manifest: " + path);
 
-    // No StreamOptions::fetch: the demuxer never fetches and never blocks, it only
-    // says what it wants next. Here the bytes come off the local disk, and a
-    // networked player changes exactly one thing -- these two for an HTTP client.
-    //
-    // The second one is what lets a 4K stream play: the segment being read is
-    // handed over in pieces as it downloads, so its first picture costs its first
-    // few hundred kilobytes rather than all twelve megabytes of it.
+    // No StreamOptions::fetch: the demuxer never blocks. A networked player swaps these two for an
+    // HTTP client. The second lets a 4K segment's first picture cost its first few hundred KiB.
     prefetcher_.emplace(fileFetch(), fileStreamFetch());
 
     auto opened = (kind == OM_CONTAINER_DASH) ? openDashManifest(document, path, StreamOptions {})
@@ -446,10 +438,8 @@ private:
     return true;
   }
 
-  // ---- pipeline ---------------------------------------------------------------
-  //
-  //   demux ──► audio packets ──► audio decode ──► AudioSink ──► AVClock (master)
-  //         └─► video packets ──► video decode ──► frames ──► VideoRenderer (main)
+  // demux -> audio packets -> audio decode -> AudioSink -> AVClock (master)
+  //       -> video packets -> video decode -> frames -> VideoRenderer (main)
 
   void start() {
     finished_ = false;
@@ -585,9 +575,7 @@ private:
   diag::FrameOrderReporter frame_order_;
 
   std::unique_ptr<Demuxer> demuxer_;
-  // The same object as demuxer_ when the source is segmented, and null otherwise.
-  // Non-owning: it is there to be asked what to fetch next, which a plain Demuxer
-  // has no notion of.
+  // Same object as demuxer_ when segmented, else null; asked what to fetch next.
   SegmentedDemuxer* segmented_ = nullptr;
   std::optional<media::SegmentPrefetcher> prefetcher_;
   Stream audio_;

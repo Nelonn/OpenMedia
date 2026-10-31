@@ -63,10 +63,7 @@ auto LibVA::load() -> bool {
   vaQueryVendorString = libva_.getProcAddress<PFN<const char*(VADisplay)>>("vaQueryVendorString");
   vaQuerySurfaceAttributes = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAConfigID, VASurfaceAttrib*, unsigned int*)>>("vaQuerySurfaceAttributes");
 
-  // Everything the codecs call unconditionally. The coded buffer of an encoder
-  // is read through vaMapBuffer as well; libva has no separate entry point.
-  // vaSyncBuffer is not in the list: it arrived in VA-API 1.9 and the codecs
-  // fall back to syncing the surface without it.
+  // vaSyncBuffer is not listed: VA-API 1.9 only, with a fallback to syncing the surface.
   if (!vaInitialize || !vaTerminate || !vaErrorStr || !vaCreateConfig || !vaDestroyConfig || !vaCreateSurfaces ||
       !vaDestroySurfaces || !vaCreateContext || !vaDestroyContext || !vaCreateBuffer || !vaDestroyBuffer ||
       !vaMapBuffer || !vaUnmapBuffer || !vaBeginPicture || !vaRenderPicture || !vaEndPicture || !vaSyncSurface ||

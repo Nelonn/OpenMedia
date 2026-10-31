@@ -69,9 +69,7 @@ struct Representation {
   std::vector<TimelineRun> timeline;
   std::vector<ListEntry> list;
 
-  // `$Number$` and `$Time$` are all that is left in here; the identifiers that
-  // depend only on the representation are substituted while parsing, so nothing
-  // downstream has to carry the representation around to name a segment.
+  // Only `$Number$` and `$Time$` are left; the rest is substituted while parsing.
   std::string media_template;
 
   std::string init_url; // resolved; empty when the media carries its own header

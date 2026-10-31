@@ -213,9 +213,7 @@ class FLACDemuxer final : public BaseDemuxer {
   bool cover_art_sent_ = false;
   int32_t cover_art_track_index_ = -1;
 
-  // read_buf_ is sized by hand so refills land straight in it: its size() is
-  // the capacity, and [read_begin_, read_end_) is the data read from the input
-  // but not yet delivered.
+  // size() is the capacity; [read_begin_, read_end_) is read but not yet delivered.
   std::vector<uint8_t> read_buf_;
   size_t read_begin_ = 0;
   size_t read_end_ = 0;
@@ -269,9 +267,7 @@ public:
       return OM_FORMAT_PARSE_FAILED;
     }
 
-    // Metadata blocks are read straight into the extradata that the decoder
-    // will be handed, and parsed in place; a PICTURE block can be megabytes,
-    // so staging each one in its own vector first is worth avoiding.
+    // Parsed in place in the extradata: a PICTURE block can be megabytes.
     std::vector<uint8_t> extradata(marker, marker + 4);
 
     bool found_streaminfo = false;
@@ -419,9 +415,7 @@ public:
       return OM_SUCCESS;
     }
 
-    // Seek points are ordered by sample number, so the pair around the target
-    // brackets the region the frame can be in. Most FLAC files carry no seek
-    // table at all, in which case the bracket is the whole audio region.
+    // Most files have no seek table, and then the bracket is the whole audio region.
     int64_t lo_pos = audio_data_offset_;
     int64_t lo_sample = 0;
     int64_t hi_pos = input_->size();
@@ -464,9 +458,7 @@ private:
     read_origin_ = origin;
   }
 
-  // Makes at least `needed` undelivered bytes available at cur(). The buffer
-  // may be compacted, so any pointer or BitReader over it must be re-derived;
-  // offsets relative to cur() stay valid. False at end of input.
+  // May compact the buffer, so pointers over it must be re-derived; offsets from cur() hold.
   auto ensureBytes(size_t needed) -> bool {
     if (avail() >= needed) return true;
 
@@ -520,9 +512,7 @@ private:
     return NO_SYNC;
   }
 
-  // RFC 9639 §9.1. Accepts only a header that fits in `size` and whose CRC-8
-  // matches, which is what tells a real frame from audio data that happens to
-  // contain the sync word.
+  // RFC 9639 9.1. The CRC-8 tells a real frame from audio containing the sync word.
   auto parseFrameHeader(const uint8_t* d, size_t size, FLACFrameHeader& out) const -> bool {
     if (size < MIN_HEADER_SIZE) return false;
     if (d[0] != 0xFF || (d[1] & 0xFE) != 0xF8) return false;
@@ -530,10 +520,8 @@ private:
     const uint8_t bs_code = (d[2] >> 4) & 0x0F;
     const uint8_t sr_code = d[2] & 0x0F;
 
-    // Cross-check the header against STREAMINFO. Audio data is full of byte
-    // pairs that look like a sync word and the CRC-8 lets one in 256 of them
-    // through; these fields are what make a header found at an arbitrary file
-    // offset trustworthy enough for a seek probe to act on.
+    // The CRC-8 lets one in 256 lookalikes through; these fields make a header found at an
+    // arbitrary offset trustworthy enough for a seek probe.
     const uint8_t channel_code = (d[3] >> 4) & 0x0F;
     if (channel_code > 10) return false; // reserved
     if ((channel_code < 8 ? channel_code + 1u : 2u) != stream_info_.channels) return false;
@@ -615,10 +603,7 @@ private:
     }
   }
 
-  // Leaves a whole frame at cur() and reports its header and byte length.
-  // A frame carries no length, so the end is found by walking the subframe bits
-  // and confirming the trailing CRC-16 -- which is also what makes a hit
-  // trustworthy when the search started at an arbitrary file offset.
+  // A frame carries no length, so the end is found by walking subframes to the CRC-16.
   auto locateFrame(FLACFrameHeader& header, size_t& frame_size) -> bool {
     for (;;) {
       if (!findNextFrameHeader(header)) return false;
@@ -660,9 +645,7 @@ private:
     pkt.allocate(frame_size);
     memcpy(pkt.bytes.data(), cur(), frame_size);
 
-    // The frame passed its CRC-16, so its own header is a better timestamp
-    // than a running total: a seek lands exactly, and a skipped or corrupt
-    // frame cannot shift everything that follows it.
+    // Better than a running total: a seek lands exactly, and a corrupt frame shifts nothing after it.
     current_sample_pos_ = frameStartSample(header);
 
     pkt.stream_index = 0;
@@ -676,11 +659,7 @@ private:
     return Ok(std::move(pkt));
   }
 
-  // RFC 9639 §10.2 - §10.2.4. Steps over the subframe bits without decoding
-  // them; the demuxer only needs to know where the frame ends.
-  //
-  // Every top-up goes through ensureRebind(): read_buf_ can move under `br`,
-  // and bit positions are relative to cur(), which survives that.
+  // RFC 9639 10.2. read_buf_ can move under `br`, but positions relative to cur() survive.
   auto consumeSubframes(BitReader& br, const FLACFrameHeader& header) -> bool {
     const int channels = static_cast<int>(stream_info_.channels);
     const int block_size = header.block_size;
@@ -793,10 +772,8 @@ private:
         continue;
       }
 
-      // Unary quotient terminated by a 1 bit, then rice_param remainder bits.
-      // Scanning the quotient 32 bits at a time needs a margin: one sample can
-      // consume 32 + 1 + 30 bits, and bytePosition() rounds down, so 16 bytes
-      // in reserve is the smallest that always covers it.
+      // One sample can consume 32 + 1 + 30 bits and bytePosition() rounds down, so 16 bytes in
+      // reserve is the smallest margin that always covers it.
       for (int s = 0; s < samples_in_partition; s++) {
         uint32_t zeros = 0;
         for (;;) {
@@ -827,24 +804,16 @@ private:
     return input_->read(std::span(static_cast<uint8_t*>(dst), n));
   }
 
-  // Narrows [lo_pos, hi_pos) to the last frame starting at or before
-  // target_sample, by probing file positions and reading the sample number out
-  // of the first frame header at each one.
-  //
-  // Without this a file with no seek table can only be seeked by scanning every
-  // frame from the start, which on a long hi-res stream means reading hundreds
-  // of megabytes to jump to the middle.
+  // Without a seek table the alternative is scanning every frame from the start, hundreds of
+  // megabytes on a long hi-res stream.
   void narrowBySearch(int64_t target_sample, int64_t& lo_pos, int64_t& lo_sample,
                       int64_t hi_pos, int64_t hi_sample) {
     const int64_t granularity =
         std::max<int64_t>(SEARCH_GRANULARITY, 4 * static_cast<int64_t>(stream_info_.max_framesize));
 
     for (int probe = 0; hi_pos - lo_pos > granularity; probe++) {
-      // A FLAC stream's bitrate is steady enough over a long window that
-      // interpolating on the sample number usually lands within a frame or two,
-      // where bisecting the same range would take a dozen reads. Every other
-      // probe bisects anyway, so a stream that defeats the estimate still
-      // converges in a bounded number of steps.
+      // Interpolation usually lands within a frame or two. Every other probe bisects, so a
+      // stream that defeats the estimate still converges in bounded steps.
       int64_t guess = lo_pos + (hi_pos - lo_pos) / 2;
       if (probe % 2 == 0 && hi_sample > lo_sample && target_sample > lo_sample) {
         const double ratio = static_cast<double>(target_sample - lo_sample) /
@@ -873,9 +842,7 @@ private:
     }
   }
 
-  // Advances frame by frame until the frame holding target_sample is at cur(),
-  // ready for the next readPacket(). It stops one frame short on purpose: the
-  // frame whose range covers the target is the one that has to be delivered.
+  // Stops one frame short on purpose: the frame covering the target has to be delivered.
   void seekScanSync(int64_t target_sample) {
     FLACFrameHeader header = {};
 
@@ -885,10 +852,7 @@ private:
       current_sample_pos_ = frameStartSample(header);
       if (current_sample_pos_ + header.block_size > target_sample) return;
 
-      // The body is stepped over rather than parsed. Every frame is at least
-      // min_framesize bytes long, so skipping that far can never cross the next
-      // sync word; the header size alone is the fallback that still guarantees
-      // forward progress.
+      // A frame is at least min_framesize long, so this cannot cross the next sync word.
       size_t skip = static_cast<size_t>(header.size);
       const uint32_t min_framesize = stream_info_.min_framesize;
       if (min_framesize > skip && min_framesize <= READ_CHUNK) {

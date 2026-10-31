@@ -71,11 +71,8 @@ static auto isIgnoredBox(uint32_t type) -> bool {
       ATOM('w', 'i', 'd', 'e'),
       ATOM('p', 'n', 'o', 't'),
       ATOM('j', 'P', '2', ' '),
-      // Segment furniture. `styp` names the segment's brands, and `sidx`,
-      // `ssix`, `prft` and `mfra` index or timestamp segments from outside -- all
-      // of it addressed to a reader choosing what to fetch, which here is the
-      // caller, working from the manifest. Naming them keeps their bodies from
-      // being read in only to be dropped.
+      // Addressed to a reader choosing what to fetch, which here is the caller. Naming them
+      // keeps their bodies from being read in only to be dropped.
       ATOM('s', 't', 'y', 'p'),
       ATOM('s', 'i', 'd', 'x'),
       ATOM('s', 's', 'i', 'x'),
@@ -211,9 +208,8 @@ static auto isPcmVariant(uint32_t fmt) -> bool {
   return containsAtom(TABLE, fmt);
 }
 
-// QuickTime sound four-CCs carry the sample layout in the code itself, and the
-// ones below `sowt` are big-endian by definition. A `wave/enda` box may flip
-// that, so endianness is resolved separately and only applied afterwards.
+// QuickTime sound four-CCs carry the layout. A `wave/enda` box may flip the endianness,
+// so that is resolved separately.
 enum class PcmLayout : uint8_t { Unknown, U8, S16, S24, S32, F32, F64 };
 
 static auto pcmLayoutOf(uint32_t fmt) -> PcmLayout {
@@ -428,9 +424,7 @@ inline auto readBigEndianInt(std::span<const uint8_t> bytes, bool is_signed) -> 
   return static_cast<int64_t>(value);
 }
 
-// mdhd packs a three-letter ISO 639-2/T code into 16 bits as three 5-bit
-// offsets from 0x60. Empty for "und" and for the Macintosh code-page form,
-// which sets the top bit and means something else entirely.
+// Empty for "und" and for the Macintosh code-page form, which sets the top bit.
 inline auto decodeIso639(uint16_t packed) -> std::string {
   if (packed == 0 || (packed & 0x8000u) != 0) return {};
 
@@ -443,21 +437,14 @@ inline auto decodeIso639(uint16_t packed) -> std::string {
   return code == "und" ? std::string {} : code;
 }
 
-// Which sample entry the parser is currently descending into. Codec-config
-// boxes such as `esds` appear under both audio and video entries and must be
-// interpreted accordingly, so the context travels with the recursion instead
-// of living in a pile of per-codec booleans.
+// `esds` and friends appear under both audio and video entries, so the kind travels with
+// the recursion.
 enum class SampleEntryKind : uint8_t { None, Mp4aAudio, AlacAudio, Pcm, OtherAudio, Mpeg4Video, OtherVideo };
 
 static auto isAudioEntry(SampleEntryKind kind) -> bool {
   return kind == SampleEntryKind::Mp4aAudio || kind == SampleEntryKind::AlacAudio ||
          kind == SampleEntryKind::Pcm || kind == SampleEntryKind::OtherAudio;
 }
-
-// ---------------------------------------------------------------------------
-// Parse AudioSpecificConfig (ISO 14496-3)
-// Returns true and fills out_sample_rate / out_channels / out_profile.
-// ---------------------------------------------------------------------------
 
 // Object types whose config continues with a GASpecificConfig: the plain AAC
 // coders and their error-resilient counterparts, which reuse the same layout.
@@ -474,9 +461,8 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
 
   BitReader r(asc);
 
-  // Both helpers report 0 rather than a truncated value when the config runs
-  // out: BitReader reads past the end as zeroes, and a zero AOT or a zero
-  // sampling-frequency index are meaningful values that must not be invented.
+  // 0 rather than a truncated value when the config runs out: BitReader reads past the end
+  // as zeroes, and a zero AOT or frequency index is meaningful.
   auto readAot = [&]() -> uint32_t {
     if (r.bitsLeft() < 5) return 0;
     const uint32_t aot = r.readBits(5);
@@ -509,20 +495,15 @@ static auto parseAudioSpecificConfig(std::span<const uint8_t> asc,
     sbr_found = true;
   }
 
-  // --- GASpecificConfig — must be consumed before the 0x2B7 extension scan ---
-  // frameLengthFlag (1) + dependsOnCoreCoder (1) [+ coreCoderDelay (14)]
-  // + extensionFlag (1).
+  // GASpecificConfig must be consumed before the 0x2B7 extension scan.
   if (usesGaSpecificConfig(aot)) {
     r.skipBits(1); // frameLengthFlag
     if (r.readFlag()) r.skipBits(14); // dependsOnCoreCoder → coreCoderDelay
     r.skipBits(1); // extensionFlag
   }
 
-  // --- Implicit backwards-compatible SBR/PS signaling via 0x2B7 sync word ---
-  //
-  // The extension is speculative: a payload that does not start with the sync
-  // word, or that turns out not to flag SBR, must leave the cursor untouched
-  // so the caller's view of the config stays consistent.
+  // Implicit SBR/PS signalling. Speculative: without the sync word or the SBR flag the cursor
+  // must stay where it was.
   auto scanExtension = [&](uint32_t want_aot) -> bool {
     const size_t saved = r.bitPosition();
     if (r.bitsLeft() >= 11 && r.readBits(11) == 0x2B7u && readAot() == want_aot &&
@@ -600,9 +581,8 @@ struct CencKey {
   auto operator==(const CencKey&) const -> bool = default;
 };
 
-// One sample's protection as the demuxer keeps it: key and subsample map by index
-// rather than carried, since a whole-file sample table runs to hundreds of thousands
-// of samples and only the ones read need a SampleEncryption built.
+// Indices rather than carried data: a sample table runs to hundreds of thousands, and only
+// the samples read need a SampleEncryption built.
 struct CencSample {
   uint32_t key_index = 0;
   uint32_t subsample_first = 0;
@@ -626,13 +606,10 @@ struct TrackCrypto {
   std::vector<SubsampleEntry> subsamples;
 };
 
-// What one `traf` or `stbl` contributes to the above, held until that box has been
-// read out: `senc`, `saiz`/`saio` and the 'seig' groups may arrive in any order, and
-// in a `traf` after the `trun`s the samples come from.
+// Held until the box is read out: these may arrive in any order, in a `traf` even after the
+// `trun`s the samples come from.
 struct CryptoScope {
-  // The SampleEncryptionBox body as it stands: reading it needs each sample's
-  // initialization vector width, which is the key's and so is not settled until this
-  // scope's 'seig' groups have been seen.
+  // Raw body: reading it needs each sample's IV width, settled by this scope's 'seig' groups.
   std::vector<uint8_t> senc;
   // `saiz`: each auxiliary record's length, the fallback for a container that states
   // the same information outside a `senc`.
@@ -653,26 +630,20 @@ struct CryptoScope {
   }
 };
 
-// Entry counts are 32-bit fields straight out of the file, so a few corrupt bytes can
-// ask for tens of gigabytes. The box body bounds them: never reserve more entries than
-// the remaining bytes could hold.
+// Counts are 32-bit fields from the file, so corrupt bytes can ask for tens of gigabytes.
 inline auto clampEntryCount(const ByteReader& r, uint32_t count,
                             size_t bytes_per_entry) -> uint32_t {
   const size_t max_entries = r.remaining() / bytes_per_entry;
   return static_cast<uint32_t>(std::min<size_t>(count, max_entries));
 }
 
-// Timestamps from different tracks only compare once they are off their own
-// timescales. Split rather than multiplied first, so a long file cannot
-// overflow on the way.
+// Split rather than multiplied first, so a long file cannot overflow.
 inline auto toNanoseconds(int64_t value, uint32_t timescale) -> int64_t {
   if (timescale == 0) return value;
   const int64_t scale = static_cast<int64_t>(timescale);
   return (value / scale) * 1'000'000'000LL + ((value % scale) * 1'000'000'000LL) / scale;
 }
 
-// Same split-then-recombine shape as toNanoseconds, so a long duration cannot
-// overflow on the way between two timescales.
 inline auto rescaleTime(int64_t value, uint32_t from, uint32_t to) -> int64_t {
   if (from == 0 || to == 0 || from == to) return value;
   const auto from_scale = static_cast<int64_t>(from);
@@ -688,10 +659,8 @@ struct Sample {
   uint32_t duration = 0;
   int32_t stream_index = 0;
   bool is_keyframe = false;
-  // Index into TrackCrypto::samples, or -1 for a sample that needs no key. While the
-  // enclosing `traf` or `stbl` is still being read it holds the sample's number within
-  // that scope, which is how the auxiliary records address it; applyCryptoScope()
-  // turns the one into the other.
+  // Index into TrackCrypto::samples, or -1. Until applyCryptoScope(), the sample's number
+  // within its `traf` or `stbl`, which is how auxiliary records address it.
   int32_t crypto = -1;
 };
 
@@ -701,17 +670,13 @@ struct BMFFTrack {
   int32_t index = -1;
   int64_t start_dts = 0;
   int64_t track_duration = 0;
-  // Where the next fragment's samples start when it carries no `tfdt`. Only the
-  // segment-at-a-time reader uses it: there, the previous fragment's samples have
-  // already been dropped by the time the next one is parsed, so the running
-  // decode time cannot be recovered from them.
+  // For a fragment with no `tfdt`. Segment-at-a-time only: the previous fragment's samples
+  // are gone by then, so the running decode time cannot be recovered from them.
   int64_t next_fragment_dts = 0;
   Track track = {};
   std::unique_ptr<BitStreamFilter> bsf;
 
-  // Width of the NAL unit length prefixes from the decoder configuration record, 0
-  // for a track framed some other way. Reframing a protected sample needs it: only
-  // this says where the prefixes the subsample map must move over are.
+  // Reframing a protected sample needs this: it locates the prefixes the subsample map moves over.
   uint8_t nal_length_size = 0;
 
   TrackCrypto crypto;
@@ -733,14 +698,10 @@ struct BMFFTrack {
   std::vector<ELSTEntry> elst_entries;
   std::vector<Sample> samples;
 
-  // A track `tenc` settled a default key for. Whether a given sample is really
-  // protected is decided per sample -- a clear lead or a 'seig' override says
-  // otherwise -- so this only means the samples go through the crypto path.
+  // Only means the samples take the crypto path: a clear lead or 'seig' override decides per sample.
   auto hasCrypto() const -> bool { return !crypto.keys.empty(); }
 
-  // Whether samples against this description carry ciphertext. Nothing said leaves
-  // the `tenc` default standing, since a file describing only protected samples need
-  // not repeat itself.
+  // Nothing said leaves the `tenc` default: a file of only protected samples need not repeat itself.
   auto entryIsProtected(uint32_t description_index) const -> bool {
     if (description_index >= 1 && description_index <= protected_entries.size()) {
       return protected_entries[description_index - 1] != 0;
@@ -748,10 +709,6 @@ struct BMFFTrack {
     return hasCrypto();
   }
 };
-
-// ---------------------------------------------------------------------------
-// Leaf-box parsers - accept a pre-read buffer
-// ---------------------------------------------------------------------------
 
 // MovieHeaderBox: creation and modification times, then the timescale. The
 // times count seconds from 1904-01-01 UTC rather than the Unix epoch.
@@ -842,17 +799,9 @@ inline void parseElst(std::span<const uint8_t> body, BMFFTrack& track) {
   }
 }
 
-// Offset subtracted from every decode timestamp, in the track's own timescale.
-//
-// Two edit-list features fold into this one number, as they do in FFmpeg. A
-// leading empty edit (media_time < 0) holds the track silent for its own
-// duration, which delays everything after it; the first playable edit then says
-// which media time is to appear at that point. Subtracting
-// `media_time - empty_duration` produces both: a positive first timestamp when
-// the track is delayed, and the usual zero-based timeline when it is not.
-//
-// Empty-edit durations are in the movie timescale, everything else in the
-// track's, so they have to be rescaled before they can be combined.
+// Subtracted from every decode timestamp, in the track's timescale. Folds a leading empty
+// edit and the first playable edit into one number, as FFmpeg does. Empty-edit durations
+// are in the movie timescale, so they are rescaled first.
 inline auto getEditListStartDts(const BMFFTrack& track, uint32_t movie_timescale) -> int64_t {
   int64_t empty_duration = 0; // movie timescale
 
@@ -906,9 +855,7 @@ inline void parseColr(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.format.video.color_range = range;
 }
 
-// PixelAspectRatioBox: hSpacing(32), vSpacing(32). An absent box leaves the
-// ratio at {0,0}, which also means square pixels — a caller that only wants to
-// know how to scale can treat an unset ratio and an explicit 1:1 alike.
+// Absent leaves {0,0}, which also means square pixels.
 inline void parsePasp(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 8) return;
   const uint32_t h_spacing = load_u32_be(body.data());
@@ -942,12 +889,8 @@ inline void parseFiel(std::span<const uint8_t> body, BMFFTrack& track) {
   }
 }
 
-// CleanApertureBox: four rationals giving the visible width and height and the
-// offset of the clean aperture's centre from the coded picture's centre. The
-// box is centre-relative; cropping downstream wants edges, so convert.
-//
-// Must run after the width and height are known, which it does: the sample
-// entry's fixed fields are read before its child boxes.
+// Centre-relative in the box, but cropping wants edges. Runs after width and height are
+// known: the entry's fixed fields are read before its children.
 inline void parseClap(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 32) return;
 
@@ -1104,11 +1047,8 @@ inline auto parseVvcc(std::span<const uint8_t> body,
   return true;
 }
 
-// EVCDecoderConfigurationRecord: configurationVersion(8), profile_idc(8),
-// level_idc(8), toolset_idc_h(32), toolset_idc_l(32), then a byte packing
-// chroma_format_idc(2) + bit_depth_luma_minus8(3) + bit_depth_chroma_minus8(3).
-// Luma depth has nowhere to live in MediaFormat's video arm, so it is left out
-// rather than written into the audio arm of the same union.
+// Luma depth has nowhere to live in MediaFormat's video arm, so it is left out rather than
+// written into the audio arm of the same union.
 inline void parseEvcc(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 12) return;
 
@@ -1117,10 +1057,7 @@ inline void parseEvcc(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.extradata.assign(body.begin(), body.end());
 }
 
-// VPCodecConfigurationBox: FullBox header, then profile(8), level(8),
-// bitDepth(4)+chromaSubsampling(3)+videoFullRangeFlag(1), colourPrimaries(8),
-// transferCharacteristics(8), matrixCoefficients(8). Extradata keeps everything
-// from `profile` on, matching what VP9 consumers expect.
+// Extradata keeps everything from `profile` on, which is what VP9 consumers expect.
 inline void parseVpcc(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 5) return;
   track.track.format.profile = static_cast<OMProfile>(body[4]);
@@ -1140,10 +1077,7 @@ inline void parseAv1c(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.extradata.assign(body.begin(), body.end());
 }
 
-// OpusSpecificBox: version(8), OutputChannelCount(8), PreSkip(16),
-// InputSampleRate(32), OutputGain(16), ChannelMappingFamily(8). InputSampleRate
-// only records what the encoder was fed; an Opus stream always decodes at
-// 48 kHz, so that is what the track reports.
+// InputSampleRate only records what the encoder was fed; Opus always decodes at 48 kHz.
 inline void parseDops(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 11) return;
   track.track.format.audio.channels = body[1];
@@ -1151,10 +1085,8 @@ inline void parseDops(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.extradata.assign(body.begin(), body.end());
 }
 
-// AC3SpecificBox: fscod(2), bsid(5), bsmod(3), acmod(3), lfeon(1),
-// bit_rate_code(5), reserved(5) — three bytes in all. The enclosing
-// AudioSampleEntry habitually claims two channels even for a 5.1 programme, so
-// this box is the only trustworthy source of the channel count.
+// AudioSampleEntry habitually claims two channels even for 5.1, so only this box is
+// trustworthy for the count.
 inline void parseDac3(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 3) return;
   BitReader r(body);
@@ -1177,9 +1109,7 @@ inline void parseDac3(std::span<const uint8_t> body, BMFFTrack& track) {
   }
 }
 
-// EC3SpecificBox: data_rate(13), num_ind_sub(3), then one record per
-// independent substream. The first substream carries the main programme; the
-// rest are alternatives, so only its channel arrangement is reported.
+// The first substream is the main programme; the rest are alternatives.
 inline void parseDec3(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 5) return;
   BitReader r(body);
@@ -1216,10 +1146,8 @@ inline void parseDec3(std::span<const uint8_t> body, BMFFTrack& track) {
   if (data_rate) track.track.bitrate = data_rate * 1000u;
 }
 
-// DTSSpecificBox: DTSSamplingFrequency(32), maxBitrate(32), avgBitrate(32),
-// pcmSampleDepth(8), then packed fields ending in a 16-bit ChannelLayout mask.
-// That mask is left alone — decoding it correctly needs the asset tables from
-// the extension substream, so the sample entry's channel count stands.
+// The ChannelLayout mask needs the extension substream's asset tables to decode, so the
+// sample entry's channel count stands.
 inline void parseDdts(std::span<const uint8_t> body, BMFFTrack& track) {
   if (body.size() < 13) return;
 
@@ -1235,9 +1163,7 @@ inline void parseDdts(std::span<const uint8_t> body, BMFFTrack& track) {
 }
 
 inline void parseDfla(std::span<const uint8_t> body, BMFFTrack& track) {
-  // FLACSpecificBox: FullBox header followed by FLAC METADATA_BLOCKs, the first
-  // of which must be STREAMINFO. Extradata keeps the bare 34-byte STREAMINFO
-  // body, the same shape every other FLAC consumer here expects.
+  // Extradata is the bare 34-byte STREAMINFO body every FLAC consumer here expects.
   if (body.size() < 4 + 4 + 34) return;
   const uint8_t block_type = body[4] & 0x7Fu;
   if (block_type != 0 || load_u24_be(body.data() + 5) != 34) return;
@@ -1254,9 +1180,7 @@ inline void parseDfla(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.format.audio.bit_depth = ((packed >> 4) & 0x1Fu) + 1;
 }
 
-// `is_audio` decides how the DecoderSpecificInfo payload is read: as an
-// AudioSpecificConfig for mp4a, or as opaque extradata for mp4v, which carries
-// MPEG-4 Visual configuration there and would otherwise get none at all.
+// mp4v carries MPEG-4 Visual configuration here, so its payload is opaque extradata.
 inline void parseEsds(std::span<const uint8_t> body, BMFFTrack& track, bool is_audio) {
   ByteReader r(body);
   r.skip(4); // version + flags
@@ -1346,9 +1270,7 @@ inline void parseAlacSpecific(std::span<const uint8_t> body, BMFFTrack& track) {
   track.track.extradata.assign(config.begin(), config.end());
 }
 
-// `stream_size` bounds the constant-size form, which stores no table of its own
-// and so is not limited by the box body: every sample still has to fit in the
-// file, which caps the plausible sample count.
+// The constant-size form stores no table, so the box body does not limit it; the stream does.
 inline void parseStsz(std::span<const uint8_t> body, BMFFTrack& track,
                       size_t stream_size) {
   ByteReader r(body);
@@ -1468,10 +1390,8 @@ inline void parseStss(std::span<const uint8_t> body, BMFFTrack& track) {
   std::sort(track.sync_samples.begin(), track.sync_samples.end());
 }
 
-// SampleToGroupBox, ISO/IEC 14496-12 §8.9.2. Open-GOP streams (HEVC/VVC CRA
-// pictures) often list only the first IDR in stss and mark every other random
-// access point through a 'rap ' or 'sync' sample group; without these, seeking
-// has nothing to land on but the first frame.
+// Open-GOP streams often list only the first IDR in stss and mark other random access points
+// through a group; without these, seeking can only land on the first frame.
 inline void parseSbgp(std::span<const uint8_t> body, BMFFTrack& track) {
   ByteReader r(body);
   const uint8_t version = r.u8();
@@ -1491,10 +1411,7 @@ inline void parseSbgp(std::span<const uint8_t> body, BMFFTrack& track) {
     const uint32_t sample_count = r.u32be();
     const uint32_t group_description_index = r.u32be();
     if (!r.ok()) break;
-    // Index 0 means "not in any group of this type"; every described entry of
-    // these grouping types is a random access point.
-    // Kept as runs: the counts are unchecked here and only expanded against the
-    // real sample count once the table is built.
+    // Kept as runs: counts are unchecked until expanded against the real sample count.
     if (group_description_index != 0 && sample_count != 0) {
       track.rap_ranges.emplace_back(sample_number, sample_count);
     }
@@ -1524,14 +1441,8 @@ inline void parseTrex(std::span<const uint8_t> body, std::vector<TREXEntry>& tre
   }
 }
 
-// ---------------------------------------------------------------------------
-// Common encryption, ISO/IEC 23001-7
-// ---------------------------------------------------------------------------
-
-// The protection defaults, which a TrackEncryptionBox and a 'seig' group description
-// carry in the same shape (sections 8.2.2 and 6). In a version 0 `tenc` the crypt/skip
-// byte is a reserved zero, which reads as "no pattern" -- right for the two schemes
-// that have none.
+// `tenc` and 'seig' share this shape (23001-7 8.2.2, 6). In a version 0 `tenc` the crypt/skip
+// byte is a reserved zero, reading as "no pattern", right for schemes that have none.
 inline auto parseCencKey(ByteReader& r, CencKey& key) -> bool {
   r.skip(1); // reserved
   const uint8_t pattern = r.u8();
@@ -1578,9 +1489,7 @@ inline void parseTenc(std::span<const uint8_t> body, BMFFTrack& track) {
   }
 }
 
-// SampleGroupDescriptionBox, ISO/IEC 14496-12 8.9.3. Only 'seig' is read: its entries
-// are track encryption defaults in all but name, and a stream that rotates keys points
-// at them from `sbgp` instead of carrying a new `tenc`.
+// Only 'seig': a stream rotating keys points at these from `sbgp` instead of a new `tenc`.
 inline void parseSgpd(std::span<const uint8_t> body, CryptoScope& scope) {
   ByteReader r(body);
   const uint8_t version = r.u8();
@@ -1601,9 +1510,7 @@ inline void parseSgpd(std::span<const uint8_t> body, CryptoScope& scope) {
   const uint32_t count = clampEntryCount(r, r.u32be(), MIN_ENTRY_SIZE);
 
   for (uint32_t i = 0; i < count && r.ok(); ++i) {
-    // A version 1 box states each entry's length, once up front or per entry, so a
-    // reader can step over a description it does not understand. Version 0 states
-    // none, so a 'seig' entry is exactly as long as reading it makes it.
+    // Version 0 states no length, so a 'seig' entry is as long as reading it makes it.
     uint32_t length = default_length;
     if (version == 1 && default_length == 0) length = r.u32be();
     if (length > r.remaining()) break;
@@ -1639,12 +1546,7 @@ inline void parseSeigGroups(std::span<const uint8_t> body, CryptoScope& scope) {
   }
 }
 
-// SampleAuxiliaryInformationSizesBox, ISO/IEC 14496-12 8.7.8. A box naming a type
-// other than common encryption's is describing something else entirely.
-//
-// `stream_size` bounds the sample count: with a default size stated, the box gives no
-// per-sample table to bound it against, and a 32-bit count out of a corrupt file
-// would otherwise stand.
+// `stream_size` bounds the count: with a default size there is no table to bound it against.
 inline void parseSaiz(std::span<const uint8_t> body, CryptoScope& scope,
                       size_t stream_size) {
   ByteReader r(body);
@@ -1701,9 +1603,7 @@ inline void parseSaio(std::span<const uint8_t> body, CryptoScope& scope) {
   }
 }
 
-// One CencSampleAuxiliaryDataFormat record, ISO/IEC 23001-7 7.1: the initialization
-// vector, then the clear/protected split when there is one. The record carries no
-// width of its own, which is why the key has to be known first.
+// The record states no width of its own, hence the key has to be known first.
 inline auto readCencAuxRecord(ByteReader& r, const CencKey& key, bool has_subsamples,
                               CencSample& record,
                               std::vector<SubsampleEntry>& subsamples) -> bool {
@@ -1740,9 +1640,8 @@ inline auto readCencAuxRecord(ByteReader& r, const CencKey& key, bool has_subsam
   return true;
 }
 
-// Which key each sample of a scope is protected with. Both record readers need this
-// before they can read a sample's initialization vector, since the key states its
-// width. A sample no run named falls back to the `tenc` default, always key 0.
+// Both record readers need this first, since the key states the IV width. A sample no run
+// named falls back to the `tenc` default, always key 0.
 struct SampleKeys {
   const std::vector<CencKey>& keys;
   const std::vector<uint32_t>& by_sample;
@@ -1766,9 +1665,8 @@ inline auto internKey(TrackCrypto& crypto, const CencKey& key) -> uint32_t {
   return static_cast<uint32_t>(crypto.keys.size() - 1);
 }
 
-// True once the map describes `size` bytes exactly. A map that stops short leaves the
-// rest in the clear, so saying so explicitly is what makes it exact; one that overruns
-// describes some other sample, and cannot be reframed against this one.
+// A map stopping short leaves the rest clear, so it is made explicit; one that overruns
+// describes some other sample and cannot be reframed against this one.
 inline auto normalizeSubsampleMap(std::vector<SubsampleEntry>& subsamples,
                                   size_t size) -> bool {
   if (subsamples.empty()) return false; // whole-sample encryption, not a short map
@@ -1784,10 +1682,8 @@ inline auto normalizeSubsampleMap(std::vector<SubsampleEntry>& subsamples,
   return true;
 }
 
-// Where each NAL unit's length prefix sits, when the sample really is a tiling of
-// `length_size`-prefixed NAL units. Empty when it is not -- which is how a sample
-// encrypted end to end looks, its length fields being ciphertext too, and so is the
-// signal that it must not be reframed.
+// Empty when not a clean tiling, as with end-to-end encryption whose length fields are
+// ciphertext too: the signal that the sample must not be reframed.
 inline auto lengthPrefixedNalStarts(std::span<const uint8_t> sample,
                                     uint8_t length_size) -> std::vector<uint32_t> {
   std::vector<uint32_t> starts;
@@ -1807,10 +1703,8 @@ inline auto lengthPrefixedNalStarts(std::span<const uint8_t> sample,
   return starts;
 }
 
-// Moves a subsample map from the container's length-prefixed framing onto the Annex-B
-// framing the packet goes out in. Both steps only ever add clear bytes -- a wider
-// start code, parameter sets in front -- so the map survives, as long as every prefix
-// really is in a clear run. False says it is not, and leaves the map untouched.
+// From length-prefixed framing to Annex-B. Only ever adds clear bytes, so the map survives
+// while every prefix is in a clear run; false says otherwise and leaves it untouched.
 inline auto shiftSubsamplesForStartCodes(std::vector<SubsampleEntry>& subsamples,
                                          std::span<const uint32_t> nal_starts,
                                          uint8_t length_size,
@@ -1846,17 +1740,8 @@ inline auto shiftSubsamplesForStartCodes(std::vector<SubsampleEntry>& subsamples
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Sample-table construction - functional style
-//
-// Iterator state for STTS / CTTS tables is managed with a small helper
-// that advances through run-length encoded entries.
-// ---------------------------------------------------------------------------
-
 namespace detail {
 
-// Advances through a run-length encoded table (STTS / CTTS).
-// Each call to next() returns the current entry value and steps forward.
 template<typename Entry, typename ValueFn>
 struct RleIterator {
   const std::vector<Entry>& table;
@@ -1873,11 +1758,8 @@ struct RleIterator {
     using T = decltype(value_fn(table[0]));
     if (idx >= table.size()) return T {};
     const auto val = value_fn(table[idx]);
-    // An exhausted entry has to be stepped over here: settle() only fills
-    // `remaining` in, so leaving idx where it is repeats the same entry for the
-    // whole track. That turned every composition offset into the first one,
-    // which reads as a stream that never reorders -- timestamps then rose in
-    // decode order and came back out of the decoder scrambled.
+    // settle() only fills `remaining`, so without this one entry repeats for the whole track:
+    // every composition offset became the first, and frames came out of the decoder scrambled.
     if (--remaining == 0) ++idx;
     settle();
     return val;
@@ -1886,9 +1768,7 @@ struct RleIterator {
   auto valid() const -> bool { return idx < table.size(); }
 
 private:
-  // Park on the next entry that actually covers samples. Entries with a zero
-  // sample_count are legal to write and do appear; stepping over them in a
-  // loop is what keeps `--remaining` from wrapping around on one.
+  // Zero sample_count entries are legal and do appear; `--remaining` would wrap on one.
   void settle() {
     while (idx < table.size() && remaining == 0) {
       remaining = table[idx].sample_count;
@@ -1899,10 +1779,8 @@ private:
 
 } // namespace detail
 
-// A sample that does not lie inside the file is not a sample. Checking it here
-// keeps every later stage — the merge, seeking, and above all the per-packet
-// allocation in readPacket — working from offsets and sizes that are known to
-// be readable, instead of trusting a 32-bit size field at read time.
+// Checked here so seeking and readPacket's allocation can trust offsets and sizes rather
+// than a 32-bit size field.
 inline auto sampleFitsInStream(int64_t offset, uint32_t size, size_t stream_size) -> bool {
   return offset >= 0 && static_cast<uint64_t>(offset) + size <= stream_size;
 }
@@ -1952,9 +1830,6 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
   size_t sample_idx = 0;
   int64_t current_dts = 0;
 
-  // A protected track's samples carry their sample number until the `senc` or
-  // `saiz`/`saio` records are matched to them; applyCryptoScope() resets the ones
-  // that turn out to need no key.
   const bool crypto = track.hasCrypto();
 
   for (size_t ci = 0; ci < num_chunks; ++ci) {
@@ -1991,14 +1866,8 @@ inline void buildSampleTable(BMFFTrack& track, size_t stream_size) {
   }
 }
 
-// The bytes of one segment, owned as a Buffer so that a Packet can share them:
-// Packet::buffer is a shared_ptr<Buffer> already, so a packet whose payload needs no
-// rewriting can point into the segment it came from rather than get a copy of it.
-//
-// A segment handed over in pieces grows through append(), which can move the bytes.
-// Nothing shares them while that is possible -- see readPacket() -- and every offset
-// into the segment is relative to its start, so a move costs only taking the span
-// again.
+// A Buffer so a packet needing no rewriting can share the segment instead of copying it.
+// append() can move the bytes, so nothing shares them while that is possible (see readPacket).
 class SegmentBuffer final : public Buffer {
   std::vector<uint8_t> storage_;
 
@@ -2024,10 +1893,8 @@ class BMFFDemuxer final : public BaseDemuxer {
     int64_t decode_time = 0;
     bool has_decode_time = false;
 
-    // The fragment's Common Encryption boxes, and where its samples went: the
-    // auxiliary records number the samples from the start of the fragment and may
-    // follow the `trun`s that produced them, so the two are only matched up once
-    // the whole `traf` has been read.
+    // Auxiliary records number samples from the fragment's start and may follow the `trun`s,
+    // so they are matched up once the whole `traf` has been read.
     CryptoScope crypto;
     size_t first_sample = 0;
     uint32_t sample_count = 0;
@@ -2039,9 +1906,8 @@ class BMFFDemuxer final : public BaseDemuxer {
   bool in_ilst_ = false;
   uint32_t movie_timescale_ = 0;
 
-  // Set when the file is structurally broken or unreadable. Parsing stops, but
-  // whatever was decoded before that point is still offered to the caller: a
-  // file truncated mid-mdat usually has a complete moov and plays fine.
+  // Parsing stops but decoded data stays offered: a file truncated mid-mdat usually has a
+  // complete moov and plays fine.
   bool fatal_ = false;
 
   std::vector<BMFFTrack> bmff_tracks_;
@@ -2060,61 +1926,38 @@ class BMFFDemuxer final : public BaseDemuxer {
   std::vector<MetaItem> meta_items_;
   std::vector<Track> attachment_tracks_;
 
-  // Every `pssh` box seen, whole. A stream repeats them in each segment and adds
-  // new ones when it rotates keys, so they accumulate rather than being replaced:
-  // a licence the caller already holds stays valid, and a new header means a new
-  // licence to ask for.
+  // Accumulated, not replaced: a licence already held stays valid, and a new header means a
+  // new licence to ask for.
   std::vector<std::vector<uint8_t>> pssh_boxes_;
 
-  // Public track index (the one in `tracks_` and in Sample::stream_index) to
-  // its slot in `bmff_tracks_`. The two only coincide while no track is
-  // dropped, and timecode or subtitle tracks are dropped all the time.
+  // The two indices differ as soon as a timecode or subtitle track is dropped.
   std::vector<size_t> public_to_slot_;
 
-  // Positions in `samples_` of each public track's sync samples, ascending.
-  // Seeking is a binary search over these rather than a walk back through
-  // every sample of every other track.
+  // Seeking is a binary search over these, not a walk through every other track's samples.
   std::vector<std::vector<size_t>> keyframes_;
 
   size_t current_sample_index_ = 0;
   uint64_t current_moof_offset_ = 0;
   std::optional<FragmentContext> current_fragment_;
 
-  // Set when this demuxer is being driven a segment at a time rather than over a
-  // whole file. What changes: tracks are published before any sample is known,
-  // a `tfhd` base offset into the original file is not trusted, and the running
-  // decode time is carried on the track instead of read back off its samples.
+  // Tracks are published before any sample is known, a `tfhd` base offset is not trusted, and
+  // the running decode time lives on the track.
   bool fragment_mode_ = false;
 
-  // The segment being read, in fragment mode. Packets point into it rather than copy
-  // out of it, so it outlives not just the parse but every packet still in flight --
-  // which is what the shared ownership is for.
+  // Shared because packets in flight point into it.
   std::shared_ptr<SegmentBuffer> segment_;
 
-  // --- A segment that is still arriving ---------------------------------------
-  //
-  // A fragmented segment names its samples in a `moof` and then writes them into
-  // the `mdat` behind it, so the names arrive before the bytes: the samples of a
-  // fragment can be handed out one at a time as its `mdat` fills, instead of once
-  // the whole of it has. These carry that walk from one piece to the next.
+  // A `moof` names samples before the `mdat` holds them, so samples can go out one at a time
+  // as it fills. These carry that walk from one piece to the next.
   bool segment_open_ = false;
   size_t scan_pos_ = 0; // the next top-level box header to look at
-  // A `moof` read whole and not yet parsed. Its samples lie past what has arrived,
-  // and it is the box after it that says how far the segment reaches -- so it waits
-  // for that box's header, which is the next thing on the wire.
+  // Waits for the next box's header, which says how far the segment reaches.
   std::optional<std::pair<size_t, size_t>> pending_moof_;
   size_t declared_end_ = 0; // how far the boxes seen so far say the segment runs
 
-  // Which of `samples_` have been handed out. Reading a segment whole needs no such
-  // thing -- `current_sample_index_` walks it in decode order and that is that. A
-  // segment read as it arrives cannot be walked that way: a packager is free to put
-  // one track's data at the end of the `mdat`, and ffmpeg's does, so the sample that
-  // comes first in decode order is sometimes the very last one to arrive. Waiting
-  // for it would mean waiting for the whole segment, which is the one thing this is
-  // all for. So each track is read at its own pace -- earliest decode time among the
-  // samples whose bytes are here -- and this says what is left.
-  //
-  // Empty for a segment read whole, which is also what tells the two apart.
+  // Which of `samples_` have been handed out; empty for a segment read whole. A packager may
+  // put one track's data at the end of the `mdat` (ffmpeg does), so decode order would wait for
+  // the whole segment: each track goes at its own pace instead.
   std::vector<bool> taken_;
 
   RandomRead random_;
@@ -2123,9 +1966,7 @@ class BMFFDemuxer final : public BaseDemuxer {
   // An auxiliary-information offset that addresses nothing in this stream.
   static constexpr size_t NOT_IN_STREAM = static_cast<size_t>(-1);
 
-  // The track whose boxes are currently being parsed. A raw pointer would not
-  // survive `bmff_tracks_` growing, which a nested or malformed `trak` can
-  // cause at any point during parsing.
+  // An index, since a nested or malformed `trak` can grow `bmff_tracks_` at any point.
   auto currentTrack() -> BMFFTrack* {
     return current_track_slot_ < bmff_tracks_.size() ? &bmff_tracks_[current_track_slot_]
                                                      : nullptr;
@@ -2139,9 +1980,7 @@ class BMFFDemuxer final : public BaseDemuxer {
 public:
   BMFFDemuxer() = default;
 
-  // BaseDemuxer::close() only knows about the stream and the public track list;
-  // everything parsed out of the container has to be dropped here or a second
-  // open() on the same demuxer would parse on top of the first one's state.
+  // BaseDemuxer::close() does not know this state; a second open() would parse on top of it.
   void close() override {
     BaseDemuxer::close();
     bmff_tracks_.clear();
@@ -2168,9 +2007,7 @@ public:
     pcm_little_endian_ = false;
     fatal_ = false;
     fragment_mode_ = false;
-    // `random_` reads through whichever of the two it was given, so it is dropped
-    // before them. Releasing `segment_` here only gives up this demuxer's share:
-    // packets already handed out keep theirs.
+    // `random_` reads through both, so it goes first. Handed-out packets keep their segment share.
     random_ = RandomRead();
     segment_.reset();
     parsing_state_ = ParsingState::READING_HEADER;
@@ -2192,10 +2029,8 @@ public:
       applyEditList(t, movie_timescale_);
       if (t.samples.empty()) {
         buildSampleTable(t, stream_size);
-        // A `stbl`'s `saio` addresses the file by offset, and a sample cannot be
-        // matched to a record before there are samples, so a non-fragmented
-        // file's protection is only resolved here. A fragmented one resolved each
-        // `traf` as it was read.
+        // `saio` addresses the file and samples must exist to match, so this waits until here;
+        // a fragmented file resolved each `traf` as it was read.
         applyCryptoScope(t, t.stbl_crypto, t.samples, /*entry_protected=*/true,
                          /*fragment_scope=*/false);
       }
@@ -2203,9 +2038,7 @@ public:
 
     extractMetaItemAttachments(stream_size);
     publishTracks(/*require_samples=*/true);
-    // `fatal_` alone is not a verdict: a file truncated after a complete moov
-    // still yields every track it described. Only the absence of usable tracks
-    // is, and a structural failure explains why there are none.
+    // `fatal_` alone is no verdict: a truncated file still yields every track it described.
     if (tracks_.empty()) {
       return fatal_ ? OM_FORMAT_CORRUPTED : OM_FORMAT_NO_STREAMS;
     }
@@ -2242,26 +2075,9 @@ public:
 
     Packet pkt;
 
-    // Nothing to rewrite, and the bytes are already in memory: the packet shares the
-    // segment instead of getting a copy of it -- one allocation per segment rather
-    // than one per packet, and no memcpy at all. The segment outlives the packet
-    // because both hold the same shared buffer.
-    //
-    // Which payloads qualify is decided by the bitstream filter, not by this branch.
-    // AAC, Opus, FLAC, PCM, VP9 and AV1 are stored as the decoder wants them and take
-    // this path; H.264, HEVC and VVC do not, because their length prefixes have to
-    // become start codes and their parameter sets have to be prepended, so a video
-    // track in MP4 is usually still copied. Audio is where this pays, and it pays
-    // often: a second of AAC is dozens of packets.
-    //
-    // Packet::bytes is a mutable span, so a consumer that writes through it would be
-    // writing into the segment. Nothing in this library does; the one component that
-    // rewrites a payload in place is the bitstream filter, which is exactly the case
-    // excluded here.
-    // While a segment is still arriving this is skipped: appending to it can move
-    // its bytes, and a packet pointing at where they used to be is a dangling one.
-    // The copy below costs one memcpy of an audio packet, which is the only kind
-    // that takes this path and the smallest kind there is.
+    // One allocation per segment instead of per packet, and no memcpy. Filtered payloads (H.264,
+    // HEVC, VVC) cannot take this; audio is where it pays. Consumers must not write through
+    // Packet::bytes. Skipped while a segment arrives: appending can move its bytes.
     if (!bsf && segment_ && !segment_open_ && sample.offset >= 0) {
       const size_t at = static_cast<size_t>(sample.offset);
       if (!random_.view(at, sample.size).empty()) {
@@ -2270,11 +2086,7 @@ public:
       }
     }
 
-    // Otherwise the sample is read straight into the packet's own buffer, behind
-    // space reserved for the keyframe prefix, and converted there. Staging it in a
-    // scratch vector first would mean zero-filling it, reading it, filtering it into
-    // a second vector and copying that into the packet — four passes over a buffer
-    // that can be several megabytes on a 4K keyframe.
+    // Read straight into the packet behind room for the keyframe prefix, and converted there.
     if (!pkt.buffer) {
       pkt.allocate(prefix.size() + sample.size);
       if (!random_.read(sample.offset, pkt.bytes.data() + prefix.size(), sample.size))
@@ -2305,14 +2117,9 @@ public:
     return Ok(std::move(pkt));
   }
 
-  // A protected sample cannot take the path above: its subsample map addresses the
-  // bytes as stored, so anything done to the payload has to be carried into the map
-  // too. Where it cannot be, the payload goes out as stored -- a map that no longer
-  // describes the bytes beside it is worse than no reframing.
-  //
-  // Annex-B conversion is all that is done, and it only widens length prefixes and
-  // prepends parameter sets. Common encryption leaves those prefixes clear, so every
-  // byte inserted is clear; shiftSubsamplesForStartCodes() says when it is not.
+  // The subsample map addresses the bytes as stored, so reframing must carry into it; where it
+  // cannot, the payload goes out as stored. A map not describing its bytes is worse than no
+  // reframing.
   auto readProtectedPacket(const Sample& sample, const BMFFTrack& track)
       -> Result<Packet, OMError> {
     const auto record_index = static_cast<size_t>(sample.crypto);
@@ -2347,10 +2154,7 @@ public:
 
     Packet pkt;
     if (!reframe) {
-      // The payload goes out in the container's own framing, which for a
-      // length-prefixed track is not the Annex-B every other packet of it is in.
-      // Saying so is the only way the caller can tell: it has to decipher first and
-      // reframe after, and nothing else about the packet distinguishes the two.
+      // The only way a caller can tell it must decipher first and reframe after.
       encryption->nal_length_size = track.nal_length_size;
       // Nothing is rewritten, so the packet shares the segment's bytes as the
       // unprotected path does.
@@ -2421,13 +2225,8 @@ public:
     return OM_SUCCESS;
   }
 
-  // --- Segment-at-a-time reading ---------------------------------------------
-  //
-  // The same box parsing, pointed at one segment instead of a whole file. What
-  // the file path builds once -- tracks, `trex` defaults, the sample index -- is
-  // split in two here: the initialization segment settles the tracks for good,
-  // and each media segment contributes a sample index that lives only as long as
-  // that segment does.
+  // The initialization segment settles tracks for good; each media segment contributes a
+  // sample index that lives only as long as it does.
 
   auto openInit(std::span<const uint8_t> init) -> OMError {
     close();
@@ -2474,9 +2273,7 @@ public:
     current_sample_index_ = 0;
 
     if (samples_.empty()) {
-      // A segment that describes no sample is either corrupt or addressed to a
-      // track this reader does not carry. Either way there is nothing to read out
-      // of it, and holding on to its bytes would serve nothing.
+      // Corrupt, or addressed to a track not carried: its bytes serve nothing either way.
       const OMError error = fatal_ ? OM_FORMAT_CORRUPTED : OM_FORMAT_NO_STREAMS;
       dropSegment();
       return error;
@@ -2501,9 +2298,7 @@ public:
       segment_->append(bytes);
       random_ = RandomRead(segment_->view());
     }
-    // A box that cannot be read is not reported here: the samples parsed before it
-    // are still good, and whether anything came of the segment at all is what
-    // endSegment() answers.
+    // Not reported: samples before the box are still good, and endSegment() answers for the rest.
     scanTopLevel(/*final=*/false);
     return OM_SUCCESS;
   }
@@ -2519,9 +2314,8 @@ public:
     segment_open_ = false;
     declared_end_ = 0;
 
-    // A sample whose bytes never arrived -- a download cut short, a `moof` naming
-    // more than the `mdat` held -- is not a sample. One already handed out was
-    // readable by definition, so only what is left can be dropped here.
+    // A download cut short, or a `moof` naming more than the `mdat` held. A sample handed out
+    // was readable by definition, so only what is left can go.
     size_t write = 0;
     for (size_t i = 0; i < samples_.size(); ++i) {
       if (!taken_[i] && !sampleFitsInStream(samples_[i].offset, samples_[i].size,
@@ -2565,10 +2359,7 @@ public:
     const size_t index = nextSampleIndex();
     if (index >= samples_.size()) return 0;
     const Sample& next = samples_[index];
-    // Only what can be read right now counts. In a segment still arriving the
-    // samples named run past the samples whose bytes have got here, and a figure
-    // the caller throttles its downloading on must not include media whose bytes
-    // are what it would be downloading.
+    // A figure the caller throttles downloading on must not count media still being downloaded.
     size_t last_index = samples_.size() - 1;
     while (last_index > index && !sampleAvailable(samples_[last_index])) --last_index;
     const Sample& last = samples_[last_index];
@@ -2598,15 +2389,11 @@ public:
 
 private:
   void dropSegment() {
-    // Every track, not only the published ones. A `trun` addressed to a track that
-    // publishTracks() dropped still appends to it, and nothing else would ever empty
-    // it again -- one segment's worth of samples retained per segment, for as long as
-    // the stream plays.
+    // Every track: a `trun` for one publishTracks() dropped still appends, and nothing else would
+    // empty it, leaking a segment's worth of samples per segment.
     for (BMFFTrack& track : bmff_tracks_) {
       track.samples.clear();
-      // The records are addressed by index from the samples that are going. The
-      // keys stay: `tenc` settled them in the initialization segment, and a key a
-      // 'seig' group introduced is as good for the next segment as for this one.
+      // Keys stay: they outlive the segment, while records index the samples that are going.
       track.crypto.samples.clear();
       track.crypto.subsamples.clear();
     }
@@ -2627,9 +2414,7 @@ private:
     segment_.reset();
   }
 
-  // `publishTracks` stamps each sample with its public index, and it ran back when
-  // the tracks were settled; samples parsed out of a fragment are new and still
-  // unstamped.
+  // publishTracks ran when the tracks were settled, so fragment samples are still unstamped.
   void stampAndMerge() {
     for (const size_t slot : public_to_slot_) {
       BMFFTrack& track = bmff_tracks_[slot];
@@ -2641,12 +2426,8 @@ private:
     if (segment_open_) taken_.resize(samples_.size(), false);
   }
 
-  // What a sample's offset and size are checked against while it is being parsed.
-  // Reading a segment whole that is the segment itself; reading one as it arrives,
-  // a `moof` names samples lying in an `mdat` whose bytes have not turned up yet,
-  // so the bound is how far the boxes seen so far declare the segment to run.
-  // needsSegment() then waits for each sample's own bytes, and endSegment() drops
-  // whatever never came.
+  // While a segment arrives, a `moof` names samples in an `mdat` not here yet, so the bound
+  // is how far the boxes so far declare it to run. endSegment() drops what never came.
   auto sampleBound() const -> size_t {
     return segment_open_ ? std::max(declared_end_, random_.size()) : random_.size();
   }
@@ -2657,9 +2438,6 @@ private:
     return !segment_open_ || sampleFitsInStream(sample.offset, sample.size, random_.size());
   }
 
-  // The sample to hand over next, or `samples_.size()` when there is none to hand
-  // over yet. Decode order for a segment read whole; for one read as it arrives,
-  // the earliest in decode order of those whose bytes are here.
   auto nextSampleIndex() const -> size_t {
     if (taken_.empty()) return current_sample_index_;
 
@@ -2689,11 +2467,8 @@ private:
     }
   }
 
-  // Walks the segment's top-level boxes as far as what has arrived allows. A `moof`
-  // is small and is read whole, but parsed only once the box behind it has said how
-  // far the segment reaches -- which is what its samples' offsets are checked
-  // against. An `mdat` needs nothing but its header: its body is addressed by those
-  // offsets and by nothing else, so there is no reason to wait for it.
+  // A `moof` is parsed once the next box says how far the segment reaches, which bounds its
+  // samples. An `mdat` needs only its header: its body is addressed by those offsets alone.
   void scanTopLevel(bool final) {
     while (!fatal_) {
       const size_t have = random_.size();
@@ -2779,11 +2554,7 @@ private:
     return toNanoseconds(sample.dts, trackTimescale(sample.stream_index));
   }
 
-  // The merged list is sorted by decode time in nanoseconds, so both pivots are
-  // binary searches. `atOrAfter` is where a forward search starts; `after` is
-  // one past the last sample at or before the target, which is where a backward
-  // search starts — keeping them apart is what makes a sample landing exactly
-  // on the target count as the preceding one rather than the following one.
+  // `after` keeps a sample exactly on the target counting as the preceding one.
   struct Pivots {
     size_t at_or_after = 0;
     size_t after = 0;
@@ -2800,9 +2571,7 @@ private:
             static_cast<size_t>(hi - samples_.begin())};
   }
 
-  // Unsynced seek: the nearest sample by decode time, restricted to one track
-  // when asked. Scans outwards from the pivot, which is a bounded walk because
-  // the merged list interleaves the tracks.
+  // A bounded walk, because the merged list interleaves the tracks.
   auto findSample(int64_t target_ns, int32_t stream_idx) -> size_t {
     const Pivots pivots = pivotsFor(target_ns);
     const auto belongs = [&](size_t i) {
@@ -2820,12 +2589,8 @@ private:
     return pickNearest(prev, next, target_ns);
   }
 
-  // Whether a whole-file seek has to land in sync with this track. Every sample
-  // of a sound track is a sync sample, so it can start anywhere and says nothing
-  // about where decoding may begin; the picture is what a seek has to be in step
-  // with. Counting sound in would put a seek on the sample nearest the target
-  // and leave the picture decoding from the middle of a group of pictures --
-  // shown, and broken, until the next keyframe.
+  // Every sound sample is a sync sample and says nothing about where decoding may begin;
+  // counting them left the picture broken until the next keyframe.
   auto constrainsSeek(size_t track) -> bool {
     const BMFFTrack* t = trackForPublicIndex(static_cast<int32_t>(track));
     return t != nullptr && t->track.format.type == OM_MEDIA_VIDEO;
@@ -2838,18 +2603,11 @@ private:
     return false;
   }
 
-  // Synced seek. Keyframes are indexed per track and in ascending order, so the
-  // candidates on either side of the target are two binary searches rather than
-  // a walk back through every sample of every other track.
   auto findKeyframe(int64_t target_ns, int32_t stream_idx, SeekMode mode) -> size_t {
     const Pivots pivots = pivotsFor(target_ns);
 
-    // The keyframe at or before the target, and the one at or after it, across
-    // the tracks in scope. Asked for the file as a whole, the answer has to hold
-    // for every track in scope at once: the earliest of the candidates before
-    // the target, and the latest of those after it, so that none of them is
-    // entered part way through. Asked for one track, the nearest on each side of
-    // the target is what that track wants.
+    // Whole-file seeks must hold for every track in scope: the earliest candidate before the
+    // target and the latest after, so none is entered part way through.
     size_t prev = samples_.size();
     size_t next = samples_.size();
 
@@ -2902,19 +2660,9 @@ private:
     return prev_delta <= next_delta ? prev : next;
   }
 
-  // Assign public indices to the tracks worth exposing, and stamp every sample
-  // with the index its packets will carry. Tracks that are dropped here — no
-  // media type, or no samples — must also drop their samples, or the merge
-  // below would emit packets attributed to a track the caller never saw.
-  //
-  // A recognised media type with no codec id is still published: the caller
-  // needs to know the track is there before it can report it as unsupported.
-  // `require_samples` is what tells a file apart from an initialization segment.
-  // In a file, a track with no samples is a track the reader cannot offer
-  // anything from -- a timecode or reference track, or one whose sample table did
-  // not survive. An initialization segment, on the other hand, describes tracks
-  // whose samples arrive later by definition, and dropping them would leave the
-  // reader with nothing at all.
+  // Dropped tracks must drop their samples, or packets name a track the caller never saw. A
+  // type with no codec is published, so it can be reported unsupported. `require_samples` tells
+  // a file from an initialization segment, whose samples arrive later by definition.
   void publishTracks(bool require_samples) {
     public_to_slot_.clear();
 
@@ -2933,11 +2681,7 @@ private:
       public_to_slot_.push_back(slot);
 
       if (t.samples.empty()) {
-        // Reachable only for an initialization segment, since a file drops such a
-        // track above. Everything below is measured off the samples, and there are
-        // none yet.
-        // `mdhd` and `tkhd` already gave the duration, and the timeline starts
-        // wherever the first fragment says it does.
+        // Initialization segment only: there are no samples to measure yet.
         t.track.duration = t.track_duration;
         tracks_.push_back(t.track);
         continue;
@@ -2964,15 +2708,8 @@ private:
     }
   }
 
-  // Merge the per-track sample lists in decode order.
-  //
-  // Merging by file offset instead just replays however the file happens to
-  // be laid out, and a file may not be interleaved at all: this one stores
-  // 1500 video samples before its first audio sample. A reader that follows
-  // that order hands a player a minute and a half of video before any sound,
-  // which no amount of queueing downstream can absorb. Ordering by timestamp
-  // costs nothing here — the samples are addressed by offset anyway — and
-  // gives the same interleaving whatever the file looks like.
+  // By timestamp, not file offset: a file may store 1500 video samples before its first audio
+  // one, and a player would get a minute and a half of video before any sound.
   void mergeSamplesByDecodeTime() {
     using Iter = std::vector<Sample>::iterator;
     struct Run {
@@ -2986,10 +2723,7 @@ private:
 
     for (const size_t slot : public_to_slot_) {
       auto& t = bmff_tracks_[slot];
-      // A track with nothing in this pass is not a run. Over a whole file that
-      // never happens, since a track without samples is not published at all;
-      // over one segment of a DASH representation it is the normal case, because
-      // the other tracks live in other segments entirely.
+      // Normal in one DASH segment, whose other tracks live in other segments.
       if (t.samples.empty()) continue;
       total_samples += t.samples.size();
       runs.push_back({t.samples.begin(), t.samples.end(),
@@ -3013,21 +2747,15 @@ private:
       if (++best->cur == best->end) runs.erase(best);
     }
 
-    // The merged list is the only one read from here on; the per-track copies would
-    // otherwise double the demuxer's resident size for the whole session. Reading a
-    // file this happens once, so the memory is handed back; reading segments it
-    // happens for every one of them, and freeing a buffer that the next segment will
-    // immediately ask for again is churn rather than thrift.
+    // Per-track copies would double the resident size. Reading segments this repeats, and
+    // freeing what the next one asks for again is churn.
     for (const size_t slot : public_to_slot_) {
       bmff_tracks_[slot].samples.clear();
       if (!fragment_mode_) bmff_tracks_[slot].samples.shrink_to_fit();
     }
   }
 
-  // Fallback for filters that cannot rewrite a payload where it lies, which
-  // for Annex-B means NAL length prefixes narrower than the 4-byte start codes
-  // replacing them. Reallocates `pkt` around the converted payload, preserving
-  // the reserved prefix space. False when the payload could not be converted.
+  // For NAL length prefixes narrower than the 4-byte start codes replacing them.
   static auto reframeOutOfPlace(Packet& pkt, const BitStreamFilter& bsf,
                                 size_t prefix_size) -> bool {
     const std::span<const uint8_t> payload = pkt.bytes.subspan(prefix_size);
@@ -3053,17 +2781,11 @@ private:
     }
   }
 
-  // READY is set once open() has a usable sample table; every entry point
-  // refuses to run before that. Failures are reported through open()'s return
-  // value rather than parked in a state nobody reads back.
   enum class ParsingState { READING_HEADER, READY };
   ParsingState parsing_state_ = ParsingState::READING_HEADER;
 
-  // The body of a leaf box. Over memory the span points straight into it and
-  // `storage` is never touched; over a stream the bytes are read into `storage`,
-  // which belongs to the caller so that no two bodies can share one scratch buffer.
-  // A short read is fatal for parsing, but the caller keeps whatever it had already
-  // decoded.
+  // `storage` belongs to the caller so no two bodies share a scratch buffer. A short read is
+  // fatal for parsing, but the caller keeps what it already decoded.
   auto readBoxBody(size_t pos, size_t n, std::vector<uint8_t>& storage)
       -> std::span<const uint8_t> {
     if (n > random_.size() || pos > random_.size() - n) {
@@ -3179,19 +2901,14 @@ private:
 
     if (flags & 0x000001u) {
       const uint64_t declared = r.u64be();
-      // In a whole file this is an offset into that file and is simply correct.
-      // In a segment read on its own it is an offset into the presentation the
-      // segment was cut out of, which addresses nothing here -- so take it only
-      // when it happens to land inside the segment, and otherwise fall back to
-      // the `moof`, which is what every DASH packager means anyway.
+      // In a lone segment this is an offset into the presentation it was cut from, addressing
+      // nothing here; the `moof` is what every DASH packager means.
       if (!fragment_mode_ || declared < random_.size()) {
         fragment.base_data_offset = declared;
       }
     }
     if (flags & 0x000002u) {
-      // Which `stsd` entry the fragment's samples were written against, and so
-      // whether they are protected at all: a stream's clear lead points at an
-      // unprotected entry while the rest of it points at the `encv`/`enca` one.
+      // A stream's clear lead points at an unprotected entry, the rest at `encv`/`enca`.
       fragment.sample_description_index = r.u32be();
     }
     if (flags & 0x000008u) {
@@ -3203,9 +2920,6 @@ private:
     if (flags & 0x000020u) {
       fragment.default_sample_flags = r.u32be();
     }
-    // Without base-data-offset-present the base is the enclosing moof, which is
-    // what `fragment` was initialised to — default-base-is-moof (0x020000) only
-    // makes that explicit and needs no separate branch.
   }
 
   void parseTfdt(std::span<const uint8_t> body) {
@@ -3246,9 +2960,7 @@ private:
 
     int64_t sample_offset = static_cast<int64_t>(current_fragment_->base_data_offset) +
                             static_cast<int64_t>(data_offset);
-    // A fragment without `tfdt` continues from where the previous one ended. In
-    // a whole file that is the last sample parsed; read a segment at a time and
-    // those samples are already gone, so the track carries the figure forward.
+    // Read a segment at a time, the previous fragment's samples are gone, so the track carries it.
     const int64_t continued_dts =
         !track->samples.empty()
             ? (track->samples.back().dts + static_cast<int64_t>(track->samples.back().duration))
@@ -3257,17 +2969,12 @@ private:
         ? (current_fragment_->decode_time - getEditListStartDts(*track, movie_timescale_))
         : continued_dts;
 
-    // Where this fragment's samples begin, for the crypto records to be matched
-    // against once the whole `traf` has been read. Taken at the first `trun`,
-    // since nothing before it can have added a sample.
     if (current_fragment_->sample_count == 0) {
       current_fragment_->first_sample = track->samples.size();
     }
     const bool crypto = track->hasCrypto();
 
-    // sample_count is a 32-bit field from the file; the loop is bounded by the
-    // box body instead, so a corrupt count cannot push millions of zero-sized
-    // samples into the track.
+    // Bounded by the box body, so a corrupt count cannot push millions of empty samples.
     const size_t stream_size = sampleBound();
     for (uint32_t i = 0; i < sample_count && r.ok(); ++i) {
       const uint32_t duration = (flags & 0x000100u)
@@ -3320,19 +3027,14 @@ private:
 
   // --- Common encryption ------------------------------------------------------
 
-  // Where a per-sample protection box's contents belong: the open `traf`'s scope,
-  // or the current track's `stbl` when a file states them there instead. Null
-  // when neither is open, which is a box somewhere it has no meaning.
+  // Null when neither is open: a box somewhere it has no meaning.
   auto cryptoScope() -> CryptoScope* {
     if (current_fragment_) return &current_fragment_->crypto;
     BMFFTrack* track = currentTrack();
     return track ? &track->stbl_crypto : nullptr;
   }
 
-  // SampleToGroupBox. Two grouping types matter: 'rap '/'sync' name random access
-  // points for seeking, and 'seig' names the key each run of samples is protected
-  // with. The box appears in `stbl`, numbering the track's samples, and in `traf`,
-  // numbering that fragment's.
+  // 'rap '/'sync' name random access points, 'seig' the key per run of samples.
   void parseSampleToGroup(std::span<const uint8_t> body) {
     if (body.size() < 8) return;
     const uint32_t grouping_type = load_u32(body.data() + 4);
@@ -3347,14 +3049,8 @@ private:
     if (BMFFTrack* track = currentTrack()) parseSbgp(body, *track);
   }
 
-  // ProtectionSystemSpecificHeaderBox, ISO/IEC 23001-7 section 8.1. Kept whole,
-  // because the box as it stands is the initialization data a DRM system wants:
-  // it is what EME calls "cenc" init data, and what a Widevine CDM is handed to
-  // generate a licence request.
+  // Kept whole: the box is what EME calls "cenc" init data, and what a CDM is handed.
   void collectPssh(size_t box_start, size_t box_end) {
-    // A header carries a key id list and a system-specific blob; a few kilobytes
-    // is already generous, and anything beyond that is not a header worth
-    // believing.
     constexpr size_t MAX_PSSH_SIZE = 64u * 1024;
     // Box header, version and flags, the system id, and a length.
     constexpr size_t MIN_PSSH_SIZE = 8 + 4 + 16 + 4;
@@ -3413,11 +3109,8 @@ private:
                      /*fragment_scope=*/true);
   }
 
-  // Turns one scope's protection boxes into per-sample records. On entry each of
-  // `samples` carries its number within the scope in Sample::crypto; on exit, the
-  // index of its record in the track's list, or -1 for a sample needing no key.
-  // Deferred to here because the boxes arrive in any order, and in a `traf` after
-  // the `trun`s.
+  // On entry Sample::crypto holds a number within the scope; on exit a record index or -1.
+  // Deferred because the boxes arrive in any order, in a `traf` after the `trun`s.
   void applyCryptoScope(BMFFTrack& track, const CryptoScope& scope,
                         std::span<Sample> samples, bool entry_protected,
                         bool fragment_scope) {
@@ -3433,9 +3126,7 @@ private:
     // By value: interning a 'seig' key may reallocate the list this came out of.
     const CencKey fallback = track.crypto.keys.front();
 
-    // Indices above 0x10000 name a description in the enclosing `traf`, counting from
-    // 0x10001; the rest name one in `stbl`, counting from 1 (ISO/IEC 14496-12
-    // 8.9.2.3). Index 0 means no group, leaving the `tenc` default standing.
+    // 8.9.2.3: above 0x10000 a description in the `traf`, else in `stbl`; 0 leaves `tenc`.
     const auto& track_groups = track.stbl_crypto.group_keys;
     const auto resolveGroup = [&](uint32_t group) -> const CencKey* {
       if (group == 0) return &fallback;
@@ -3449,12 +3140,8 @@ private:
       return index < list.size() ? &list[index] : nullptr;
     };
 
-    // One key index per sample, expanded from the runs because every record below
-    // needs its key to read its own initialization vector.
-    //
-    // A run's sample count comes straight out of the file, so the expansion is bounded
-    // by how many records the scope could describe: a `senc` record is never shorter
-    // than two bytes, and `saiz` cannot name more samples than the stream has bytes.
+    // Bounded by how many records the scope could describe: a run's count is straight from the
+    // file, a `senc` record is at least two bytes, and `saiz` cannot exceed the stream.
     const size_t limit = std::max(
         samples.size(), scope.senc.empty()
                             ? std::min<size_t>(scope.aux_sample_count, random_.size())
@@ -3481,10 +3168,8 @@ private:
     }
 
     if (records.empty()) {
-      // Nothing per-sample, so the samples are protected end to end with the key's
-      // constant initialization vector -- how `cbcs` audio is usually packaged. With
-      // no vector at all a decryptor could do nothing with them, so they go out as
-      // the clear samples they look like.
+      // End-to-end with the key's constant IV, how `cbcs` audio is usually packaged. With no IV a
+      // decryptor could do nothing, so they go out as the clear samples they look like.
       CencSample whole;
       memcpy(whole.iv, fallback.constant_iv, fallback.constant_iv_size);
       whole.iv_size = fallback.constant_iv_size;
@@ -3542,10 +3227,8 @@ private:
     }
   }
 
-  // The same records where a container states them outside a `senc`: `saiz` gives each
-  // one's length, `saio` where they are. The length is also the only thing saying
-  // whether a record carries a subsample map -- one no longer than the initialization
-  // vector cannot, and an empty one marks a clear sample.
+  // The length also says whether a record has a subsample map: one no longer than the IV
+  // cannot, and an empty one marks a clear sample.
   void readAuxInfo(const CryptoScope& scope, const SampleKeys& keys,
                    std::vector<CencSample>& records,
                    std::vector<SubsampleEntry>& subsamples) {
@@ -3588,13 +3271,8 @@ private:
     }
   }
 
-  // `saio` positions the auxiliary records in the file. Read a segment on its own and
-  // a file offset addresses nothing, exactly as with a `tfhd` base data offset, so the
-  // enclosing `moof` is the fallback.
-  //
-  // Only the first offset is used. A box with one per chunk or `trun` is read the same
-  // way, which is right wherever the records are stored back to back -- and they are,
-  // in everything that writes more than one.
+  // A file offset addresses nothing in a lone segment, so the `moof` is the fallback. One
+  // offset suffices: records are stored back to back in everything writing more than one.
   auto auxInfoOffset(uint64_t offset, size_t length) const -> size_t {
     const size_t stream_size = random_.size();
     if (offset <= stream_size && length <= stream_size - offset) {
@@ -3694,11 +3372,8 @@ private:
         return;
       }
       case ATOM('m', 'e', 't', 'a'): {
-        // ISO's `meta` is a FullBox; QuickTime's is not, and the two are told
-        // apart by what follows. A FullBox starts with four version/flags bytes
-        // and only then the first child, so reading a box header right at the
-        // start and finding a plausible type there means there was no FullBox
-        // header to skip.
+        // ISO's `meta` is a FullBox, QuickTime's is not: a plausible box type right at the start
+        // means there was no FullBox header to skip.
         size_t children = pos + 4;
         uint8_t head[8];
         if (size >= 8 && random_.read(pos, head, 8) &&
@@ -3759,9 +3434,7 @@ private:
       return;
     }
 
-    // Common encryption's per-sample boxes. A `traf` is their usual home, and no
-    // `trak` is open while one is being read, so they are taken before the
-    // per-track dispatch below rather than within it.
+    // Before the per-track dispatch: no `trak` is open while a `traf` is being read.
     if (type == ATOM('s', 'e', 'n', 'c') || type == ATOM('s', 'a', 'i', 'z') ||
         type == ATOM('s', 'a', 'i', 'o') || type == ATOM('s', 'g', 'p', 'd')) {
       if (CryptoScope* scope = cryptoScope()) {
@@ -3839,9 +3512,6 @@ private:
       case ATOM('d', 'e', 'c', '3'): parseDec3(body, track); break;
       case ATOM('d', 'd', 't', 's'): parseDdts(body, track); break;
 
-      // esds appears under both mp4a and mp4v entries; only the audio form
-      // carries an AudioSpecificConfig, so the entry kind decides how the
-      // DecoderSpecificInfo is read.
       case ATOM('e', 's', 'd', 's'):
         if (current_entry_kind_ == SampleEntryKind::Mp4aAudio ||
             current_entry_kind_ == SampleEntryKind::Mpeg4Video) {
@@ -3862,9 +3532,7 @@ private:
 
       case ATOM('d', 'f', 'L', 'a'): parseDfla(body, track); break;
 
-      // Which cipher the samples were encrypted with. Decrypting is the caller's,
-      // since only it can hold a key; what this demuxer owes it is the scheme, the
-      // key id, and per sample the initialization vector and the covered ranges.
+      // Decrypting is the caller's; this demuxer owes it the scheme, key id, IVs and ranges.
       case ATOM('s', 'c', 'h', 'm'):
         if (body.size() >= 8) {
           track.track.metadata.setBool(ENCRYPTED, true);
@@ -3891,11 +3559,8 @@ private:
     }
   }
 
-  // Sample descriptions for one track. Only the first usable entry is applied:
-  // later entries would otherwise overwrite the codec configuration of the one
-  // the samples were actually written against, and choosing per sample would
-  // mean honouring stsc's sample_description_index, which nothing downstream
-  // can express yet.
+  // Only the first usable entry: choosing per sample needs stsc's description index, which
+  // nothing downstream can express yet.
   void parseStsd(size_t pos, uint64_t size) {
     if (fatal_) return;
 
@@ -3940,9 +3605,7 @@ private:
       // sits in, leaves no way to find the next one.
       if (entry_size < 8 || entry_size > stsd_end - entry_pos) return;
 
-      // Noted for every description, not only the one describing the track: a
-      // fragment pointing at an unprotected entry carries plaintext however the rest
-      // of the track is packaged, which is how a clear lead is written.
+      // For every description: a fragment pointing at an unprotected one carries plaintext.
       if (BMFFTrack* track = currentTrack()) {
         track->protected_entries.push_back(isEncryptedEntry(fmt) ? 1u : 0u);
       }
@@ -4168,9 +3831,7 @@ private:
   auto parseSampleEntry(uint32_t fmt, size_t entry_pos, size_t entry_end, Track& st) -> bool {
     const size_t entry_body = entry_pos + 8;
 
-    // Where the codec-specific child boxes start, past the fixed sample-entry
-    // fields: 8-byte box header + 28 for AudioSampleEntry, + 78 for
-    // VisualSampleEntry.
+    // Fixed sample-entry fields before the child boxes: box header + 28 audio, + 78 video.
     constexpr size_t AUDIO_ENTRY_HEADER = 8 + 28;
     constexpr size_t VISUAL_ENTRY_HEADER = 8 + 78;
 
@@ -4223,9 +3884,7 @@ private:
     }
     if (isPcmVariant(fmt)) return parsePcmSampleEntry(fmt, entry_pos, entry_end, st);
 
-    // A protected entry names its real codec only in `sinf/frma`. Re-reading it under
-    // that four-CC gives the caller a fully described track it can refuse for want of
-    // a decryption layer, rather than an unidentified one.
+    // Re-read under its real codec so the caller can refuse a fully described track.
     if (isEncryptedEntry(fmt)) {
       st.metadata.setBool(ENCRYPTED, true);
       const bool is_audio = fmt == ATOM('e', 'n', 'c', 'a');
@@ -4297,9 +3956,7 @@ private:
     return false; // unrecognised four-CC: try the next entry
   }
 
-  // Tags found under `moov/udta` describe the file; the same boxes under
-  // `moov/trak/udta` describe that one track. Which one is being parsed is
-  // already known from whether a `trak` is open.
+  // Under `moov/udta` tags describe the file; under `moov/trak/udta`, that track.
   auto targetMetadata() -> Dictionary& {
     BMFFTrack* track = currentTrack();
     return track ? track->track.metadata : metadata_;
@@ -4359,9 +4016,7 @@ private:
         dict.setBool(COMPILATION, readBigEndianInt(value, false) != 0);
         return;
       case ATOM('g', 'n', 'r', 'e'): {
-        // The numeric form, one past the ID3v1 index. A file may carry both
-        // this and a textual `©gen`; the text is the better answer, so it is
-        // not overwritten here.
+        // One past the ID3v1 index. A textual `©gen` is the better answer, so it is not overwritten.
         const int64_t index = readBigEndianInt(value, false);
         if (index <= 0 || dict.contains(GENRE)) return;
         if (const auto name = id3v1GenreName(static_cast<size_t>(index - 1)); !name.empty()) {
@@ -4511,9 +4166,6 @@ private:
     }
   }
 
-  // Descend into a sample entry's codec-configuration boxes, remembering which
-  // kind of entry they belong to so boxes shared between media types, such as
-  // `esds`, are read the right way.
   void parseChildBoxes(size_t start, size_t end, SampleEntryKind kind) {
     if (start >= end) return;
     const SampleEntryKind saved = current_entry_kind_;
@@ -4523,12 +4175,8 @@ private:
   }
 
   auto parseAudioSampleEntry(size_t body_start, Track& track) -> bool {
-    // AudioSampleEntry layout (from body_start):
-    //   6 bytes reserved + 2 bytes data_ref_index  → skip 8
-    //   4 bytes reserved + 4 bytes reserved          → skip 8
-    //   After those 16 bytes: channel_count (2), sample_size (2),
-    //                          compression_id (2), packet_size (2)
-    //                          sample_rate (4, 16.16 fixed-point)
+    // After 16 reserved bytes: channel_count(2), sample_size(2), compression_id(2),
+    // packet_size(2), sample_rate(4, 16.16).
     uint8_t buf[12];
     if (!random_.read(body_start + 16, buf, 12)) return false;
 
@@ -4549,9 +4197,7 @@ private:
   }
 
   auto parseVisualSampleEntry(size_t body_start, Track& track) -> bool {
-    // VisualSampleEntry layout from body_start:
-    //   6 reserved + 2 data_ref_index + 16 pre_defined/reserved = 24 bytes
-    //   Then: width (2), height (2)
+    // 24 reserved bytes, then width(2), height(2).
     uint8_t vis[4];
     if (!random_.read(body_start + 24, vis, 4)) return false;
 
@@ -4571,10 +4217,8 @@ private:
   }
 };
 
-// The same demuxer, offered through the narrow interface a segment-at-a-time
-// caller needs. Wrapping rather than inheriting keeps `Demuxer` and this out of
-// each other's way: one is opened on a stream and seeks within it, the other is
-// handed segments and has no stream at all.
+// Wrapped rather than inherited: one is opened on a stream and seeks, the other is handed
+// segments and has no stream at all.
 class FragmentReader final : public SegmentReader {
   BMFFDemuxer demuxer_;
 

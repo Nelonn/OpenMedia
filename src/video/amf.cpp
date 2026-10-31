@@ -44,9 +44,7 @@
 namespace openmedia {
 namespace {
 
-// The runtime ships with the display driver and stays loaded for the process:
-// the factory owns every context and component made through it, so there is no
-// later point at which unloading it would be safe.
+// Stays loaded: the factory owns every context made through it, so unloading is never safe.
 auto amfFactory() -> amf::AMFFactory* {
   struct Runtime {
     amf::AMFFactory* factory = nullptr;
@@ -129,9 +127,7 @@ void copyRows(uint8_t* dst, size_t dst_stride, const uint8_t* src, size_t src_st
   for (size_t row = 0; row < rows; ++row) std::memcpy(dst + row * dst_stride, src + row * src_stride, row_bytes);
 }
 
-// AMF states its colour enums as the ISO/IEC 23001-8 code points the bitstream
-// itself carries, so they go through the same tables as every demuxer and parser
-// rather than through a mapping of their own.
+// AMF's colour enums are the ISO/IEC 23001-8 code points, so they share the demuxers' tables.
 void readColorDescription(amf::AMFSurface& surface, Picture& picture) {
   amf_int64 value = 0;
   if (surface.GetProperty(AMF_VIDEO_COLOR_PRIMARIES, &value) == AMF_OK) {
@@ -243,10 +239,8 @@ struct BoundContext {
   explicit operator bool() const { return context != nullptr; }
 };
 
-// A context binds to one device and cannot be re-bound, so a device AMF will not
-// take is answered with a fresh context on a device of its own. Letting AMF make
-// that device rather than making one here is what keeps it on the AMD GPU of a
-// machine that has more than one adapter.
+// A context binds to one device, so a refused device means a fresh context. AMF makes that
+// device itself, which keeps it on the AMD GPU of a multi-adapter machine.
 auto createContext(const std::optional<HWDevice>& hw_device) -> BoundContext {
   amf::AMFFactory* factory = amfFactory();
   if (!factory) return {};
@@ -286,9 +280,8 @@ class AMFDecoder final : public Decoder, private DecodeReport {
   uint32_t height_ = 0;
   bool initialized_ = false;
 
-  // AMF answers nothing when asked what colour it decoded, so for H.26x the
-  // description is taken from the bitstream instead. The parser is only here
-  // until a sequence parameter set turns up, since neither is small.
+  // AMF does not report the decoded colour, so H.26x reads it from the bitstream. Parsers are
+  // only kept until an SPS turns up: neither is small.
   std::unique_ptr<dx_h264::State> h264_parser_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_parser_;
   uint8_t bit_depth_ = 0;
@@ -441,9 +434,7 @@ private:
     decoder_->SetProperty(AMF_VIDEO_DECODER_EXTRADATA, static_cast<amf::AMFInterface*>(buffer));
   }
 
-  // The decoder refuses input while its queue is full or all of its surfaces are
-  // out, and the only way on from either is to take the pictures it has ready and
-  // offer the same packet again.
+  // A full queue or no free surface: take what is ready and offer the same packet again.
   auto submit(const Packet& packet, std::vector<Frame>& frames) -> OMError {
     amf::AMFBufferPtr buffer;
     if (context_->AllocBuffer(amf::AMF_MEMORY_HOST, packet.bytes.size(), &buffer) != AMF_OK || !buffer)
@@ -538,10 +529,8 @@ private:
 
 namespace {
 
-// Every encoder property is named after its codec -- AVC's "FrameSize" is
-// "HevcFrameSize" and "Av1FrameSize" elsewhere -- and a component ignores a name
-// it does not know without complaining, so a mix-up shows up not as an error but
-// as an encode that quietly keeps the driver's defaults.
+// A component ignores names it does not know without complaining, so a mix-up here quietly
+// keeps the driver's defaults.
 struct EncoderIds {
   const wchar_t* component;
   const wchar_t* frame_size;
@@ -549,9 +538,7 @@ struct EncoderIds {
   const wchar_t* usage;
   amf_int64 usage_transcoding;
   amf_int64 usage_low_latency;
-  // Where the other encoders have a range, AMF has four steps, and their
-  // values are per codec too: AVC numbers them 0-3 from balanced, HEVC and AV1
-  // count up from the best quality.
+  // Four steps, numbered per codec: AVC 0-3 from balanced, HEVC and AV1 up from best quality.
   const wchar_t* quality_preset;
   amf_int64 preset_speed;
   amf_int64 preset_balanced;
@@ -768,10 +755,8 @@ public:
       return OM_CODEC_HWACCEL_FAILED;
 
     const Rational framerate = options.format.video.framerate;
-    // Usage is the coarse switch -- it rewrites every other encoder property
-    // from its own defaults -- so it is set first and everything else after.
-    // Low latency is what holds the encoder to a frame out per frame in, which
-    // is what makes the quality preset below safe to raise for a sender.
+    // Usage rewrites every other property from its defaults, so it is set first. Low latency
+    // holds to a frame out per frame in, making the quality preset safe to raise.
     encoder_->SetProperty(ids_->usage, options.extra.getBool("low_latency", false)
                                            ? ids_->usage_low_latency
                                            : ids_->usage_transcoding);
@@ -886,10 +871,8 @@ private:
     initialized_ = false;
   }
 
-  // Four steps take the 1-7 scale in pairs, with the top step on its own.
-  // HIGH_QUALITY is newer than the other three and a driver without it refuses
-  // the property, which would quietly leave the encoder on whatever the usage
-  // chose, so that one step falls back to QUALITY rather than to nothing.
+  // A driver without HIGH_QUALITY refuses the property and would keep the usage's choice, so
+  // that step falls back to QUALITY.
   void applyQualityPreset(std::optional<int32_t> preset) {
     if (!preset) return;
     const amf_int64 step = *preset <= 2   ? ids_->preset_speed

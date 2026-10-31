@@ -45,7 +45,6 @@ public:
       return OM_IO_INVALID_STREAM;
     }
 
-    // Check PNG signature (8 bytes)
     uint8_t signature[8];
     if (input_->read(signature) < 8) {
       return OM_IO_NOT_ENOUGH_DATA;
@@ -58,7 +57,6 @@ public:
 
     data_start_ = 8;
 
-    // Parse IHDR chunk
     uint8_t chunk_header[8];
     if (input_->read(chunk_header) < 8) {
       return OM_IO_NOT_ENOUGH_DATA;
@@ -76,7 +74,6 @@ public:
     // Calculate data size (from after IHDR to IEND)
     data_size_ = input_->size() - input_->tell();
 
-    // Create track
     Track track;
     track.index = 0;
     track.format.type = OM_MEDIA_IMAGE;
