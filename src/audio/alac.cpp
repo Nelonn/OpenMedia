@@ -248,6 +248,8 @@ public:
   }
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
+    if (packet.bytes.empty()) return Ok(std::vector<Frame> {});
+
     BitBuffer bits;
     BitBufferInit(&bits, packet.bytes.data(), static_cast<uint32_t>(packet.bytes.size()));
 

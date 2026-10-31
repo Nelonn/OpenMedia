@@ -113,6 +113,9 @@ public:
   }
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
+    // To libopus no data means a lost packet, which it conceals with invented audio.
+    if (packet.bytes.empty()) return Ok(std::vector<Frame> {});
+
     if (isHeadMagic(packet.bytes)) {
       OMError err = handleHead(packet.bytes);
       if (err != OM_SUCCESS) {

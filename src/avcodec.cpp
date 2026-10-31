@@ -236,22 +236,29 @@ public:
 
     std::vector<Frame> frames;
 
-    auto pkt_data = packet.bytes;
-    int ret = codec_loader.av_new_packet(packet_.get(), static_cast<int>(pkt_data.size()));
-    if (ret < 0) {
-      return Err(avErrorToOmError(ret));
-    }
-    memcpy(packet_->data, pkt_data.data(), pkt_data.size());
-    packet_->pts = packet.pts;
-    packet_->dts = packet.dts;
-    packet_->stream_index = packet.stream_index;
+    int ret = 0;
+    if (packet.bytes.empty()) {
+      // An empty AVPacket is rejected; only a null one starts the drain, without which
+      // the pictures still held for reordering are lost at the end of the stream.
+      ret = codec_loader.avcodec_send_packet(codec_ctx_.get(), nullptr);
+      if (ret < 0 && ret != AVERROR_EOF) return Err(avErrorToOmError(ret));
+    } else {
+      auto pkt_data = packet.bytes;
+      ret = codec_loader.av_new_packet(packet_.get(), static_cast<int>(pkt_data.size()));
+      if (ret < 0) {
+        return Err(avErrorToOmError(ret));
+      }
+      memcpy(packet_->data, pkt_data.data(), pkt_data.size());
+      packet_->pts = packet.pts;
+      packet_->dts = packet.dts;
+      packet_->stream_index = packet.stream_index;
 
-    ret = codec_loader.avcodec_send_packet(codec_ctx_.get(), packet_.get());
-    if (ret < 0) {
+      ret = codec_loader.avcodec_send_packet(codec_ctx_.get(), packet_.get());
       codec_loader.av_packet_unref(packet_.get());
-      return Err(avErrorToOmError(ret));
+      if (ret < 0) {
+        return Err(avErrorToOmError(ret));
+      }
     }
-    codec_loader.av_packet_unref(packet_.get());
 
     while (true) {
       int ret = codec_loader.avcodec_receive_frame(codec_ctx_.get(), frame_.get());

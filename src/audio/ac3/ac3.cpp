@@ -106,6 +106,8 @@ public:
   }
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
+    if (packet.bytes.empty()) return Ok(std::vector<Frame> {});
+
     splitPrograms(packet.bytes);
     if (programs_.empty()) return Err(OM_CODEC_DECODE_FAILED);
 

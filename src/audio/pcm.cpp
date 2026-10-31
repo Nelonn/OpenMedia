@@ -150,7 +150,7 @@ public:
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
     if (packet.bytes.empty()) {
-      return Err(OM_CODEC_DECODE_FAILED);
+      return Ok(std::vector<Frame> {});
     }
 
     size_t bps = getBytesPerSample(format_.sample_format);
