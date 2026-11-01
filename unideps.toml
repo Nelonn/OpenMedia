@@ -7,7 +7,7 @@ git = "https://github.com/KhronosGroup/Vulkan-Headers"
 commit = "f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8"
 strategy = "cmake-install"
 import_name = "VulkanHeaders"
-enabled_if = "OPENMEDIA_VULKAN_VIDEO"
+enabled_if = "OPENMEDIA_VULKAN_VIDEO || OPENMEDIA_AMF"
 header_only = true
 
 [dependencies.zlib]
