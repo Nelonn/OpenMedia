@@ -4,7 +4,9 @@
 #include <openmedia/hw_dx11.h>
 #include <openmedia/hw_dx12.h>
 #endif
+#if defined(OPENMEDIA_VULKAN_VIDEO)
 #include <openmedia/hw_vulkan.h>
+#endif
 #include <openmedia/video.hpp>
 
 namespace openmedia {
