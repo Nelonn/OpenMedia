@@ -743,7 +743,15 @@ public:
     if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, nullptr, &output_info, &activates, &count)) || count == 0) {
       return OM_CODEC_NOT_FOUND;
     }
-    HRESULT activate_hr = activates[0]->ActivateObject(IID_PPV_ARGS(&encoder_));
+    // The first hardware encoder listed is not always one that works: a GPU
+    // that was removed or whose driver is half-installed can leave its MFT
+    // registered, and activating it fails (an AMD one with E_OUTOFMEMORY next
+    // to a working NVIDIA one, seen in the wild). Take the first that activates.
+    HRESULT activate_hr = E_FAIL;
+    for (UINT32 i = 0; i < count && !encoder_; ++i) {
+      activate_hr = activates[i]->ActivateObject(IID_PPV_ARGS(&encoder_));
+      if (FAILED(activate_hr)) encoder_.Reset();
+    }
     for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
     CoTaskMemFree(activates);
     if (FAILED(activate_hr) || !encoder_) return OM_CODEC_OPEN_FAILED;
