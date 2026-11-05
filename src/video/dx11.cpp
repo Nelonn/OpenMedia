@@ -1938,7 +1938,19 @@ private:
       pp.film_grain.cr_offset = static_cast<SHORT>(fg.cr_offset);
     }
 
-    pp.StatusReportFeedbackNumber = feedback_++;
+    // StatusReportFeedbackNumber stays 0: nothing here reads status reports, and
+    // NVIDIA's driver crashes in SubmitDecoderBuffers a couple dozen frames in
+    // when it is set (FFmpeg leaves it unset for the same reason).
+  }
+
+  // The sequence header only bounds the size (NVENC writes 1088 for 1080p and
+  // codes 1080); the picture handed out is the frame's own, upscaled width.
+  void setAV1OutputSize(const video_parser::AV1FrameHeader& h) {
+    if (h.upscaled_width == 0 || h.frame_height == 0) return;
+    width_ = std::min(h.upscaled_width, padded_width_);
+    height_ = std::min(h.frame_height, padded_height_);
+    output_format_.width = width_;
+    output_format_.height = height_;
   }
 
   auto decodeAV1(const Packet& packet) -> Result<std::vector<Frame>, OMError> {
@@ -1956,6 +1968,7 @@ private:
                                  ? av1_ref_slot_[h.frame_to_show_map_idx]
                                  : -1;
         if (slot < 0) continue;
+        setAV1OutputSize(h);
         if (auto pic = download(static_cast<uint32_t>(slot))) {
           Frame frame = {};
           frame.pts = packet.pts;
@@ -2016,6 +2029,11 @@ private:
           memcpy(dst + off, t.data, t.size);
           off += t.size;
         }
+        // Zero the bitstream out to a 128-byte boundary, as FFmpeg does, so the
+        // decoder never reads a bigger earlier frame's leftovers past the last tile.
+        const size_t padding = std::min<size_t>(128 - (total & 127), buffer_size - total);
+        memset(dst + total, 0, padding);
+        total += padding;
       }
       video_context_->ReleaseDecoderBuffer(decoder_.Get(), D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
 
@@ -2047,6 +2065,7 @@ private:
         if (refresh & (1u << i)) av1_ref_slot_[i] = static_cast<int32_t>(slot);
 
       if (h.show_frame) {
+        setAV1OutputSize(h);
         auto pic = download(slot);
         if (!pic.has_value()) return Err(OM_CODEC_DECODE_FAILED);
         Frame frame = {};
