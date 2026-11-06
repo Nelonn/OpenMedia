@@ -11,6 +11,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <d3d11.h>
 #include <dxva.h>
 #endif
 
@@ -460,6 +461,58 @@ inline void fillPicParams(const Sps& sps,
   pic.IdrPicFlag = isIdr(frame.nal_unit_type) ? 1 : 0;
   pic.IntraPicFlag = isIrap(frame.nal_unit_type) ? 1 : 0;
   pic.StatusReportFeedbackNumber = feedback == 0 ? 1 : feedback;
+}
+
+// The RExt profiles (4:2:2, 4:4:4) read the picture parameters in this larger form.
+inline void fillRangeExtParams(const Sps& sps, const Pps& pps, const DXVA_PicParams_HEVC& base,
+                               DXVA_PicParams_HEVC_RangeExt& ext) {
+  ext = {};
+  ext.params = base;
+  ext.transform_skip_rotation_enabled_flag = sps.transform_skip_rotation_enabled_flag;
+  ext.transform_skip_context_enabled_flag = sps.transform_skip_context_enabled_flag;
+  ext.implicit_rdpcm_enabled_flag = sps.implicit_rdpcm_enabled_flag;
+  ext.explicit_rdpcm_enabled_flag = sps.explicit_rdpcm_enabled_flag;
+  ext.extended_precision_processing_flag = sps.extended_precision_processing_flag;
+  ext.intra_smoothing_disabled_flag = sps.intra_smoothing_disabled_flag;
+  ext.persistent_rice_adaptation_enabled_flag = sps.persistent_rice_adaptation_enabled_flag;
+  ext.high_precision_offsets_enabled_flag = sps.high_precision_offsets_enabled_flag;
+  ext.cabac_bypass_alignment_enabled_flag = sps.cabac_bypass_alignment_enabled_flag;
+  ext.cross_component_prediction_enabled_flag = pps.cross_component_prediction_enabled_flag;
+  ext.chroma_qp_offset_list_enabled_flag = pps.chroma_qp_offset_list_enabled_flag;
+  ext.diff_cu_chroma_qp_offset_depth = static_cast<UCHAR>(pps.diff_cu_chroma_qp_offset_depth);
+  ext.log2_sao_offset_scale_luma = static_cast<UCHAR>(pps.log2_sao_offset_scale_luma);
+  ext.log2_sao_offset_scale_chroma = static_cast<UCHAR>(pps.log2_sao_offset_scale_chroma);
+  ext.log2_max_transform_skip_block_size_minus2 = static_cast<UCHAR>(pps.log2_max_transform_skip_block_size_minus2);
+  ext.chroma_qp_offset_list_len_minus1 = static_cast<UCHAR>(pps.chroma_qp_offset_list_len_minus1);
+  for (int i = 0; i < 6; ++i) {
+    ext.cb_qp_offset_list[i] = static_cast<CHAR>(pps.cb_qp_offset_list[i]);
+    ext.cr_qp_offset_list[i] = static_cast<CHAR>(pps.cr_qp_offset_list[i]);
+  }
+}
+
+// What DXVA decodes: 4:2:0 up to 10 bits, 4:2:2 and 4:4:4 up to 12. Not
+// monochrome, separate colour planes, or luma and chroma of different depths.
+inline auto isDecodable(const Sps& sps) -> bool {
+  if (sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8 || sps.separate_colour_plane_flag) return false;
+  switch (sps.chroma_format_idc) {
+    case 1: return sps.bit_depth_luma_minus8 <= 2;
+    case 2:
+    case 3: return sps.bit_depth_luma_minus8 <= 4;
+    default: return false;
+  }
+}
+
+// The DXVA profile for a stream; D3D12 names the same GUIDs D3D12_VIDEO_DECODE_PROFILE_*.
+// 8-bit 4:2:2 has no profile of its own, Main 4:2:2 10 covers it.
+inline auto decodeProfile(int chroma_format_idc, int bit_depth) -> GUID {
+  switch (chroma_format_idc) {
+    case 2: return bit_depth <= 10 ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10_422 : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN12_422;
+    case 3:
+      return bit_depth <= 8    ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN_444
+             : bit_depth <= 10 ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10_444
+                               : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN12_444;
+    default: return bit_depth > 8 ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10 : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
+  }
 }
 
 #endif

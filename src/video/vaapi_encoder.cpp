@@ -1229,11 +1229,10 @@ private:
     RateControl rc;
     const auto supports = [&](uint32_t mode) { return (rc_modes_ & mode) != 0; };
     const bool qindex_scale = codec_id_ == OM_CODEC_VP9 || codec_id_ == OM_CODEC_AV1;
-    // VP9 and AV1 quantisers run to 255. Values up to 63 are taken to be on
-    // the familiar 0..51/63 scale and spread over that range.
+    // VP9 and AV1 quantisers run to 255; see av1_quant::qindexFromQp.
     const auto nativeQp = [&](int qp) {
       if (!qindex_scale) return std::clamp(qp, 1, 51);
-      return qp <= 63 ? std::clamp(qp * 4, 1, 255) : std::clamp(qp, 1, 255);
+      return av1_quant::qindexFromQp(qp);
     };
     const auto setBitrate = [&](const BitrateParams& b, bool peak) {
       const uint64_t target = static_cast<uint64_t>(std::max<int64_t>(b.target_bitrate, 1));

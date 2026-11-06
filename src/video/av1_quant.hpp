@@ -48,6 +48,13 @@ inline constexpr uint16_t kAcQLookup[2][256] = {
   },
 };
 
+// RateControlParams' QPs for AV1 and VP9: up to 63 they are on the familiar
+// H.26x-like scale and spread over the 0..255 quantiser index; above 63 they
+// are a quantiser index already.
+inline auto qindexFromQp(int qp) -> int {
+  return qp <= 63 ? std::clamp(qp * 4, 1, 255) : std::clamp(qp, 1, 255);
+}
+
 inline auto acQuant(int qindex, uint32_t bit_depth) -> int {
   return kAcQLookup[bit_depth > 8 ? 1 : 0][std::clamp(qindex, 0, 255)];
 }

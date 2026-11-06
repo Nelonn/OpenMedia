@@ -85,7 +85,7 @@ public:
 
   auto device() const -> const std::optional<HWDevice>& { return device_; }
 
-  // Downloads a hardware picture into `vf` (always semi-planar).
+  // Downloads a hardware picture into `vf`, in the picture's own layout.
   auto download(HardwarePicture& hw, const Picture& pic, VideoFrame& vf) const -> bool {
     if (!device_ || device_->type != hw.getType()) return false;
 
@@ -106,11 +106,23 @@ public:
         return true;
 #endif
 #ifdef _WIN32
-      case HWDeviceType::CUDA:
-        HWCudaContext_copyToHost(context<OMCudaContext>(),
-                                 static_cast<CudaHardwarePicture&>(hw).getOMPicture(),
-                                 y.data.data(), y.stride, uv.data.data(), uv.stride, pic.width, pic.height);
+      case HWDeviceType::CUDA: {
+        // Semi-planar 4:2:0 and 4:2:2, planar 4:4:4: the format says which.
+        void* dst[3] = {};
+        uint32_t pitch[3] = {};
+        for (uint32_t i = 0; i < getNumPlanes(pic.format) && i < 3; ++i) {
+          const auto [pw, ph] = pic.getPlaneDimensions(i);
+          auto& plane = vf.planes[i];
+          plane.stride = align(int(pw * getBytesPerPixel(pic.format, uint8_t(i))));
+          plane.data.resize(size_t(plane.stride) * ph);
+          dst[i] = plane.data.data();
+          pitch[i] = uint32_t(plane.stride);
+        }
+        HWCudaContext_copyPlanesToHost(context<OMCudaContext>(),
+                                       static_cast<CudaHardwarePicture&>(hw).getOMPicture(),
+                                       uint32_t(pic.format), pic.width, pic.height, dst, pitch);
         return true;
+      }
 #endif
 #ifdef OPENMEDIA_VAAPI
       case HWDeviceType::VAAPI:

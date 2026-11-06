@@ -38,6 +38,16 @@ void HWCudaContext_copyToHost(OMCudaContext* context,
                               void* dst_uv, uint32_t dst_uv_pitch,
                               uint32_t width, uint32_t height);
 
+// Copies each plane of a picture laid out as `format` (an OMPixelFormat: NV12,
+// P010, NV16, P216, YUV444P or YUV444P16) to dst[i]. Width and height are in
+// pixels; copyToHost, by contrast, knows only 4:2:0.
+OPENMEDIA_ABI
+void HWCudaContext_copyPlanesToHost(OMCudaContext* context,
+                                    OMCudaPicture* picture,
+                                    uint32_t format,
+                                    uint32_t width, uint32_t height,
+                                    void* const dst[3], const uint32_t dst_pitch[3]);
+
 #if defined(__cplusplus)
 } // extern "C"
 #endif

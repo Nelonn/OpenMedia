@@ -1,6 +1,8 @@
 #include <openmedia/hw_cuda.h>
 #include <codecs.hpp>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <openmedia/codec_api.hpp>
 #include <openmedia/video.hpp>
 #include <queue>
@@ -11,24 +13,110 @@
 
 namespace openmedia {
 
-class OPENMEDIA_ABI NVDecPicture : public CudaHardwarePicture {
-  CUvideodecoder decoder_;
-  CUdeviceptr dev_ptr_;
-  OMCudaPicture om_pic_;
+namespace {
+
+// How NVDEC lays a picture out: luma, then one interleaved (4:2:0, 4:2:2) or
+// two separate (4:4:4) chroma planes. Deep samples are 16-bit, MSB-aligned.
+struct SurfaceLayout {
+  cudaVideoSurfaceFormat surface;
+  OMPixelFormat format;
+  uint32_t chroma_planes;
+  bool full_height_chroma;
+};
+
+auto surfaceLayout(cudaVideoChromaFormat chroma, bool deep) -> std::optional<SurfaceLayout> {
+  switch (chroma) {
+    case cudaVideoChromaFormat_420:
+      return deep ? SurfaceLayout {cudaVideoSurfaceFormat_P016, OM_FORMAT_P010, 1, false}
+                  : SurfaceLayout {cudaVideoSurfaceFormat_NV12, OM_FORMAT_NV12, 1, false};
+    case cudaVideoChromaFormat_422:
+      return deep ? SurfaceLayout {cudaVideoSurfaceFormat_P216, OM_FORMAT_P216, 1, true}
+                  : SurfaceLayout {cudaVideoSurfaceFormat_NV16, OM_FORMAT_NV16, 1, true};
+    case cudaVideoChromaFormat_444:
+      return deep ? SurfaceLayout {cudaVideoSurfaceFormat_YUV444_16Bit, OM_FORMAT_YUV444P16, 2, true}
+                  : SurfaceLayout {cudaVideoSurfaceFormat_YUV444, OM_FORMAT_YUV444P, 2, true};
+    default: return std::nullopt;
+  }
+}
+
+auto gpuDecodes(const CUVIDEOFORMAT& format, cudaVideoSurfaceFormat surface) -> bool {
+  CUVIDDECODECAPS caps = {};
+  caps.eCodecType = format.codec;
+  caps.eChromaFormat = format.chroma_format;
+  caps.nBitDepthMinus8 = format.bit_depth_luma_minus8;
+  // A driver too old to answer gets the benefit of the doubt; creating the decoder will tell.
+  if (NVLoader::getInstance().cuvid()->cuvidGetDecoderCaps(&caps) != CUDA_SUCCESS) return true;
+  return caps.bIsSupported && (caps.nOutputFormatMask & (1u << surface)) != 0;
+}
+
+} // namespace
+
+// Device buffers decoded pictures are copied into, so that a picture never holds
+// one of NVDEC's few mapped surfaces and outlives the decoder that made it.
+class NVDecFramePool {
+  CUcontext ctx_;
+  uint32_t row_bytes_;
+  uint32_t rows_;
+  size_t pitch_ = 0;
+  std::mutex mutex_;
+  std::vector<CUdeviceptr> free_;
+  std::vector<CUdeviceptr> all_;
+
 public:
-  NVDecPicture(CUvideodecoder decoder, CUdeviceptr dev_ptr, uint32_t pitch)
-      : decoder_(decoder), dev_ptr_(dev_ptr) {
+  NVDecFramePool(CUcontext ctx, uint32_t row_bytes, uint32_t rows) : ctx_(ctx), row_bytes_(row_bytes), rows_(rows) {}
+  NVDecFramePool(const NVDecFramePool&) = delete;
+  auto operator=(const NVDecFramePool&) -> NVDecFramePool& = delete;
+
+  ~NVDecFramePool() {
+    auto* cu = NVLoader::getInstance().cuda();
+    if (!cu || all_.empty()) return;
+    // The last picture may go away on a thread with no context current.
+    cu->cuCtxPushCurrent(ctx_);
+    for (CUdeviceptr ptr : all_) cu->cuMemFree(ptr);
+    CUcontext popped = nullptr;
+    cu->cuCtxPopCurrent(&popped);
+  }
+
+  auto pitch() const -> size_t { return pitch_; }
+
+  auto acquire() -> CUdeviceptr {
+    {
+      std::lock_guard lock(mutex_);
+      if (!free_.empty()) {
+        const CUdeviceptr ptr = free_.back();
+        free_.pop_back();
+        return ptr;
+      }
+    }
+    CUdeviceptr ptr = 0;
+    size_t pitch = 0;
+    auto* cu = NVLoader::getInstance().cuda();
+    if (cu->cuMemAllocPitch(&ptr, &pitch, row_bytes_, rows_, 16) != CUDA_SUCCESS) return 0;
+    std::lock_guard lock(mutex_);
+    pitch_ = pitch;
+    all_.push_back(ptr);
+    return ptr;
+  }
+
+  void release(CUdeviceptr ptr) {
+    std::lock_guard lock(mutex_);
+    free_.push_back(ptr);
+  }
+};
+
+class OPENMEDIA_ABI NVDecPicture : public CudaHardwarePicture {
+  std::shared_ptr<NVDecFramePool> pool_;
+  OMCudaPicture om_pic_;
+
+public:
+  NVDecPicture(std::shared_ptr<NVDecFramePool> pool, CUdeviceptr dev_ptr, uint32_t pitch)
+      : pool_(std::move(pool)) {
     data = dev_ptr;
     this->pitch = pitch;
     om_pic_.data = dev_ptr;
     om_pic_.pitch = pitch;
   }
-  ~NVDecPicture() override {
-    auto* cuvid = NVLoader::getInstance().cuvid();
-    if (cuvid && decoder_ && dev_ptr_) {
-      cuvid->cuvidUnmapVideoFrame(decoder_, dev_ptr_);
-    }
-  }
+  ~NVDecPicture() override { pool_->release(data); }
 
   auto getOMPicture() -> OMCudaPicture* override { return &om_pic_; }
 };
@@ -46,7 +134,13 @@ class NVDec final : public Decoder {
   OMContentLightLevel pending_content_light_level_ = {};
 
   bool initialized_ = false;
+  // Why the last sequence header produced no decoder; the parser only sees a 0.
+  OMError sequence_error_ = OM_SUCCESS;
   OMCodecId codec_id_ = OM_CODEC_NONE;
+
+  SurfaceLayout layout_ = {};
+  uint32_t row_bytes_ = 0;
+  std::shared_ptr<NVDecFramePool> pool_;
   dx_h264::State h264_;
 
   static auto CUDAAPI handleVideoSequence(void* user_data, CUVIDEOFORMAT* format) -> int {
@@ -112,10 +206,23 @@ class NVDec final : public Decoder {
       decoder_ = nullptr;
     }
 
+    const bool deep = format->bit_depth_luma_minus8 > 0;
+    const auto layout = surfaceLayout(format->chroma_format, deep);
+    if (!layout) {
+      return rejectSequence(OM_CODEC_NOT_SUPPORTED,
+                            std::format("chroma format {} is not supported", static_cast<int>(format->chroma_format)));
+    }
+    if (!gpuDecodes(*format, layout->surface)) {
+      return rejectSequence(OM_CODEC_NOT_SUPPORTED,
+                            std::format("this GPU cannot decode codec {} chroma {} at {} bits",
+                                        static_cast<int>(format->codec), static_cast<int>(format->chroma_format),
+                                        format->bit_depth_luma_minus8 + 8));
+    }
+
     CUVIDDECODECREATEINFO create_info = {};
     create_info.CodecType = format->codec;
     create_info.ChromaFormat = format->chroma_format;
-    create_info.OutputFormat = (format->bit_depth_luma_minus8 > 0) ? cudaVideoSurfaceFormat_P016 : cudaVideoSurfaceFormat_NV12;
+    create_info.OutputFormat = layout->surface;
     create_info.bitDepthMinus8 = format->bit_depth_luma_minus8;
     create_info.DeinterlaceMode = cudaVideoDeinterlaceMode_Adaptive;
     create_info.ulNumDecodeSurfaces = 16;
@@ -128,7 +235,7 @@ class NVDec final : public Decoder {
 
     output_format_.width = create_info.ulTargetWidth;
     output_format_.height = create_info.ulTargetHeight;
-    output_format_.format = (format->bit_depth_luma_minus8 > 0) ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+    output_format_.format = layout->format;
 
     // Report color properties
     auto map_primaries = [](uint8_t p) -> OMColorPrimaries {
@@ -167,16 +274,84 @@ class NVDec final : public Decoder {
       }
     }
 
-    if (cuvid->cuvidCreateDecoder(&decoder_, &create_info) != CUDA_SUCCESS) {
-      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidCreateDecoder failed");
-      return 0;
+    if (CUresult res = cuvid->cuvidCreateDecoder(&decoder_, &create_info); res != CUDA_SUCCESS) {
+      return rejectSequence(OM_CODEC_HWACCEL_FAILED, std::format("cuvidCreateDecoder failed with error {}", static_cast<int>(res)));
     }
+    sequence_error_ = OM_SUCCESS;
+    layout_ = *layout;
+    row_bytes_ = output_format_.width * (deep ? 2 : 1);
+    pool_ = std::make_shared<NVDecFramePool>(cu_ctx_, row_bytes_,
+                                             output_format_.height + layout_.chroma_planes * chromaRows());
 
     openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_INFO, "NVDEC: cuvidCreateDecoder success");
     return 1;
   }
 
+  auto rejectSequence(OMError error, std::string_view why) -> int {
+    openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: {}", why);
+    sequence_error_ = error;
+    return 0;
+  }
+
+  auto chromaRows() const -> uint32_t {
+    const uint32_t height = output_format_.height;
+    return layout_.full_height_chroma ? height : (height + 1) / 2;
+  }
+
+  // Copies a mapped surface into a pool buffer laid out the way copyPlanesToHost reads it.
+  auto copyOut(CUdeviceptr mapped, uint32_t mapped_pitch) -> std::optional<CUdeviceptr> {
+    const CUdeviceptr copy = pool_->acquire();
+    if (!copy) return std::nullopt;
+    auto* cu = NVLoader::getInstance().cuda();
+    auto stream = static_cast<CUstream>(HWCudaContext_getStream(hw_context_));
+    const uint32_t height = output_format_.height;
+    // The driver pads luma to an even number of rows.
+    const size_t src_plane = size_t(mapped_pitch) * ((height + 1) & ~1u);
+    for (uint32_t plane = 0; plane <= layout_.chroma_planes; ++plane) {
+      CUDA_MEMCPY2D c = {};
+      c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+      c.srcDevice = mapped + src_plane * plane;
+      c.srcPitch = mapped_pitch;
+      c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+      c.dstDevice = copy + pool_->pitch() * height * plane;
+      c.dstPitch = pool_->pitch();
+      c.WidthInBytes = row_bytes_;
+      c.Height = plane == 0 ? height : chromaRows();
+      cu->cuMemcpy2DAsync(&c, stream);
+    }
+    if (cu->cuStreamSynchronize(stream) != CUDA_SUCCESS) {
+      pool_->release(copy);
+      return std::nullopt;
+    }
+    return copy;
+  }
+
+  auto makeFrame(CUdeviceptr data, int64_t pts) const -> Frame {
+    auto buffer = std::make_shared<NVDecPicture>(pool_, data, static_cast<uint32_t>(pool_->pitch()));
+    buffer->width = output_format_.width;
+    buffer->height = output_format_.height;
+    buffer->format = output_format_.format;
+
+    Picture pic;
+    pic.format = output_format_.format;
+    pic.width = output_format_.width;
+    pic.height = output_format_.height;
+    pic.color_space = output_format_.color_space;
+    pic.transfer_char = output_format_.transfer_char;
+    pic.color_primaries = output_format_.color_primaries;
+    pic.color_range = output_format_.color_range;
+    pic.mastering_display = pending_mastering_display_;
+    pic.content_light_level = pending_content_light_level_;
+    pic.buffer = std::static_pointer_cast<HardwarePicture>(std::move(buffer));
+
+    Frame frame = {};
+    frame.pts = pts;
+    frame.data = std::move(pic);
+    return frame;
+  }
+
   auto onPictureDecode(CUVIDPICPARAMS* params) -> int {
+    if (!decoder_) return 0;
     auto* cuvid = NVLoader::getInstance().cuvid();
     CUresult res = cuvid->cuvidDecodePicture(decoder_, params);
     if (res != CUDA_SUCCESS) {
@@ -187,6 +362,7 @@ class NVDec final : public Decoder {
   }
 
   auto onPictureDisplay(CUVIDPARSERDISPINFO* info) -> int {
+    if (!decoder_ || !pool_) return 1;
     auto* cuvid = NVLoader::getInstance().cuvid();
 
     CUVIDPROCPARAMS proc_params = {};
@@ -194,39 +370,25 @@ class NVDec final : public Decoder {
     proc_params.second_field = 0;
     proc_params.top_field_first = info->top_field_first;
 
-    CUdeviceptr dev_ptr = 0;
-    uint32_t pitch = 0;
-    CUresult res = cuvid->cuvidMapVideoFrame(decoder_, info->picture_index, &dev_ptr, &pitch, &proc_params);
-    if (res == CUDA_SUCCESS) {
-      auto pic_buffer = std::make_shared<NVDecPicture>(decoder_, dev_ptr, pitch);
-      pic_buffer->pitch = pitch;
-      pic_buffer->width = output_format_.width;
-      pic_buffer->height = output_format_.height;
-      pic_buffer->format = output_format_.format;
-
-      Frame frame = {};
-      frame.pts = info->timestamp;
-      Picture pic;
-      pic.format = output_format_.format;
-      pic.width = output_format_.width;
-      pic.height = output_format_.height;
-      pic.color_space = output_format_.color_space;
-      pic.transfer_char = output_format_.transfer_char;
-      pic.color_primaries = output_format_.color_primaries;
-      pic.color_range = output_format_.color_range;
-      pic.mastering_display = pending_mastering_display_;
-      pic.content_light_level = pending_content_light_level_;
-      pic.buffer = std::static_pointer_cast<HardwarePicture>(pic_buffer);
-      frame.data = std::move(pic);
-
-      {
-        std::lock_guard<std::mutex> lock(frames_mutex_);
-        decoded_frames_.push_back(std::move(frame));
-      }
-    } else {
+    CUdeviceptr mapped = 0;
+    uint32_t mapped_pitch = 0;
+    if (CUresult res = cuvid->cuvidMapVideoFrame(decoder_, info->picture_index, &mapped, &mapped_pitch, &proc_params);
+        res != CUDA_SUCCESS) {
       openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidMapVideoFrame failed with error {}", (int) res);
+      return 1;
+    }
+    // Unmapped straight away: there is one output surface, and a flush displays
+    // several pictures before anyone could release the first.
+    const auto copy = copyOut(mapped, mapped_pitch);
+    cuvid->cuvidUnmapVideoFrame(decoder_, mapped);
+    if (!copy) {
+      openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: copying picture {} out of the decoder failed",
+                     info->picture_index);
+      return 1;
     }
 
+    std::lock_guard lock(frames_mutex_);
+    decoded_frames_.push_back(makeFrame(*copy, info->timestamp));
     return 1;
   }
 
@@ -246,6 +408,7 @@ public:
 
     codec_id_ = options.format.codec_id;
     h264_ = {};
+    sequence_error_ = OM_SUCCESS;
     output_format_ = {};
     output_format_.color_space = options.format.video.color_space;
     output_format_.transfer_char = options.format.video.transfer_char;
@@ -310,6 +473,7 @@ public:
     if (packet.bytes.empty()) cupkt.flags |= CUVID_PKT_ENDOFSTREAM;
 
     CUresult res = cuvid->cuvidParseVideoData(parser_, &cupkt);
+    if (sequence_error_ != OM_SUCCESS) return Err(sequence_error_);
     if (res != CUDA_SUCCESS) {
       openmedia::log(OM_CATEGORY_DECODER, OM_LEVEL_ERROR, "NVDEC: cuvidParseVideoData failed with error {}", (int) res);
       return Err(OM_CODEC_DECODE_FAILED);
@@ -336,6 +500,7 @@ public:
     }
     parser_ = nullptr;
     decoder_ = nullptr;
+    pool_.reset();
     initialized_ = false;
   }
 };

@@ -1,6 +1,7 @@
 #include <openmedia/hw_dx12.h>
 #include <openmedia/video.hpp>
 
+#include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3d12video.h>
 #include <dxgi1_6.h>
@@ -18,24 +19,10 @@
 #include <video/reorder_queue.hpp>
 #include <util/color_codes.hpp>
 
-#include <mfapi.h>
-#include <mferror.h>
-#include <mfidl.h>
-#include <mfobjects.h>
-#include <mftransform.h>
-#include <codecapi.h>
-#include <icodecapi.h>
-
-#include <util/wmf.hpp>
 #include "dx_h264.hpp"
 #include "dx_h265.hpp"
+#include "dx_surface.hpp"
 #include "hw_common.hpp"
-
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfuuid.lib")
-
-// EB533D05-D234-4530-9162-801691238C93
-static constexpr GUID OM_MF_VIDEO_DEVICE_Manager = {0xeb533d05, 0xd234, 0x4530, {0x91, 0x62, 0x80, 0x16, 0x91, 0x23, 0x8c, 0x93}};
 
 using Microsoft::WRL::ComPtr;
 
@@ -69,6 +56,10 @@ class DX12Decoder final : public Decoder, private DecodeReport {
   ComPtr<ID3D12Resource> dpb_texture_;
   ComPtr<ID3D12Resource> output_texture_;
   bool reference_only_ = false;
+  // HEVC's surface follows the stream's chroma format and depth.
+  uint8_t bit_depth_ = 8;
+  int chroma_format_idc_ = 1;
+  DXGI_FORMAT surface_format_ = DXGI_FORMAT_NV12;
 
   dx_h264::State h264_;
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
@@ -133,7 +124,8 @@ public:
           padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
           dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(s.sps_max_dec_pic_buffering_minus1[s.max_sub_layers_minus1] + 1), 2, 17);
           bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
-          if (s.chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
+          if (!dx_h265::isDecodable(s)) return OM_CODEC_NOT_SUPPORTED;
+          chroma_format_idc_ = s.chroma_format_idc;
           break;
         }
       }
@@ -148,12 +140,13 @@ public:
     }
     if (!device_ || !video_device_) return OM_CODEC_HWACCEL_FAILED;
 
+    bit_depth_ = bit_depth;
     if (FAILED(createQueuesAndCommands())) return OM_CODEC_HWACCEL_FAILED;
     if (FAILED(createDecoder())) return OM_CODEC_HWACCEL_FAILED;
     if (FAILED(createResources())) return OM_CODEC_HWACCEL_FAILED;
 
     output_format_ = {};
-    output_format_.format = static_cast<OMPixelFormat>(bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
+    output_format_.format = dx_surface::hostFormat(surface_format_);
     output_format_.width = width_;
     output_format_.height = height_;
     output_format_.color_space = options.format.video.color_space;
@@ -313,13 +306,15 @@ private:
                                sh.pps_id, pps.sps_id));
       }
       const auto& sps = h265_->sps(pps.sps_id);
-      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) {
-        return Err(rejectFrame(OM_CODEC_NOT_SUPPORTED, "H.265 stream is not 4:2:0 with matching luma and chroma depth"));
+      if (!dx_h265::isDecodable(sps)) {
+        return Err(rejectFrame(OM_CODEC_NOT_SUPPORTED,
+                               "H.265 stream is not 4:2:0, 4:2:2 or 4:4:4 with matching luma and chroma depth"));
       }
 
       const uint8_t bit_depth = static_cast<uint8_t>(sps.bit_depth_luma_minus8 + 8);
-      const OMPixelFormat expected_format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
-      if (output_format_.format != expected_format) {
+      if (surface_format_ != dx_surface::decodeFormat(sps.chroma_format_idc, bit_depth)) {
+        bit_depth_ = bit_depth;
+        chroma_format_idc_ = sps.chroma_format_idc;
         padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
         padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
         // One spare: the marking process frees a slot only once the stream has said
@@ -327,7 +322,7 @@ private:
         dpb_slot_count_ = std::clamp<uint32_t>(static_cast<uint32_t>(sps.sps_max_dec_pic_buffering_minus1[sps.max_sub_layers_minus1] + 2), 2, 17);
         if (FAILED(createDecoder())) return Err(OM_CODEC_HWACCEL_FAILED);
         if (FAILED(createResources())) return Err(OM_CODEC_HWACCEL_FAILED);
-        output_format_.format = expected_format;
+        output_format_.format = dx_surface::hostFormat(surface_format_);
       }
 
       // The parser is the one that knows which picture 8.3.1 makes the previous one.
@@ -408,6 +403,25 @@ private:
     return (video_event_ && copy_event_) ? S_OK : E_FAIL;
   }
 
+  auto surfaceFormat(uint8_t bit_depth) const -> DXGI_FORMAT {
+    return dx_surface::decodeFormat(codec_id_ == OM_CODEC_H265 ? chroma_format_idc_ : 1, bit_depth);
+  }
+
+  // Every plane of a DPB slot: NV12 and P010 have two subresources, packed formats one.
+  void transitionSlot(uint32_t slot, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER barriers[2] = {};
+    const uint32_t planes = dx_surface::planeCount(surface_format_);
+    for (uint32_t plane = 0; plane < planes; ++plane) {
+      auto& barrier = barriers[plane];
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition.pResource = dpb_texture_.Get();
+      barrier.Transition.StateBefore = before;
+      barrier.Transition.StateAfter = after;
+      barrier.Transition.Subresource = plane * dpb_slot_count_ + slot;
+    }
+    video_cmd_->ResourceBarrier(planes, barriers);
+  }
+
   auto createDecoder() -> HRESULT {
     decoder_.Reset();
     decoder_heap_.Reset();
@@ -427,18 +441,11 @@ private:
         }
       }
     } else {
-      if (h265_ && h265_->hasSps()) {
-        for (int i = 0; i < 16; ++i) {
-          const auto& s = h265_->sps(i);
-          if (!s.valid) continue;
-          bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
-          if (bit_depth > 8) config.DecodeProfile = D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10;
-          break;
-        }
-      }
+      bit_depth = bit_depth_;
+      config.DecodeProfile = dx_h265::decodeProfile(chroma_format_idc_, bit_depth);
     }
     support.Configuration = config;
-    support.DecodeFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    support.DecodeFormat = surfaceFormat(bit_depth);
     support.Width = padded_width_;
     support.Height = padded_height_;
     support.FrameRate = {0, 1};
@@ -487,7 +494,7 @@ private:
     hr = bitstream_buffer_->Map(0, nullptr, reinterpret_cast<void**>(&bitstream_ptr_));
     if (FAILED(hr)) return hr;
 
-    uint8_t bit_depth = 8;
+    uint8_t bit_depth = bit_depth_;
     if (codec_id_ == OM_CODEC_H264) {
       if (h264_.has_sps) {
         for (uint32_t i = 0; i < 32; ++i) {
@@ -496,16 +503,9 @@ private:
           break;
         }
       }
-    } else {
-      if (h265_ && h265_->hasSps()) {
-        for (int i = 0; i < 16; ++i) {
-          if (!h265_->sps(i).valid) continue;
-          bit_depth = static_cast<uint8_t>(h265_->sps(i).bit_depth_luma_minus8 + 8);
-          break;
-        }
-      }
     }
-    const DXGI_FORMAT fmt = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    const DXGI_FORMAT fmt = surfaceFormat(bit_depth);
+    surface_format_ = fmt;
 
     D3D12_RESOURCE_DESC tex = {};
     tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -542,16 +542,7 @@ private:
     if (FAILED(hr)) return hr;
 
     if (dpb_states_[current_slot] != D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE) {
-      D3D12_RESOURCE_BARRIER barriers[2] = {};
-      for (auto& barrier : barriers) {
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = dpb_texture_.Get();
-        barrier.Transition.StateBefore = dpb_states_[current_slot];
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
-      }
-      barriers[0].Transition.Subresource = current_slot;
-      barriers[1].Transition.Subresource = dpb_slot_count_ + current_slot;
-      video_cmd_->ResourceBarrier(2, barriers);
+      transitionSlot(current_slot, dpb_states_[current_slot], D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE);
       dpb_states_[current_slot] = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
     }
     if (reference_only_) {
@@ -617,16 +608,7 @@ private:
       barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       video_cmd_->ResourceBarrier(1, &barrier);
     } else {
-      D3D12_RESOURCE_BARRIER barriers[2] = {};
-      for (auto& barrier : barriers) {
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = dpb_texture_.Get();
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-      }
-      barriers[0].Transition.Subresource = current_slot;
-      barriers[1].Transition.Subresource = dpb_slot_count_ + current_slot;
-      video_cmd_->ResourceBarrier(2, barriers);
+      transitionSlot(current_slot, D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE, D3D12_RESOURCE_STATE_COMMON);
       dpb_states_[current_slot] = D3D12_RESOURCE_STATE_COMMON;
     }
 
@@ -651,16 +633,7 @@ private:
     if (FAILED(hr)) return hr;
 
     if (dpb_states_[current_slot] != D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE) {
-      D3D12_RESOURCE_BARRIER barriers[2] = {};
-      for (auto& barrier : barriers) {
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = dpb_texture_.Get();
-        barrier.Transition.StateBefore = dpb_states_[current_slot];
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
-      }
-      barriers[0].Transition.Subresource = current_slot;
-      barriers[1].Transition.Subresource = dpb_slot_count_ + current_slot;
-      video_cmd_->ResourceBarrier(2, barriers);
+      transitionSlot(current_slot, dpb_states_[current_slot], D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE);
       dpb_states_[current_slot] = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
     }
     if (reference_only_) {
@@ -705,7 +678,15 @@ private:
                            feedback_++, pic);
     DXVA_Qmatrix_HEVC qmatrix = {};
     if (sps.scaling_list_enabled_flag) dx_h265::fillQMatrix(sps, pps, qmatrix);
-    input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS, sizeof(pic), &pic};
+    // The 4:2:2 and 4:4:4 profiles are RExt ones and read the extended form.
+    DXVA_PicParams_HEVC_RangeExt range_ext = {};
+    if (sps.chroma_format_idc != 1) {
+      dx_h265::fillRangeExtParams(sps, pps, pic, range_ext);
+      input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS,
+                                                         sizeof(range_ext), &range_ext};
+    } else {
+      input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_PICTURE_PARAMETERS, sizeof(pic), &pic};
+    }
     if (sps.scaling_list_enabled_flag) {
       input.FrameArguments[input.NumFrameArguments++] = {D3D12_VIDEO_DECODE_ARGUMENT_TYPE_INVERSE_QUANTIZATION_MATRIX, sizeof(qmatrix), &qmatrix};
     }
@@ -722,16 +703,7 @@ private:
       barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       video_cmd_->ResourceBarrier(1, &barrier);
     } else {
-      D3D12_RESOURCE_BARRIER barriers[2] = {};
-      for (auto& barrier : barriers) {
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = dpb_texture_.Get();
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-      }
-      barriers[0].Transition.Subresource = current_slot;
-      barriers[1].Transition.Subresource = dpb_slot_count_ + current_slot;
-      video_cmd_->ResourceBarrier(2, barriers);
+      transitionSlot(current_slot, D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE, D3D12_RESOURCE_STATE_COMMON);
       dpb_states_[current_slot] = D3D12_RESOURCE_STATE_COMMON;
     }
 
@@ -746,6 +718,8 @@ private:
     if (FAILED(wait(video_fence_.Get(), video_fence_value_, video_event_))) return std::nullopt;
 
     ID3D12Resource* src = reference_only_ ? output_texture_.Get() : dpb_texture_.Get();
+    const DXGI_FORMAT format = src->GetDesc().Format;
+    const UINT planes = dx_surface::planeCount(format);
     const UINT src_subresource_y = reference_only_ ? 0 : current_slot;
     const UINT src_subresource_uv = reference_only_ ? 1 : dpb_slot_count_ + current_slot;
 
@@ -755,7 +729,7 @@ private:
     UINT rows[2] = {};
     UINT64 row_sizes[2] = {};
     UINT64 total = 0;
-    device_->GetCopyableFootprints(&single, 0, 2, 0, footprints, rows, row_sizes, &total);
+    device_->GetCopyableFootprints(&single, 0, planes, 0, footprints, rows, row_sizes, &total);
 
     D3D12_RESOURCE_DESC readback_desc = {};
     readback_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -789,9 +763,11 @@ private:
     dst.PlacedFootprint = footprints[0];
     loc_src.SubresourceIndex = src_subresource_y;
     copy_cmd_->CopyTextureRegion(&dst, 0, 0, 0, &loc_src, nullptr);
-    dst.PlacedFootprint = footprints[1];
-    loc_src.SubresourceIndex = src_subresource_uv;
-    copy_cmd_->CopyTextureRegion(&dst, 0, 0, 0, &loc_src, nullptr);
+    if (planes > 1) {
+      dst.PlacedFootprint = footprints[1];
+      loc_src.SubresourceIndex = src_subresource_uv;
+      copy_cmd_->CopyTextureRegion(&dst, 0, 0, 0, &loc_src, nullptr);
+    }
 
     std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
     copy_cmd_->ResourceBarrier(1, &barrier);
@@ -803,23 +779,16 @@ private:
 
     uint8_t* data = nullptr;
     if (FAILED(readback->Map(0, nullptr, reinterpret_cast<void**>(&data)))) return std::nullopt;
-    const OMPixelFormat om_fmt = (src->GetDesc().Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
-    Picture pic(om_fmt, width_, height_);
+    Picture pic(dx_surface::hostFormat(format), width_, height_);
     pic.color_space = output_format_.color_space;
     pic.transfer_char = output_format_.transfer_char;
     pic.color_primaries = output_format_.color_primaries;
     pic.color_range = output_format_.color_range;
     pic.mastering_display = output_format_.mastering_display;
     pic.content_light_level = output_format_.content_light_level;
-    const auto y_stride = pic.planes.getLinesize(0);
-    const auto uv_stride = pic.planes.getLinesize(1);
-    auto* y = pic.planes.getData(0);
-    auto* uv = pic.planes.getData(1);
-    const uint8_t* src_y = data + footprints[0].Offset;
-    const uint8_t* src_uv = data + footprints[1].Offset;
-    const size_t bpp = getBytesPerPixel(om_fmt, 0);
-    for (uint32_t row = 0; row < height_; ++row) memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * footprints[0].Footprint.RowPitch, width_ * bpp);
-    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * footprints[1].Footprint.RowPitch, width_ * bpp);
+    const uint8_t* chroma = planes > 1 ? data + footprints[1].Offset : nullptr;
+    dx_surface::copyToHost(format, data + footprints[0].Offset, footprints[0].Footprint.RowPitch, chroma,
+                           footprints[1].Footprint.RowPitch, width_, height_, pic);
     readback->Unmap(0, nullptr);
     return pic;
   }
@@ -862,289 +831,120 @@ private:
   }
 };
 
+namespace {
+
+auto dx11Encoder(OMCodecId codec) -> const CodecDescriptor* {
+  switch (codec) {
+    case OM_CODEC_H264: return &CODEC_DX11_ENC_H264;
+    case OM_CODEC_H265: return &CODEC_DX11_ENC_H265;
+    case OM_CODEC_AV1: return &CODEC_DX11_ENC_AV1;
+    default: return nullptr;
+  }
+}
+
+} // namespace
+
+// Media Foundation's hardware encoders take D3D11 surfaces only, so this is the
+// D3D11 encoder on a D3D11 device of the same adapter; D3D12 pictures reach it
+// through a shared handle.
 class DX12Encoder final : public Encoder {
   ComPtr<ID3D12Device> device_;
   ComPtr<ID3D11Device> d3d11_device_;
-  ComPtr<IMFTransform> encoder_;
-  ComPtr<IMFDXGIDeviceManager> device_manager_;
-  UINT device_reset_token_ = 0;
+  OMDX11Context* d3d11_context_ = nullptr;
+  std::unique_ptr<Encoder> inner_;
 
-  VideoFormat input_format_ = {};
-  uint32_t timescale_ = 90000;
-  bool initialized_ = false;
-
-  auto setup_d3d11_interop() -> bool {
-    ComPtr<IDXGIDevice> dxgi_device;
-    if (FAILED(device_.As(&dxgi_device))) return false;
-    ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(dxgi_device->GetAdapter(&adapter))) return false;
-
-    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &d3d11_device_, nullptr, nullptr))) return false;
-
-    if (FAILED(MFCreateDXGIDeviceManager(&device_reset_token_, &device_manager_))) return false;
-    if (FAILED(device_manager_->ResetDevice(d3d11_device_.Get(), device_reset_token_))) return false;
-
-    return true;
+  static auto fail(OMError error, std::string_view what) -> OMError {
+    openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx12 encoder: {}", what);
+    return error;
   }
 
-  auto setup_types(const EncoderOptions& options) -> bool {
-    ComPtr<IMFMediaType> input_type;
-    ComPtr<IMFMediaType> output_type;
-
-    if (FAILED(MFCreateMediaType(&input_type))) return false;
-    input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    input_type->SetGUID(MF_MT_SUBTYPE, options.video_format.format == OM_FORMAT_P010 ? MFVideoFormat_P010 : MFVideoFormat_NV12);
-    MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, input_format_.width, input_format_.height);
-    MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE, options.format.video.framerate.num, options.format.video.framerate.den);
-    MFSetAttributeRatio(input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    input_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, map_color_primaries(options.format.video.color_primaries));
-    input_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, map_transfer_characteristics(options.format.video.transfer_char));
-    input_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space));
-
-    if (FAILED(MFCreateMediaType(&output_type))) return false;
-    output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    GUID mf_codec = codecIdToMFVideoFormat(options.format.codec_id);
-    if (mf_codec == MFVideoFormat_Base) return false;
-    output_type->SetGUID(MF_MT_SUBTYPE, mf_codec);
-    MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE, input_format_.width, input_format_.height);
-    MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, options.format.video.framerate.num, options.format.video.framerate.den);
-    MFSetAttributeRatio(output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    output_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, map_color_primaries(options.format.video.color_primaries));
-    output_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, map_transfer_characteristics(options.format.video.transfer_char));
-    output_type->SetUINT32(MF_MT_YUV_MATRIX, map_color_space(options.format.video.color_space));
-
-    uint32_t bitrate = 5000000;
-    if (options.rate_control.getMode() == RateControlMode::CBR) {
-      bitrate = (uint32_t) std::get<CbrParams>(options.rate_control.params).bitrate.target_bitrate;
-    } else if (options.rate_control.getMode() == RateControlMode::VBR) {
-      bitrate = (uint32_t) std::get<VbrParams>(options.rate_control.params).bitrate.target_bitrate;
+  auto createD3D11Device() -> bool {
+    const LUID luid = device_->GetAdapterLuid();
+    ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
+    ComPtr<IDXGIAdapter1> adapter;
+    if (FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter)))) return false;
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                                 levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &d3d11_device_, nullptr, nullptr))) {
+      return false;
     }
-    output_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-
-    if (FAILED(encoder_->SetOutputType(0, output_type.Get(), 0))) return false;
-    if (FAILED(encoder_->SetInputType(0, input_type.Get(), 0))) return false;
-
-    return true;
-  }
-
-  static auto map_color_primaries(OMColorPrimaries p) -> uint32_t {
-    switch (p) {
-      case OM_PRIMARIES_BT709: return MFVideoPrimaries_BT709;
-      case OM_PRIMARIES_BT2020: return MFVideoPrimaries_BT2020;
-      case OM_PRIMARIES_BT601: return MFVideoPrimaries_SMPTE170M;
-      default: return MFVideoPrimaries_Unknown;
-    }
-  }
-
-  static auto map_transfer_characteristics(OMTransferCharacteristic t) -> uint32_t {
-    switch (t) {
-      case OM_TRANSFER_BT709: return MFVideoTransFunc_709;
-      case OM_TRANSFER_PQ: return 12;  // MFVideoTransFunc_2084
-      case OM_TRANSFER_HLG: return 11; // MFVideoTransFunc_2020
-      default: return MFVideoTransFunc_Unknown;
-    }
-  }
-
-  static auto map_color_space(OMColorSpace c) -> uint32_t {
-    switch (c) {
-      case OM_COLOR_SPACE_BT709: return MFVideoTransferMatrix_BT709;
-      case OM_COLOR_SPACE_BT2020: return MFVideoTransferMatrix_BT2020_10;
-      case OM_COLOR_SPACE_BT601: return MFVideoTransferMatrix_BT601;
-      default: return MFVideoTransferMatrix_Unknown;
-    }
-  }
-
-public:
-  DX12Encoder() {
-    MFStartup(MF_VERSION);
-  }
-
-  ~DX12Encoder() override {
-    release();
-    MFShutdown();
-  }
-
-  auto configure(const EncoderOptions& options) -> OMError override {
-    if (!options.hw_device || options.hw_device->type != HWDeviceType::DX12) return OM_CODEC_HWACCEL_FAILED;
-    auto* ctx = static_cast<OMDX12Context*>(options.hw_device->context);
-    device_ = HWD3D12Context_getDevice(ctx);
-
-    if (!setup_d3d11_interop()) return OM_CODEC_HWACCEL_FAILED;
-
-    MFT_REGISTER_TYPE_INFO output_info = {MFMediaType_Video, codecIdToMFVideoFormat(options.format.codec_id)};
-    IMFActivate** activates = nullptr;
-    UINT32 count = 0;
-    if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, nullptr, &output_info, &activates, &count)) || count == 0) {
-      return OM_CODEC_NOT_FOUND;
-    }
-    activates[0]->ActivateObject(IID_PPV_ARGS(&encoder_));
-    for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
-    CoTaskMemFree(activates);
-
-    if (!encoder_) return OM_CODEC_OPEN_FAILED;
-
-    ComPtr<IMFAttributes> attributes;
-    if (SUCCEEDED(encoder_->GetAttributes(&attributes))) {
-      attributes->SetUnknown(OM_MF_VIDEO_DEVICE_Manager, device_manager_.Get());
-    }
-
-    input_format_ = options.video_format;
-    if (!setup_types(options)) return OM_CODEC_OPEN_FAILED;
-
-    if (FAILED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0))) return OM_CODEC_OPEN_FAILED;
-    if (FAILED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))) return OM_CODEC_OPEN_FAILED;
-
-    initialized_ = true;
-    return OM_SUCCESS;
-  }
-
-  auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
-    if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-
-    ComPtr<IMFSample> sample;
-    if (FAILED(MFCreateSample(&sample))) return Err(OM_CODEC_ENCODE_FAILED);
-
-    if (!std::holds_alternative<Picture>(frame.data)) return Err(OM_CODEC_INVALID_PARAMS);
-    const auto& picture = std::get<Picture>(frame.data);
-
-    if (std::holds_alternative<std::shared_ptr<HardwarePicture>>(picture.buffer)) {
-      auto hw_pic = std::get<std::shared_ptr<HardwarePicture>>(picture.buffer);
-      if (hw_pic->getType() == HWDeviceType::DX12) {
-        auto dx_pic = std::static_pointer_cast<DX12HardwarePicture>(hw_pic);
-
-        // Zero-copy DX12 to DX11 interop
-        HANDLE shared_handle = nullptr;
-        if (FAILED(device_->CreateSharedHandle(dx_pic->pic->texture, nullptr, GENERIC_ALL, nullptr, &shared_handle))) return Err(OM_CODEC_ENCODE_FAILED);
-
-        ComPtr<ID3D11Texture2D> d3d11_tex;
-        HRESULT hr = d3d11_device_->OpenSharedResource(shared_handle, __uuidof(ID3D11Texture2D), &d3d11_tex);
-        CloseHandle(shared_handle);
-        if (FAILED(hr)) return Err(OM_CODEC_ENCODE_FAILED);
-
-        ComPtr<IMFMediaBuffer> buffer;
-        if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), d3d11_tex.Get(), 0, FALSE, &buffer))) return Err(OM_CODEC_ENCODE_FAILED);
-        sample->AddBuffer(buffer.Get());
-      } else {
-        return Err(OM_CODEC_NOT_SUPPORTED);
-      }
-    } else {
-      // Host picture copy
-      const auto& host_pic = std::get<HostPicture>(picture.buffer);
-      ComPtr<IMFMediaBuffer> buffer;
-      if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(host_pic.buffer->bytes().size()), &buffer))) return Err(OM_CODEC_ENCODE_FAILED);
-      BYTE* data = nullptr;
-      if (SUCCEEDED(buffer->Lock(&data, nullptr, nullptr))) {
-        for (int i = 0; i < 2; ++i) {
-          const uint8_t* src = picture.planes.getData(i);
-          size_t src_stride = picture.planes.getLinesize(i);
-          size_t height = (i == 0) ? input_format_.height : (input_format_.height + 1) / 2;
-          for (size_t y = 0; y < height; ++y) {
-            memcpy(data, src + y * src_stride, input_format_.width);
-            data += input_format_.width;
-          }
-        }
-        buffer->Unlock();
-      }
-      buffer->SetCurrentLength(static_cast<DWORD>(host_pic.buffer->bytes().size()));
-      sample->AddBuffer(buffer.Get());
-    }
-
-    sample->SetSampleTime(frame.pts * 10000000LL / timescale_);
-
-    if (FAILED(encoder_->ProcessInput(0, sample.Get(), 0))) return Err(OM_CODEC_ENCODE_FAILED);
-
-    std::vector<Packet> packets;
-    while (true) {
-      MFT_OUTPUT_DATA_BUFFER output = {};
-      output.dwStreamID = 0;
-      MFT_OUTPUT_STREAM_INFO stream_info = {};
-      encoder_->GetOutputStreamInfo(0, &stream_info);
-
-      ComPtr<IMFSample> out_sample;
-      if (!(stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
-        MFCreateSample(&out_sample);
-        ComPtr<IMFMediaBuffer> out_buffer;
-        MFCreateMemoryBuffer(stream_info.cbSize, &out_buffer);
-        out_sample->AddBuffer(out_buffer.Get());
-        output.pSample = out_sample.Get();
-      }
-
-      DWORD status = 0;
-      HRESULT hr = encoder_->ProcessOutput(0, 1, &output, &status);
-      if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-      if (FAILED(hr)) return Err(OM_CODEC_ENCODE_FAILED);
-
-      if (output.pSample) {
-        ComPtr<IMFMediaBuffer> buf;
-        output.pSample->GetBufferByIndex(0, &buf);
-        DWORD len = 0;
-        BYTE* data = nullptr;
-        buf->Lock(&data, nullptr, &len);
-        Packet pkt;
-        pkt.allocate(len);
-        memcpy(pkt.bytes.data(), data, len);
-        buf->Unlock();
-
-        LONGLONG time = 0;
-        output.pSample->GetSampleTime(&time);
-        pkt.pts = time * timescale_ / 10000000LL;
-        packets.push_back(std::move(pkt));
-
-        if (stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) output.pSample->Release();
-      }
-      if (output.pEvents) output.pEvents->Release();
-    }
-
-    return Ok(std::move(packets));
-  }
-
-  auto getInfo() -> EncodingInfo override {
-    EncodingInfo info = {};
-    info.mastering_display = input_format_.mastering_display;
-    info.content_light_level = input_format_.content_light_level;
-    return info;
-  }
-
-  auto updateBitrate(const RateControlParams& rc) -> OMError override {
-    if (!encoder_) return OM_CODEC_OPEN_FAILED;
-
-    ComPtr<IMFAttributes> attributes;
-    if (FAILED(encoder_->GetAttributes(&attributes))) return OM_CODEC_OPEN_FAILED;
-
-    uint32_t bitrate = 5000000;
-    if (rc.getMode() == RateControlMode::CBR) {
-      bitrate = (uint32_t) std::get<CbrParams>(rc.params).bitrate.target_bitrate;
-    } else if (rc.getMode() == RateControlMode::VBR) {
-      bitrate = (uint32_t) std::get<VbrParams>(rc.params).bitrate.target_bitrate;
-    }
-
-    attributes->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-    return OM_SUCCESS;
-  }
-
-  auto requestKeyframe() -> OMError override {
-    if (!initialized_ || !encoder_) return OM_COMMON_NOT_INITIALIZED;
-    ComPtr<ICodecAPI> codec_api;
-    if (FAILED(encoder_.As(&codec_api))) return OM_COMMON_NOT_SUPPORTED;
-    VARIANT value = {};
-    value.vt = VT_UI4;
-    value.ulVal = 1;
-    const GUID property = CODECAPI_AVEncVideoForceKeyFrame;
-    return SUCCEEDED(codec_api->SetValue(&property, &value)) ? OM_SUCCESS : OM_COMMON_NOT_SUPPORTED;
+    OMDX11Init init = {};
+    init.device = d3d11_device_.Get();
+    init.adapter_index = -1;
+    d3d11_context_ = HWD3D11Context_create(init);
+    return d3d11_context_ != nullptr;
   }
 
   void release() {
-    initialized_ = false;
-    if (encoder_) {
-      encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-      encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-      encoder_.Reset();
-    }
-    device_manager_.Reset();
+    inner_.reset(); // before the device it runs on
+    if (d3d11_context_) HWD3D11Context_delete(d3d11_context_);
+    d3d11_context_ = nullptr;
     d3d11_device_.Reset();
     device_.Reset();
+  }
+
+public:
+  DX12Encoder() = default;
+  ~DX12Encoder() override { release(); }
+
+  auto configure(const EncoderOptions& options) -> OMError override {
+    release();
+    if (!options.hw_device || options.hw_device->type != HWDeviceType::DX12 || !options.hw_device->context)
+      return OM_CODEC_HWACCEL_FAILED;
+    device_ = HWD3D12Context_getDevice(static_cast<OMDX12Context*>(options.hw_device->context));
+    if (!device_) return OM_CODEC_HWACCEL_FAILED;
+    if (!createD3D11Device()) return fail(OM_CODEC_HWACCEL_FAILED, "no D3D11 device on the D3D12 device's adapter");
+
+    const CodecDescriptor* descriptor = dx11Encoder(options.format.codec_id);
+    if (!descriptor) return OM_CODEC_NOT_SUPPORTED;
+    inner_ = descriptor->encoder_factory();
+    EncoderOptions inner_options = options;
+    inner_options.hw_device = HWDevice {HWDeviceType::DX11, d3d11_context_};
+    return inner_->configure(inner_options);
+  }
+
+  auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
+    if (!inner_) return Err(OM_COMMON_NOT_INITIALIZED);
+    const auto* picture = std::get_if<Picture>(&frame.data);
+    const auto* hw = picture ? std::get_if<std::shared_ptr<HardwarePicture>>(&picture->buffer) : nullptr;
+    if (!hw || !*hw) return inner_->encode(frame);
+    if ((*hw)->getType() != HWDeviceType::DX12) return Err(OM_CODEC_NOT_SUPPORTED);
+
+    // The D3D12 texture must have been created shareable.
+    auto dx_pic = std::static_pointer_cast<DX12HardwarePicture>(*hw);
+    HANDLE shared_handle = nullptr;
+    if (FAILED(device_->CreateSharedHandle(dx_pic->pic->texture, nullptr, GENERIC_ALL, nullptr, &shared_handle))) {
+      return Err(fail(OM_CODEC_ENCODE_FAILED, "the D3D12 picture is not shareable (D3D12_HEAP_FLAG_SHARED)"));
+    }
+    ComPtr<ID3D11Device1> device1;
+    ComPtr<ID3D11Texture2D> texture;
+    HRESULT hr = d3d11_device_.As(&device1);
+    if (SUCCEEDED(hr)) hr = device1->OpenSharedResource1(shared_handle, IID_PPV_ARGS(&texture));
+    CloseHandle(shared_handle);
+    if (FAILED(hr)) return Err(fail(OM_CODEC_ENCODE_FAILED, "cannot open the D3D12 picture on D3D11"));
+
+    OMDX11Picture d3d11_picture = {};
+    d3d11_picture.texture = texture.Get();
+    Frame d3d11_frame = frame;
+    auto& d3d11_pic = std::get<Picture>(d3d11_frame.data);
+    d3d11_pic.buffer = std::static_pointer_cast<HardwarePicture>(std::make_shared<DX11HardwarePicture>(&d3d11_picture));
+    return inner_->encode(d3d11_frame); // the sample holds its own reference to the texture
+  }
+
+  auto finish() -> Result<std::vector<Packet>, OMError> override {
+    if (!inner_) return Err(OM_COMMON_NOT_INITIALIZED);
+    return inner_->finish();
+  }
+
+  auto getInfo() -> EncodingInfo override { return inner_ ? inner_->getInfo() : EncodingInfo {}; }
+
+  auto updateBitrate(const RateControlParams& rc) -> OMError override {
+    return inner_ ? inner_->updateBitrate(rc) : OM_COMMON_NOT_INITIALIZED;
+  }
+
+  auto requestKeyframe() -> OMError override {
+    return inner_ ? inner_->requestKeyframe() : OM_COMMON_NOT_INITIALIZED;
   }
 };
 
@@ -1198,6 +998,8 @@ const CodecDescriptor CODEC_DX12_ENC_H264 = {
     .long_name = "DirectX12 H.264 Encoder",
     .vendor = "Microsoft",
     .flags = HARDWARE,
+    // NVIDIA's H.264 MFT refuses 10-bit input.
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_YUV420P}}},
     .encoder_factory = [] { return std::make_unique<DX12Encoder>(); },
 };
 
@@ -1208,6 +1010,7 @@ const CodecDescriptor CODEC_DX12_ENC_H265 = {
     .long_name = "DirectX12 H.265 Encoder",
     .vendor = "Microsoft",
     .flags = HARDWARE,
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_YUV420P, OM_FORMAT_P010}}},
     .encoder_factory = [] { return std::make_unique<DX12Encoder>(); },
 };
 

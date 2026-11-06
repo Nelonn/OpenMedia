@@ -45,6 +45,7 @@ inline auto bitDepth(OMPixelFormat format) -> int {
     case OM_FORMAT_YUV422P16:
     case OM_FORMAT_YUV444P16:
     case OM_FORMAT_P016:
+    case OM_FORMAT_P216:
     case OM_FORMAT_GRAY16:
     case OM_FORMAT_RGBA64:
       return 16;
@@ -176,6 +177,9 @@ private:
       case OM_FORMAT_P012:
       case OM_FORMAT_P016: // valid bits in the MSBs
         return !libyuv::P010ToARGBMatrix(p16(y), y.stride / 2, p16(u), u.stride / 2,
+                                         dst, dst_stride, yuv, w, h);
+      case OM_FORMAT_P216: // 4:2:2, valid bits in the MSBs
+        return !libyuv::P210ToARGBMatrix(p16(y), y.stride / 2, p16(u), u.stride / 2,
                                          dst, dst_stride, yuv, w, h);
       case OM_FORMAT_YUV420P10:
         return !libyuv::I010ToARGBMatrix(p16(y), y.stride / 2, p16(u), u.stride / 2, p16(v), v.stride / 2,

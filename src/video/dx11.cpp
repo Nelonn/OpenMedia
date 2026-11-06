@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <span>
 #include <vector>
 #include <video/parser/av1_parser.hpp>
@@ -21,6 +22,7 @@
 #include <video/parser/h265_parser.hpp>
 #include <video/hdr_sei.hpp>
 #include <video/decode_report.hpp>
+#include <video/dx_surface.hpp>
 #include <video/reorder_queue.hpp>
 #include <util/color_codes.hpp>
 
@@ -56,6 +58,47 @@ static void ensureMediaFoundation() {
   (void) started;
 }
 
+namespace {
+
+// a * b / c rounded to nearest. The factors are reduced first, after which only
+// the remainder of a is multiplied: exact for any timestamp of a sane time base.
+auto rescale(int64_t a, int64_t b, int64_t c) -> int64_t {
+  if (c == 0) return 0;
+  const int64_t g = std::gcd(b, c);
+  b /= g;
+  c /= g;
+  if (b >= (int64_t(1) << 31) || c >= (int64_t(1) << 31))
+    return static_cast<int64_t>(std::llround(static_cast<long double>(a) * b / c));
+  const int64_t part = (a % c) * b;
+  return (a / c) * b + (part >= 0 ? part + c / 2 : part - c / 2) / c;
+}
+
+// NV12 or P010 go to the MFT as they are; 8-bit planar 4:2:0 is interleaved into NV12.
+auto acceptsInput(OMPixelFormat format) -> bool {
+  switch (format) {
+    case OM_FORMAT_NV12:
+    case OM_FORMAT_P010:
+    case OM_FORMAT_YUV420P:
+    case OM_FORMAT_YUVJ420P: return true;
+    default: return false;
+  }
+}
+
+// AVEncCommonQuality runs from 0 (smallest) to 100 (best), CRF the other way over 0..51.
+auto commonQuality(float crf) -> uint32_t {
+  return static_cast<uint32_t>(std::clamp(100.0f - crf * 100.0f / 51.0f, 0.0f, 100.0f));
+}
+
+// The AV1 MFT takes libaom's 0..63; a quantiser index (see av1_quant::qindexFromQp) is brought back to it.
+auto mftQp(OMCodecId codec, int32_t qp) -> uint64_t {
+  if (codec == OM_CODEC_AV1) return static_cast<uint64_t>(std::clamp(qp > 63 ? qp / 4 : qp, 0, 63));
+  return static_cast<uint64_t>(std::clamp(qp, 0, 51));
+}
+
+auto typeRefused(HRESULT hr) -> bool { return hr == MF_E_INVALIDMEDIATYPE || hr == MF_E_INVALIDTYPE; }
+
+} // namespace
+
 class DX11Encoder final : public Encoder {
   OMDX11Context* hw_context_ = nullptr;
   ComPtr<IMFTransform> encoder_;
@@ -66,7 +109,9 @@ class DX11Encoder final : public Encoder {
 
   VideoFormat input_format_ = {};
   OMCodecId codec_id_ = OM_CODEC_NONE;
-  uint32_t timescale_ = 90000;
+  // Units of the frames' pts; Media Foundation counts in 100 ns.
+  Rational time_base_ = {1, 90000};
+  LONGLONG frame_duration_ = 0;
   bool initialized_ = false;
   bool is_async_ = false;
   bool provides_samples_ = false;
@@ -75,6 +120,26 @@ class DX11Encoder final : public Encoder {
   OMMasteringDisplayMetadata hdr_mastering_display_ = {};
   OMContentLightLevel hdr_content_light_level_ = {};
   std::vector<uint8_t> hdr_sei_;
+  RateControlMode rate_mode_ = RateControlMode::VBR;
+
+  auto toMediaTime(int64_t pts) const -> LONGLONG {
+    return rescale(pts, int64_t(time_base_.num) * 10000000LL, time_base_.den);
+  }
+  auto fromMediaTime(LONGLONG time) const -> int64_t {
+    return rescale(time, time_base_.den, int64_t(time_base_.num) * 10000000LL);
+  }
+
+  auto setCodecValue(const GUID& property, uint32_t value) -> bool {
+    VARIANT v = {};
+    v.vt = VT_UI4;
+    v.ulVal = value;
+    const HRESULT hr = codec_api_->SetValue(&property, &v);
+    if (FAILED(hr)) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, "dx11 encoder: ICodecAPI {:08X} = {} refused (hr=0x{:08X})",
+                     static_cast<uint32_t>(property.Data1), value, static_cast<uint32_t>(hr));
+    }
+    return SUCCEEDED(hr);
+  }
 
   auto setup_device_manager() -> bool {
     ID3D11Device* device = HWD3D11Context_getDevice(hw_context_);
@@ -86,7 +151,9 @@ class DX11Encoder final : public Encoder {
     return true;
   }
 
-  auto setup_types(const EncoderOptions& options) -> bool {
+  // A type the MFT refuses is a format it does not encode (10-bit H.264 on NVIDIA,
+  // say), which is NOT_SUPPORTED rather than a failure to open.
+  auto setup_types(const EncoderOptions& options) -> OMError {
     ComPtr<IMFMediaType> input_type;
     ComPtr<IMFMediaType> output_type;
 
@@ -94,10 +161,10 @@ class DX11Encoder final : public Encoder {
 
     // The output type has to be set first: an encoder MFT cannot validate an
     // input type until it knows what it is producing.
-    if (FAILED(MFCreateMediaType(&output_type))) return false;
+    if (FAILED(MFCreateMediaType(&output_type))) return OM_CODEC_OPEN_FAILED;
     output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     GUID mf_codec = codecIdToMFVideoFormat(options.format.codec_id);
-    if (mf_codec == MFVideoFormat_Base) return false;
+    if (mf_codec == MFVideoFormat_Base) return OM_CODEC_NOT_SUPPORTED;
     output_type->SetGUID(MF_MT_SUBTYPE, mf_codec);
     MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE, input_format_.width, input_format_.height);
     MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, options.format.video.framerate.num, options.format.video.framerate.den);
@@ -115,9 +182,13 @@ class DX11Encoder final : public Encoder {
                                            ten_bit ? 10 : 8);
       if (profile != 0) output_type->SetUINT32(MF_MT_MPEG2_PROFILE, profile);
     }
-    if (FAILED(encoder_->SetOutputType(0, output_type.Get(), 0))) return false;
+    if (const HRESULT hr = encoder_->SetOutputType(0, output_type.Get(), 0); FAILED(hr)) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: SetOutputType failed (hr=0x{:08X})",
+                     static_cast<uint32_t>(hr));
+      return typeRefused(hr) ? OM_CODEC_NOT_SUPPORTED : OM_CODEC_OPEN_FAILED;
+    }
 
-    if (FAILED(MFCreateMediaType(&input_type))) return false;
+    if (FAILED(MFCreateMediaType(&input_type))) return OM_CODEC_OPEN_FAILED;
     input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     input_type->SetGUID(MF_MT_SUBTYPE, ten_bit ? MFVideoFormat_P010 : MFVideoFormat_NV12);
     MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, input_format_.width, input_format_.height);
@@ -130,10 +201,14 @@ class DX11Encoder final : public Encoder {
     input_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, map_nominal_range(options.format.video.color_range));
     apply_hdr_metadata(input_type.Get(), options.format.video.mastering_display,
                        options.format.video.content_light_level);
-    if (FAILED(encoder_->SetInputType(0, input_type.Get(), 0))) return false;
+    if (const HRESULT hr = encoder_->SetInputType(0, input_type.Get(), 0); FAILED(hr)) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: SetInputType failed (hr=0x{:08X})",
+                     static_cast<uint32_t>(hr));
+      return typeRefused(hr) ? OM_CODEC_NOT_SUPPORTED : OM_CODEC_OPEN_FAILED;
+    }
 
     captureExtradata();
-    return true;
+    return OM_SUCCESS;
   }
 
   // MF_MT_MPEG_SEQUENCE_HEADER is not trustworthy: the HEVC encoder omits the VPS there.
@@ -225,16 +300,35 @@ class DX11Encoder final : public Encoder {
     }
   }
 
+  // Both QP properties are 64-bit, I, P and B in 16 bits each: as a 32-bit VARIANT
+  // they are accepted and ignored. Set after the media types, which reset them.
+  auto apply_qp(const RateControlParams& rc) -> HRESULT {
+    if (!codec_api_ || rc.getMode() != RateControlMode::CQP) return S_OK;
+    const auto& cqp = std::get<CqpParams>(rc.params);
+    const uint64_t i = mftQp(codec_id_, cqp.qp_i);
+    const uint64_t p = mftQp(codec_id_, cqp.qp_p);
+    const uint64_t b = mftQp(codec_id_, cqp.qp_b.value_or(cqp.qp_p));
+    VARIANT v = {};
+    v.vt = VT_UI8;
+    v.ullVal = i | (i << 16) | (i << 32);
+    const GUID qp = CODECAPI_AVEncVideoEncodeQP;
+    HRESULT hr = codec_api_->SetValue(&qp, &v);
+    v.ullVal = i | (p << 16) | (b << 32);
+    const GUID frame_type_qp = CODECAPI_AVEncVideoEncodeFrameTypeQP;
+    const HRESULT frame_hr = codec_api_->SetValue(&frame_type_qp, &v);
+    if (FAILED(hr) && FAILED(frame_hr)) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_WARNING, "dx11 encoder: the MFT takes no QP (hr=0x{:08X})",
+                     static_cast<uint32_t>(hr));
+      return hr;
+    }
+    return S_OK;
+  }
+
   // Without ICodecAPI the MFT falls back to the driver's default rate control and GOP.
   void apply_rate_control(const EncoderOptions& options) {
     if (!codec_api_) return;
 
-    auto set_u32 = [&](const GUID& prop, uint32_t value) {
-      VARIANT v = {};
-      v.vt = VT_UI4;
-      v.ulVal = value;
-      codec_api_->SetValue(&prop, &v);
-    };
+    const auto set_u32 = [this](const GUID& prop, uint32_t value) { setCodecValue(prop, value); };
 
     uint32_t mode = eAVEncCommonRateControlMode_UnconstrainedVBR;
     switch (options.rate_control.getMode()) {
@@ -253,10 +347,8 @@ class DX11Encoder final : public Encoder {
       if (vbr.bitrate.max_bitrate)
         set_u32(CODECAPI_AVEncCommonMaxBitRate, static_cast<uint32_t>(*vbr.bitrate.max_bitrate));
     }
-    if (options.rate_control.getMode() == RateControlMode::CQP) {
-      const auto& cqp = std::get<CqpParams>(options.rate_control.params);
-      set_u32(CODECAPI_AVEncVideoEncodeQP, static_cast<uint32_t>(cqp.qp_i));
-    }
+    if (const auto* crf = std::get_if<CrfParams>(&options.rate_control.params))
+      set_u32(CODECAPI_AVEncCommonQuality, commonQuality(crf->quality));
 
     // Keyframe interval, expressed in frames.
     uint32_t gop = 0;
@@ -291,6 +383,11 @@ class DX11Encoder final : public Encoder {
       // Main and silently truncates the input.
       return (bit_depth > 8) ? static_cast<uint32_t>(eAVEncH265VProfile_Main_420_10)
                              : static_cast<uint32_t>(eAVEncH265VProfile_Main_420_8);
+    }
+    if (codec == OM_CODEC_AV1) {
+      // Without the 10-bit profile NVIDIA's AV1 MFT takes P010, then stops asking for input.
+      return (bit_depth > 8) ? static_cast<uint32_t>(eAVEncAV1VProfile_Main_420_10)
+                             : static_cast<uint32_t>(eAVEncAV1VProfile_Main_420_8);
     }
     return 0;
   }
@@ -564,18 +661,37 @@ class DX11Encoder final : public Encoder {
       if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(total), &buffer))) return {};
       BYTE* data = nullptr;
       if (FAILED(buffer->Lock(&data, nullptr, nullptr))) return {};
-      for (int plane = 0; plane < 2; ++plane) {
-        const uint8_t* src = picture.planes.getData(plane);
-        const size_t src_stride = picture.planes.getLinesize(plane);
-        const uint32_t rows = (plane == 0) ? luma_rows : chroma_rows;
-        if (!src) {
-          std::memset(data, plane == 0 ? 0 : 0x80, row_bytes * rows);
-          data += row_bytes * rows;
-          continue;
+      if (picture.width != input_format_.width || picture.height != input_format_.height) {
+        buffer->Unlock();
+        return {};
+      }
+      if (picture.format == OM_FORMAT_YUV420P || picture.format == OM_FORMAT_YUVJ420P) {
+        // Luma as it is, U and V interleaved.
+        for (uint32_t y = 0; y < luma_rows; ++y, data += row_bytes)
+          memcpy(data, picture.planes.getData(0) + y * picture.planes.getLinesize(0), row_bytes);
+        const uint32_t chroma_width = (input_format_.width + 1) / 2;
+        for (uint32_t y = 0; y < chroma_rows; ++y, data += row_bytes) {
+          const uint8_t* u = picture.planes.getData(1) + y * picture.planes.getLinesize(1);
+          const uint8_t* v = picture.planes.getData(2) + y * picture.planes.getLinesize(2);
+          for (uint32_t x = 0; x < chroma_width; ++x) {
+            data[2 * x] = u[x];
+            data[2 * x + 1] = v[x];
+          }
         }
-        for (uint32_t y = 0; y < rows; ++y) {
-          memcpy(data, src + y * src_stride, row_bytes);
-          data += row_bytes;
+      } else {
+        for (int plane = 0; plane < 2; ++plane) {
+          const uint8_t* src = picture.planes.getData(plane);
+          const size_t src_stride = picture.planes.getLinesize(plane);
+          const uint32_t rows = (plane == 0) ? luma_rows : chroma_rows;
+          if (!src) {
+            std::memset(data, plane == 0 ? 0 : 0x80, row_bytes * rows);
+            data += row_bytes * rows;
+            continue;
+          }
+          for (uint32_t y = 0; y < rows; ++y) {
+            memcpy(data, src + y * src_stride, row_bytes);
+            data += row_bytes;
+          }
         }
       }
       buffer->Unlock();
@@ -583,7 +699,9 @@ class DX11Encoder final : public Encoder {
       sample->AddBuffer(buffer.Get());
     }
 
-    sample->SetSampleTime(static_cast<LONGLONG>(frame.pts) * 10000000LL / timescale_);
+    sample->SetSampleTime(toMediaTime(frame.pts));
+    // Rate control budgets bits per unit of time.
+    if (frame_duration_ > 0) sample->SetSampleDuration(frame_duration_);
     return sample;
   }
 
@@ -633,12 +751,15 @@ class DX11Encoder final : public Encoder {
 
           LONGLONG time = 0;
           if (SUCCEEDED(output.pSample->GetSampleTime(&time)))
-            pkt.pts = time * timescale_ / 10000000LL;
+            pkt.pts = fromMediaTime(time);
           LONGLONG duration = 0;
           if (SUCCEEDED(output.pSample->GetSampleDuration(&duration)))
-            pkt.duration = duration * timescale_ / 10000000LL;
-          // Encoders here emit in display order, so DTS tracks PTS.
-          pkt.dts = pkt.pts;
+            pkt.duration = fromMediaTime(duration);
+          // Stated when B-frames reorder the output; otherwise decode time is pts.
+          UINT64 decode_time = 0;
+          pkt.dts = SUCCEEDED(output.pSample->GetUINT64(MFSampleExtension_DecodeTimestamp, &decode_time))
+                        ? fromMediaTime(static_cast<LONGLONG>(decode_time))
+                        : pkt.pts;
           UINT32 clean_point = 0;
           if (SUCCEEDED(output.pSample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point)))
             pkt.is_keyframe = clean_point != 0;
@@ -690,6 +811,15 @@ class DX11Encoder final : public Encoder {
 
       MediaEventType type = MEUnknown;
       if (FAILED(event->GetType(&type))) return OM_CODEC_ENCODE_FAILED;
+      // An MFT that gives up says so with an event and then never asks for input
+      // or finishes a drain: waiting on would block for good.
+      HRESULT status = S_OK;
+      event->GetStatus(&status);
+      if (type == MEError || FAILED(status)) {
+        openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: MFT reported an error (event {}, hr=0x{:08X})",
+                       static_cast<int>(type), static_cast<uint32_t>(status));
+        return OM_CODEC_ENCODE_FAILED;
+      }
 
       if (type == METransformNeedInput) {
         if (input_pending) {
@@ -734,6 +864,11 @@ public:
     if (!options.hw_device || options.hw_device->type != HWDeviceType::DX11) return OM_CODEC_HWACCEL_FAILED;
     hw_context_ = static_cast<OMDX11Context*>(options.hw_device->context);
     codec_id_ = options.format.codec_id;
+    if (!acceptsInput(options.video_format.format)) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR,
+                     "dx11 encoder: takes NV12, P010 or 8-bit planar 4:2:0 input, not this pixel format");
+      return OM_CODEC_NOT_SUPPORTED;
+    }
 
     if (!setup_device_manager()) return OM_CODEC_HWACCEL_FAILED;
 
@@ -754,7 +889,11 @@ public:
     }
     for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
     CoTaskMemFree(activates);
-    if (FAILED(activate_hr) || !encoder_) return OM_CODEC_OPEN_FAILED;
+    if (FAILED(activate_hr) || !encoder_) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: no hardware MFT activated (hr=0x{:08X})",
+                     static_cast<uint32_t>(activate_hr));
+      return OM_CODEC_OPEN_FAILED;
+    }
 
     ComPtr<IMFAttributes> attributes;
     if (SUCCEEDED(encoder_->GetAttributes(&attributes)) && attributes) {
@@ -762,7 +901,10 @@ public:
       if (SUCCEEDED(attributes->GetUINT32(MF_TRANSFORM_ASYNC, &async)) && async) {
         // An async MFT refuses every call until it is unlocked, and this has to
         // happen before any type is set.
-        if (FAILED(attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) return OM_CODEC_OPEN_FAILED;
+        if (FAILED(attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) {
+          openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: cannot unlock the async MFT");
+          return OM_CODEC_OPEN_FAILED;
+        }
         is_async_ = true;
       }
       // Real-time senders cannot afford the encoder holding frames back for
@@ -777,11 +919,16 @@ public:
     encoder_.As(&codec_api_);
 
     input_format_ = options.video_format;
+    time_base_ = options.time_base.num > 0 && options.time_base.den > 0 ? options.time_base : Rational {1, 90000};
+    const auto& rate = options.format.video.framerate;
+    frame_duration_ = rate.num > 0 && rate.den > 0 ? rescale(rate.den, 10000000LL, rate.num) : 0;
     hdr_mastering_display_ = options.format.video.mastering_display;
     hdr_content_light_level_ = options.format.video.content_light_level;
     hdr_sei_ = buildHdrSei();
     apply_rate_control(options);
-    if (!setup_types(options)) return OM_CODEC_OPEN_FAILED;
+    if (const OMError error = setup_types(options); error != OM_SUCCESS) return error;
+    apply_qp(options.rate_control);
+    rate_mode_ = options.rate_control.getMode();
 
     MFT_OUTPUT_STREAM_INFO stream_info = {};
     encoder_->GetOutputStreamInfo(0, &stream_info);
@@ -790,8 +937,13 @@ public:
 
     if (is_async_ && FAILED(encoder_.As(&event_generator_))) return OM_CODEC_OPEN_FAILED;
 
-    if (FAILED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0))) return OM_CODEC_OPEN_FAILED;
-    if (FAILED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))) return OM_CODEC_OPEN_FAILED;
+    for (const auto message : {MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM}) {
+      if (const HRESULT hr = encoder_->ProcessMessage(message, 0); FAILED(hr)) {
+        openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: ProcessMessage({}) failed (hr=0x{:08X})",
+                       static_cast<int>(message), static_cast<uint32_t>(hr));
+        return OM_CODEC_OPEN_FAILED;
+      }
+    }
 
     initialized_ = true;
     return OM_SUCCESS;
@@ -805,11 +957,7 @@ public:
     // An empty frame means flush: drain whatever the encoder still holds.
     if (!std::holds_alternative<Picture>(frame.data) ||
         std::get<Picture>(frame.data).width == 0) {
-      encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-      const OMError err = is_async_ ? pump_async(nullptr, packets, true)
-                                    : pump_sync(nullptr, packets);
-      if (err != OM_SUCCESS) return Err(err);
-      return Ok(std::move(packets));
+      return finish();
     }
 
     ComPtr<IMFSample> sample = wrap_frame(frame);
@@ -820,6 +968,15 @@ public:
     if (err != OM_SUCCESS) return Err(err);
 
     if (extradata_.empty()) captureExtradata();
+    return Ok(std::move(packets));
+  }
+
+  auto finish() -> Result<std::vector<Packet>, OMError> override {
+    if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
+    std::vector<Packet> packets;
+    encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+    const OMError err = is_async_ ? pump_async(nullptr, packets, true) : pump_sync(nullptr, packets);
+    if (err != OM_SUCCESS) return Err(err);
     return Ok(std::move(packets));
   }
 
@@ -836,12 +993,28 @@ public:
   auto updateBitrate(const RateControlParams& rc) -> OMError override {
     if (!encoder_) return OM_CODEC_OPEN_FAILED;
     if (!codec_api_) return OM_COMMON_NOT_SUPPORTED;
-
-    VARIANT v = {};
-    v.vt = VT_UI4;
-    v.ulVal = target_bitrate(rc);
-    const GUID prop = CODECAPI_AVEncCommonMeanBitRate;
-    return SUCCEEDED(codec_api_->SetValue(&prop, &v)) ? OM_SUCCESS : OM_CODEC_OPEN_FAILED;
+    // The mode is fixed once streaming; what steers it is not.
+    if (rc.getMode() != rate_mode_) {
+      openmedia::log(OM_CATEGORY_ENCODER, OM_LEVEL_ERROR, "dx11 encoder: the rate control mode cannot change while encoding");
+      return OM_COMMON_NOT_SUPPORTED;
+    }
+    const bool ok = std::visit(
+        [&](const auto& params) {
+          using T = std::decay_t<decltype(params)>;
+          if constexpr (std::is_same_v<T, CqpParams>) {
+            return SUCCEEDED(apply_qp(rc));
+          } else if constexpr (std::is_same_v<T, CrfParams>) {
+            return setCodecValue(CODECAPI_AVEncCommonQuality, commonQuality(params.quality));
+          } else if constexpr (std::is_same_v<T, VbrParams>) {
+            const bool mean = setCodecValue(CODECAPI_AVEncCommonMeanBitRate, target_bitrate(rc));
+            const auto& max = params.bitrate.max_bitrate;
+            return mean && (!max || setCodecValue(CODECAPI_AVEncCommonMaxBitRate, static_cast<uint32_t>(*max)));
+          } else {
+            return setCodecValue(CODECAPI_AVEncCommonMeanBitRate, target_bitrate(rc));
+          }
+        },
+        rc.params);
+    return ok ? OM_SUCCESS : OM_COMMON_NOT_SUPPORTED;
   }
 
   auto requestKeyframe() -> OMError override {
@@ -977,6 +1150,8 @@ class DX11Decoder final : public Decoder, private DecodeReport {
   // Set from DecoderOptions::hardware_output: hand the surface itself to the
   // caller rather than reading it back into system memory.
   bool hardware_output_ = false;
+  // What the decoder writes; for HEVC it follows the stream's chroma format and depth.
+  DXGI_FORMAT surface_format_ = DXGI_FORMAT_NV12;
   std::shared_ptr<DX11PicturePool> picture_pool_;
 
   // A copy in flight, with everything needed to rebuild its frame once it lands.
@@ -1029,6 +1204,7 @@ public:
     height_ = options.format.video.height;
 
     uint8_t bit_depth = 8;
+    int chroma_format_idc = 1;
     if (codec_id_ == OM_CODEC_H264) {
       h264_.parseExtradata(options.extradata);
       padded_width_ = dx_h264::alignUp(width_, 16u);
@@ -1108,17 +1284,21 @@ public:
           padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(s.pic_height_in_luma_samples), 32u);
           dpb_slot_count_ = 16; // HEVC usually needs up to 16
           bit_depth = static_cast<uint8_t>(s.bit_depth_luma_minus8 + 8);
-          if (s.chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
+          chroma_format_idc = s.chroma_format_idc;
+          if (!dx_h265::isDecodable(s)) return OM_CODEC_NOT_SUPPORTED;
           if (width_ == 0 || height_ == 0) {
             // HEVC encoders may pad the coded picture (for example 1080 to 1088)
             // and signal the visible rectangle in the conformance window.
             const uint32_t coded_width = static_cast<uint32_t>(s.pic_width_in_luma_samples);
             const uint32_t coded_height = static_cast<uint32_t>(s.pic_height_in_luma_samples);
+            // In chroma samples: SubWidthC and SubHeightC.
+            const uint32_t sub_x = s.chroma_format_idc == 3 ? 1u : 2u;
+            const uint32_t sub_y = s.chroma_format_idc == 1 ? 2u : 1u;
             const uint32_t crop_x = s.conformance_window_flag
-                                        ? 2u * static_cast<uint32_t>(s.conf_win_left_offset + s.conf_win_right_offset)
+                                        ? sub_x * static_cast<uint32_t>(s.conf_win_left_offset + s.conf_win_right_offset)
                                         : 0u;
             const uint32_t crop_y = s.conformance_window_flag
-                                        ? 2u * static_cast<uint32_t>(s.conf_win_top_offset + s.conf_win_bottom_offset)
+                                        ? sub_y * static_cast<uint32_t>(s.conf_win_top_offset + s.conf_win_bottom_offset)
                                         : 0u;
             width_ = coded_width > crop_x ? coded_width - crop_x : coded_width;
             height_ = coded_height > crop_y ? coded_height - crop_y : coded_height;
@@ -1152,12 +1332,12 @@ public:
     device_->GetImmediateContext(&context_);
     if (!context_) return OM_CODEC_HWACCEL_FAILED;
 
-    if (!createDecoderResources(bit_depth)) return OM_CODEC_HWACCEL_FAILED;
+    if (!createDecoderResources(bit_depth, chroma_format_idc)) return OM_CODEC_HWACCEL_FAILED;
 
     output_format_ = {};
     output_format_.width = width_;
     output_format_.height = height_;
-    output_format_.format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+    output_format_.format = outputFormat(surface_format_);
     output_format_.color_space = options.format.video.color_space;
     output_format_.transfer_char = options.format.video.transfer_char;
     output_format_.color_primaries = options.format.video.color_primaries;
@@ -1454,7 +1634,11 @@ private:
     }
   }
 
-  auto createDecoderResources(uint8_t bit_depth) -> bool {
+  auto outputFormat(DXGI_FORMAT surface) const -> OMPixelFormat {
+    return hardware_output_ ? dx_surface::hardwareFormat(surface) : dx_surface::hostFormat(surface);
+  }
+
+  auto createDecoderResources(uint8_t bit_depth, int chroma_format_idc = 1) -> bool {
     decoder_.Reset();
     dpb_textures_.clear();
     staging_.clear();
@@ -1475,8 +1659,7 @@ private:
       target_profile = (bit_depth > 8) ? D3D11_DECODER_PROFILE_VP9_VLD_10BIT_PROFILE2
                                        : D3D11_DECODER_PROFILE_VP9_VLD_PROFILE0;
     } else {
-      target_profile = (bit_depth > 8) ? D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10
-                                       : D3D11_DECODER_PROFILE_HEVC_VLD_MAIN;
+      target_profile = dx_h265::decodeProfile(chroma_format_idc, bit_depth);
     }
     bool profile_supported = false;
     const UINT profile_count = video_device_->GetVideoDecoderProfileCount();
@@ -1493,7 +1676,8 @@ private:
     decoder_desc.Guid = target_profile;
     decoder_desc.SampleWidth = padded_width_;
     decoder_desc.SampleHeight = padded_height_;
-    decoder_desc.OutputFormat = (bit_depth > 8) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    decoder_desc.OutputFormat =
+        dx_surface::decodeFormat(codec_id_ == OM_CODEC_H265 ? chroma_format_idc : 1, bit_depth);
 
     UINT config_count = 0;
     if (FAILED(video_device_->GetVideoDecoderConfigCount(&decoder_desc, &config_count)) || config_count == 0) return false;
@@ -1552,7 +1736,8 @@ private:
       if (FAILED(video_device_->CreateVideoDecoderOutputView(slots_[i].texture.Get(), &view_desc, &slots_[i].view))) return false;
     }
 
-    output_format_.format = static_cast<OMPixelFormat>(texture_desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
+    surface_format_ = texture_desc.Format;
+    output_format_.format = outputFormat(surface_format_);
     return true;
   }
 
@@ -1582,15 +1767,14 @@ private:
       const auto& pps = h265_->pps(sh.pps_id);
       if (pps.sps_id < 0 || pps.sps_id >= 16 || !h265_->sps(pps.sps_id).valid) return Err(OM_CODEC_DECODE_FAILED);
       const auto& sps = h265_->sps(pps.sps_id);
-      if (sps.chroma_format_idc != 1 || sps.bit_depth_luma_minus8 != sps.bit_depth_chroma_minus8) return Err(OM_CODEC_NOT_SUPPORTED);
+      if (!dx_h265::isDecodable(sps)) return Err(OM_CODEC_NOT_SUPPORTED);
 
       const uint8_t bit_depth = static_cast<uint8_t>(sps.bit_depth_luma_minus8 + 8);
-      const OMPixelFormat expected_format = bit_depth > 8 ? OM_FORMAT_P010 : OM_FORMAT_NV12;
-      if (output_format_.format != expected_format) {
+      if (surface_format_ != dx_surface::decodeFormat(sps.chroma_format_idc, bit_depth)) {
         padded_width_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_width_in_luma_samples), 32u);
         padded_height_ = dx_h264::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 32u);
         dpb_slot_count_ = 16;
-        if (!createDecoderResources(bit_depth)) return Err(OM_CODEC_HWACCEL_FAILED);
+        if (!createDecoderResources(bit_depth, sps.chroma_format_idc)) return Err(OM_CODEC_HWACCEL_FAILED);
       }
 
       // The parser is the one that knows which picture 8.3.1 makes the previous one.
@@ -1609,6 +1793,10 @@ private:
       DXVA_Qmatrix_HEVC qmatrix = {};
       const bool submit_qmatrix = sps.scaling_list_enabled_flag;
       if (submit_qmatrix) dx_h265::fillQMatrix(sps, pps, qmatrix);
+      // The 4:2:2 and 4:4:4 profiles are RExt ones and read the extended form.
+      DXVA_PicParams_HEVC_RangeExt range_ext = {};
+      const bool rext = sps.chroma_format_idc != 1;
+      if (rext) dx_h265::fillRangeExtParams(sps, pps, pic_params, range_ext);
 
       auto slices = slice_data.slices;
 
@@ -1629,8 +1817,8 @@ private:
       // The quantisation matrix is only sent when the stream enables scaling
       // lists, so the list is built rather than written out straight.
       BufferUpload uploads[4] = {
-          {D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, &pic_params, sizeof(pic_params), 0,
-           "H.265 picture parameters"},
+          {D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, rext ? static_cast<const void*>(&range_ext) : &pic_params,
+           rext ? sizeof(range_ext) : sizeof(pic_params), 0, "H.265 picture parameters"},
       };
       size_t upload_count = 1;
       if (submit_qmatrix) {
@@ -2308,7 +2496,7 @@ private:
     texture->GetDesc(&desc);
 
     Picture pic;
-    pic.format = (desc.Format == DXGI_FORMAT_P010) ? OM_FORMAT_P010 : OM_FORMAT_NV12;
+    pic.format = dx_surface::hardwareFormat(desc.Format);
     pic.width = width_;
     pic.height = height_;
     pic.color_space = output_format_.color_space;
@@ -2363,27 +2551,16 @@ private:
     D3D11_MAPPED_SUBRESOURCE map = {};
     if (FAILED(context_->Map(staging, 0, D3D11_MAP_READ, 0, &map))) return std::nullopt;
 
-    const OMPixelFormat om_fmt = (desc.Format == DXGI_FORMAT_P010 ? OM_FORMAT_P010 : OM_FORMAT_NV12);
-    Picture pic(om_fmt, width_, height_);
+    Picture pic(dx_surface::hostFormat(desc.Format), width_, height_);
     pic.color_space = output_format_.color_space;
     pic.transfer_char = output_format_.transfer_char;
     pic.color_primaries = output_format_.color_primaries;
     pic.color_range = output_format_.color_range;
     pic.mastering_display = output_format_.mastering_display;
     pic.content_light_level = output_format_.content_light_level;
-    const auto y_stride = pic.planes.getLinesize(0);
-    const auto uv_stride = pic.planes.getLinesize(1);
-    auto* y = pic.planes.getData(0);
-    auto* uv = pic.planes.getData(1);
-    const auto* src_y = static_cast<const uint8_t*>(map.pData);
-    const auto* src_uv = src_y + static_cast<size_t>(map.RowPitch) * padded_height_;
-    const size_t bpp = getBytesPerPixel(om_fmt, 0);
-    for (uint32_t row = 0; row < height_; ++row) {
-      memcpy(y + static_cast<size_t>(row) * y_stride, src_y + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
-    }
-    for (uint32_t row = 0; row < (height_ + 1) / 2; ++row) {
-      memcpy(uv + static_cast<size_t>(row) * uv_stride, src_uv + static_cast<size_t>(row) * map.RowPitch, width_ * bpp);
-    }
+    const auto* data = static_cast<const uint8_t*>(map.pData);
+    dx_surface::copyToHost(desc.Format, data, map.RowPitch, data + size_t(map.RowPitch) * padded_height_,
+                           map.RowPitch, width_, height_, pic);
     context_->Unmap(staging, 0);
     return pic;
   }
@@ -2463,6 +2640,8 @@ const CodecDescriptor CODEC_DX11_ENC_H264 = {
     .long_name = "DirectX11 H.264 Encoder",
     .vendor = "Microsoft",
     .flags = HARDWARE,
+    // NVIDIA's H.264 MFT refuses 10-bit input.
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_YUV420P}}},
     .encoder_factory = [] { return std::make_unique<DX11Encoder>(); },
 };
 
@@ -2473,6 +2652,7 @@ const CodecDescriptor CODEC_DX11_ENC_H265 = {
     .long_name = "DirectX11 H.265/HEVC Encoder",
     .vendor = "Microsoft",
     .flags = HARDWARE,
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_YUV420P, OM_FORMAT_P010}}},
     .encoder_factory = [] { return std::make_unique<DX11Encoder>(); },
 };
 
@@ -2483,6 +2663,7 @@ const CodecDescriptor CODEC_DX11_ENC_AV1 = {
     .long_name = "DirectX11 AV1 Encoder",
     .vendor = "Microsoft",
     .flags = HARDWARE,
+    .caps = CodecCaps {.video = VideoCodecCaps {.pix_fmts = {OM_FORMAT_NV12, OM_FORMAT_YUV420P, OM_FORMAT_P010}}},
     .encoder_factory = [] { return std::make_unique<DX11Encoder>(); },
 };
 

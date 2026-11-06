@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <new>
 #include <openmedia/log.hpp>
+#include <openmedia/video.hpp>
 #include "video/nv_loader.hpp"
 
 using namespace openmedia;
@@ -113,5 +114,33 @@ void HWCudaContext_copyToHost(OMCudaContext* context,
   copy.Height = (height + 1) / 2;
   cu->cuMemcpy2DAsync(&copy, context->cu_stream);
 
+  cu->cuStreamSynchronize(context->cu_stream);
+}
+
+void HWCudaContext_copyPlanesToHost(OMCudaContext* context,
+                                    OMCudaPicture* picture,
+                                    uint32_t format,
+                                    uint32_t width, uint32_t height,
+                                    void* const dst[3], const uint32_t dst_pitch[3]) {
+  if (!context || !picture || !dst || !dst_pitch) return;
+  auto* cu = NVLoader::getInstance().cuda();
+  if (!cu) return;
+
+  // NVDecPicture keeps plane k at k * pitch * height, whatever the format.
+  const auto fmt = static_cast<OMPixelFormat>(format);
+  const uint32_t planes = openmedia::getNumPlanes(fmt);
+  for (uint32_t plane = 0; plane < planes && plane < 3; ++plane) {
+    const auto [plane_width, plane_height] = openmedia::getPlaneDimensions(fmt, plane, width, height);
+    CUDA_MEMCPY2D copy = {};
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcDevice = (CUdeviceptr) picture->data + (size_t) picture->pitch * height * plane;
+    copy.srcPitch = picture->pitch;
+    copy.dstMemoryType = CU_MEMORYTYPE_HOST;
+    copy.dstHost = dst[plane];
+    copy.dstPitch = dst_pitch[plane];
+    copy.WidthInBytes = (size_t) plane_width * openmedia::getBytesPerPixel(fmt, static_cast<uint8_t>(plane));
+    copy.Height = plane_height;
+    cu->cuMemcpy2DAsync(&copy, context->cu_stream);
+  }
   cu->cuStreamSynchronize(context->cu_stream);
 }

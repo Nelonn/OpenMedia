@@ -30,6 +30,8 @@ OM_ENUM(OMPixelFormat, uint32_t) {
     OM_FORMAT_P010 = OM_MAGIC('P010'),
     OM_FORMAT_P012 = OM_MAGIC('P012'),
     OM_FORMAT_P016 = OM_MAGIC('P016'),
+    // Semi-planar 4:2:2, 16-bit samples with the valid bits in the MSBs (P010's 4:2:2 sibling).
+    OM_FORMAT_P216 = OM_MAGIC('P216'),
     OM_FORMAT_YUV420P10 = OM_MAGIC('I010'),
     OM_FORMAT_YUV420P12 = OM_MAGIC('I012'),
     OM_FORMAT_YUV420P16 = OM_MAGIC('I016'),
@@ -39,6 +41,17 @@ OM_ENUM(OMPixelFormat, uint32_t) {
     OM_FORMAT_YUV444P10 = OM_MAGIC('I410'),
     OM_FORMAT_YUV444P12 = OM_MAGIC('I412'),
     OM_FORMAT_YUV444P16 = OM_MAGIC('I416'),
+    // Packed 4:4:4, one sample per pixel, as Direct3D decodes into them:
+    // AYUV bytes V,U,Y,A; Y410 one 32-bit word, U in bits 0-9, Y 10-19, V 20-29;
+    // Y416 16-bit U,Y,V,A with the valid bits in the MSBs.
+    OM_FORMAT_AYUV = OM_MAGIC('AYUV'),
+    OM_FORMAT_Y410 = OM_MAGIC('Y410'),
+    OM_FORMAT_Y416 = OM_MAGIC('Y416'),
+    // Packed 4:2:2, two pixels per Y0 U Y1 V group: 8-bit (YUY2), or 16-bit
+    // samples with the valid bits in the MSBs (Y210 for 10 bits, Y216).
+    OM_FORMAT_YUY2 = OM_MAGIC('YUY2'),
+    OM_FORMAT_Y210 = OM_MAGIC('Y210'),
+    OM_FORMAT_Y216 = OM_MAGIC('Y216'),
     OM_FORMAT_RGB32 = OM_MAGIC('BGR '),
     OM_FORMAT_RGBA64 = OM_MAGIC('RG64'),
     OM_FORMAT_PAL8 = OM_MAGIC('PAL8'),
@@ -169,6 +182,8 @@ inline auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> u
     case OM_FORMAT_P010:
     case OM_FORMAT_P012:
     case OM_FORMAT_P016:
+    case OM_FORMAT_P216:
+    case OM_FORMAT_YUY2:
     case OM_FORMAT_YUV420P10:
     case OM_FORMAT_YUV420P12:
     case OM_FORMAT_YUV420P16:
@@ -182,8 +197,13 @@ inline auto getBytesPerPixel(OMPixelFormat fmt, uint8_t plane_idx) noexcept -> u
     case OM_FORMAT_R8G8B8A8:
     case OM_FORMAT_B8G8R8A8:
     case OM_FORMAT_RGB32:
+    case OM_FORMAT_AYUV:
+    case OM_FORMAT_Y410:
+    case OM_FORMAT_Y210:
+    case OM_FORMAT_Y216:
       return 4;
     case OM_FORMAT_RGBA64:
+    case OM_FORMAT_Y416:
       return 8;
     case OM_FORMAT_PAL8:
       return plane_idx == 0 ? 1 : 4;
@@ -201,6 +221,12 @@ inline auto getNumPlanes(OMPixelFormat fmt) noexcept -> uint32_t {
     case OM_FORMAT_RGBA64:
     case OM_FORMAT_GRAY8:
     case OM_FORMAT_GRAY16:
+    case OM_FORMAT_AYUV:
+    case OM_FORMAT_Y410:
+    case OM_FORMAT_Y416:
+    case OM_FORMAT_YUY2:
+    case OM_FORMAT_Y210:
+    case OM_FORMAT_Y216:
       return 1;
 
       // Palette (index + palette)
@@ -215,6 +241,7 @@ inline auto getNumPlanes(OMPixelFormat fmt) noexcept -> uint32_t {
     case OM_FORMAT_P010:
     case OM_FORMAT_P012:
     case OM_FORMAT_P016:
+    case OM_FORMAT_P216:
       return 2;
 
       // Planar (Y, U, V separate)
@@ -282,6 +309,7 @@ inline auto getPlaneDimensions(OMPixelFormat format, uint32_t plane_idx, uint32_
 
       // 4:2:2 semi-planar
     case OM_FORMAT_NV16:
+    case OM_FORMAT_P216:
       if (plane_idx == 0)
         return {width, height};
       else

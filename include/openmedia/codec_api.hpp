@@ -225,6 +225,8 @@ struct OPENMEDIA_ABI EncoderOptions {
   std::optional<HWDevice> hw_device;
   Dictionary extra;
   RateControlParams rate_control;
+  // Units of the frames' pts, which the packets' pts/dts come back in. Unset is 1/90000.
+  Rational time_base = {};
 };
 
 struct OPENMEDIA_ABI EncodingInfo {
