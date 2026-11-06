@@ -888,6 +888,23 @@ auto H265AccessUnitParser::parseSps(openmedia::BitReader& br) -> bool {
   sps.strong_intra_smoothing_enabled_flag = br.readBit() != 0;
   sps.vui_parameters_present_flag = br.readBit() != 0;
   if (sps.vui_parameters_present_flag && !parseVui(br, sps)) return false;
+  // Only the range extension matters to a 4:2:0/4:2:2/4:4:4 decoder; the rest
+  // (multilayer, 3D, SCC) follow it and are left unread.
+  if (br.readBit() != 0) { // sps_extension_present_flag
+    sps.sps_range_extension_flag = br.readBit() != 0;
+    br.skipBits(7); // multilayer, 3d, scc, sps_extension_4bits
+    if (sps.sps_range_extension_flag) {
+      sps.transform_skip_rotation_enabled_flag = br.readBit() != 0;
+      sps.transform_skip_context_enabled_flag = br.readBit() != 0;
+      sps.implicit_rdpcm_enabled_flag = br.readBit() != 0;
+      sps.explicit_rdpcm_enabled_flag = br.readBit() != 0;
+      sps.extended_precision_processing_flag = br.readBit() != 0;
+      sps.intra_smoothing_disabled_flag = br.readBit() != 0;
+      sps.high_precision_offsets_enabled_flag = br.readBit() != 0;
+      sps.persistent_rice_adaptation_enabled_flag = br.readBit() != 0;
+      sps.cabac_bypass_alignment_enabled_flag = br.readBit() != 0;
+    }
+  }
   if (!br.ok()) return false;
   sps_[sps_id] = sps;
   has_sps_ = true;
@@ -984,6 +1001,37 @@ auto H265AccessUnitParser::parsePps(openmedia::BitReader& br) -> bool {
   if (pps.log2_parallel_merge_level_minus2 < 0 || pps.log2_parallel_merge_level_minus2 > 4) return false;
   pps.slice_segment_header_extension_present_flag = br.readBit() != 0;
   pps.pps_extension_present_flag = br.readBit() != 0;
+  if (pps.pps_extension_present_flag) {
+    pps.pps_range_extension_flag = br.readBit() != 0;
+    br.skipBits(7); // multilayer, 3d, scc, pps_extension_4bits
+    if (pps.pps_range_extension_flag) {
+      if (pps.transform_skip_enabled_flag) {
+        pps.log2_max_transform_skip_block_size_minus2 = static_cast<int>(br.readUE());
+        if (pps.log2_max_transform_skip_block_size_minus2 < 0 || pps.log2_max_transform_skip_block_size_minus2 > 3) return false;
+      }
+      pps.cross_component_prediction_enabled_flag = br.readBit() != 0;
+      pps.chroma_qp_offset_list_enabled_flag = br.readBit() != 0;
+      if (pps.chroma_qp_offset_list_enabled_flag) {
+        pps.diff_cu_chroma_qp_offset_depth = static_cast<int>(br.readUE());
+        pps.chroma_qp_offset_list_len_minus1 = static_cast<int>(br.readUE());
+        if (pps.diff_cu_chroma_qp_offset_depth < 0 || pps.diff_cu_chroma_qp_offset_depth > 3) return false;
+        // Bounds the writes below.
+        if (pps.chroma_qp_offset_list_len_minus1 < 0 || pps.chroma_qp_offset_list_len_minus1 > 5) return false;
+        for (int i = 0; i <= pps.chroma_qp_offset_list_len_minus1; ++i) {
+          pps.cb_qp_offset_list[i] = br.readSE();
+          pps.cr_qp_offset_list[i] = br.readSE();
+          if (pps.cb_qp_offset_list[i] < -12 || pps.cb_qp_offset_list[i] > 12) return false;
+          if (pps.cr_qp_offset_list[i] < -12 || pps.cr_qp_offset_list[i] > 12) return false;
+        }
+      }
+      const int max_sao_scale = std::max(0, sps.bit_depth_luma_minus8 - 2);
+      pps.log2_sao_offset_scale_luma = static_cast<int>(br.readUE());
+      pps.log2_sao_offset_scale_chroma = static_cast<int>(br.readUE());
+      if (pps.log2_sao_offset_scale_luma < 0 || pps.log2_sao_offset_scale_luma > max_sao_scale) return false;
+      if (pps.log2_sao_offset_scale_chroma < 0 ||
+          pps.log2_sao_offset_scale_chroma > std::max(0, sps.bit_depth_chroma_minus8 - 2)) return false;
+    }
+  }
   if (!br.ok()) return false;
   pps_[pps_id] = pps;
   has_pps_ = true;
@@ -1139,6 +1187,7 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
       if (sh.slice_cb_qp_offset < -12 || sh.slice_cb_qp_offset > 12) return fail();
       if (sh.slice_cr_qp_offset < -12 || sh.slice_cr_qp_offset > 12) return fail();
     }
+    if (pps.chroma_qp_offset_list_enabled_flag) sh.cu_chroma_qp_offset_enabled_flag = br.readBit() != 0;
     bool slice_deblocking_filter_disabled_flag = pps.pps_deblocking_filter_disabled_flag;
     if (pps.deblocking_filter_control_present_flag) {
       bool deblocking_filter_override_flag = false;

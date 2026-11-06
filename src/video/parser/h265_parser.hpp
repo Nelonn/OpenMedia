@@ -174,6 +174,7 @@ struct H265SliceHeader {
   bool slice_deblocking_filter_disabled_flag = false;
   bool slice_loop_filter_across_slices_enabled_flag = false;
   int five_minus_max_num_merge_cand = 0;
+  bool cu_chroma_qp_offset_enabled_flag = false;
   // Bit position of the end of the slice header within the RBSP.
   uint32_t header_bit_size = 0;
   // *Including* start code, NAL header and emulation bytes: what VA-API and DXVA want.
@@ -261,6 +262,17 @@ public:
     bool sps_temporal_mvp_enabled_flag = false;
     bool strong_intra_smoothing_enabled_flag = false;
     bool vui_parameters_present_flag = false;
+    // sps_range_extension() (7.3.2.2.2), the RExt profiles' tools; all 0 when absent.
+    bool sps_range_extension_flag = false;
+    bool transform_skip_rotation_enabled_flag = false;
+    bool transform_skip_context_enabled_flag = false;
+    bool implicit_rdpcm_enabled_flag = false;
+    bool explicit_rdpcm_enabled_flag = false;
+    bool extended_precision_processing_flag = false;
+    bool intra_smoothing_disabled_flag = false;
+    bool high_precision_offsets_enabled_flag = false;
+    bool persistent_rice_adaptation_enabled_flag = false;
+    bool cabac_bypass_alignment_enabled_flag = false;
     struct Vui {
       bool aspect_ratio_info_present_flag = false;
       int aspect_ratio_idc = 0;
@@ -348,6 +360,17 @@ public:
     int log2_parallel_merge_level_minus2 = 0;
     bool slice_segment_header_extension_present_flag = false;
     bool pps_extension_present_flag = false;
+    // pps_range_extension() (7.3.2.3.2); all 0 when absent.
+    bool pps_range_extension_flag = false;
+    int log2_max_transform_skip_block_size_minus2 = 0;
+    bool cross_component_prediction_enabled_flag = false;
+    bool chroma_qp_offset_list_enabled_flag = false;
+    int diff_cu_chroma_qp_offset_depth = 0;
+    int chroma_qp_offset_list_len_minus1 = 0;
+    int cb_qp_offset_list[6] = {};
+    int cr_qp_offset_list[6] = {};
+    int log2_sao_offset_scale_luma = 0;
+    int log2_sao_offset_scale_chroma = 0;
   };
 
   auto vps(int id) const noexcept -> const Vps& { return vps_[id & 0xf]; }
