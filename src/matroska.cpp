@@ -202,27 +202,43 @@ static void setDolbyVisionConfigurationMetadata(Dictionary& metadata, std::span<
 }
 
 class InputStreamMkvReader final : public mkvparser::IMkvReader {
+  InputStream* stream_ = nullptr;
   std::optional<RandomRead> random_;
+  int64_t end_ = -1;
 
 public:
   explicit InputStreamMkvReader(InputStream* stream) {
     if (stream && stream->canSeek()) {
-      random_ = RandomRead(stream);
+      stream_ = stream;
+      // RandomRead requires a fixed length and caches it at construction.
+      // A growing positional stream is addressable but has no final length.
+      if (stream->size() >= 0) random_ = RandomRead(stream);
     }
   }
 
   auto Read(long long position, long length, unsigned char* buffer) -> int override {
-    if (!random_ || position < 0 || length < 0) return -1;
-    if (!random_->read(position, buffer, static_cast<size_t>(length))) return -1;
+    if (!stream_ || position < 0 || length < 0) return -1;
+    if (random_) return random_->read(position, buffer, static_cast<size_t>(length)) ? 0 : -1;
+    if (!stream_->seek(position, Whence::BEG)) return -1;
+    // Read only what the parser needs. Read-ahead can block waiting for media
+    // that has not been assembled yet, even when the requested header exists.
+    const size_t got = stream_->read(std::span<uint8_t>(buffer, static_cast<size_t>(length)));
+    if (got != static_cast<size_t>(length)) {
+      end_ = position + static_cast<int64_t>(got);
+      return -1;
+    }
     return 0;
   }
 
   auto Length(long long* total, long long* available) -> int override {
-    if (!random_) return -1;
-    const int64_t size = random_->size();
+    if (!stream_) return -1;
+    const int64_t reported = stream_->size();
+    const int64_t size = reported >= 0 ? reported : end_;
     if (total) *total = size;
-    if (available) *available = size;
-    return (size >= 0) ? 0 : -1;
+    // IMkvReader permits total == -1. Reads of future bytes block in the
+    // underlying stream until data arrives or EOF is known.
+    if (available) *available = size >= 0 ? size : std::numeric_limits<int64_t>::max();
+    return 0;
   }
 };
 
