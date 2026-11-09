@@ -1435,6 +1435,7 @@ private:
     if (strcmp(id, "A_AAC") == 0) return OM_CODEC_AAC;
     if (strcmp(id, "A_MPEG/L3") == 0) return OM_CODEC_MP3;
     if (strcmp(id, "A_FLAC") == 0) return OM_CODEC_FLAC;
+    if (strcmp(id, "A_ALAC") == 0) return OM_CODEC_ALAC;
     if (strcmp(id, "A_PCM/INT/LIT") == 0) return OM_CODEC_PCM_S16LE;
     if (strcmp(id, "A_PCM/INT/BIG") == 0) return OM_CODEC_PCM_S16BE;
     if (strcmp(id, "A_AC3") == 0) return OM_CODEC_AC3;
@@ -1833,6 +1834,8 @@ private:
         return "A_MPEG/L3";
       case OM_CODEC_FLAC:
         return "A_FLAC";
+      case OM_CODEC_ALAC:
+        return "A_ALAC";
       case OM_CODEC_PCM_S16LE:
       case OM_CODEC_PCM_S16BE:
       case OM_CODEC_PCM_F32LE:
