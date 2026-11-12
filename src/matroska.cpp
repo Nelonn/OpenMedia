@@ -1673,6 +1673,16 @@ public:
       timestamp_ns = 0;
     }
 
+    // libwebm defaults to 30-second clusters. Audio-only cues index those
+    // clusters, so use a one-second interval to keep seeking responsive.
+    // Decide after all tracks were added; video retains its GOP boundaries.
+    if (!writing_started_ &&
+        std::none_of(tracks_.begin(), tracks_.end(), [](const Track& track) {
+          return track.format.type == OM_MEDIA_VIDEO;
+        })) {
+      segment_->set_max_cluster_duration(1'000'000'000ULL);
+    }
+
     const bool is_key = packet.is_keyframe;
 
     if (!segment_->AddFrame(packet.bytes.data(), packet.bytes.size(),
