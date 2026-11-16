@@ -300,9 +300,18 @@ public:
       if (status != OM_SUCCESS) return Err(status);
     }
     if (!input_eof_) {
+      // A packet that is not queued is lost for good: every picture predicting from it
+      // decodes against the wrong reference until the next IDR. Input buffers free up as
+      // output is released, so keep draining until one is handed over.
       ssize_t index = AMediaCodec_dequeueInputBuffer(codec_, WAIT_US);
-      if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
-        return Err(OM_CODEC_NEED_MORE_DATA);
+      for (int attempt = 0; index == AMEDIACODEC_INFO_TRY_AGAIN_LATER && attempt < DRAIN_ATTEMPTS; ++attempt) {
+        if (!output_eof_) {
+          OMError status = drainOutput(pending_eos_frames_, 0);
+          if (status != OM_SUCCESS) return Err(status);
+        }
+        index = AMediaCodec_dequeueInputBuffer(codec_, WAIT_US);
+      }
+      if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER) return Err(OM_COMMON_TIMEOUT);
       if (index < 0) return Err(OM_CODEC_DECODE_FAILED);
       size_t capacity = 0;
       uint8_t* buffer = AMediaCodec_getInputBuffer(codec_, index, &capacity);

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <deque>
 #include <iterator>
 #include <optional>
 #include <span>
@@ -33,9 +34,15 @@ namespace openmedia {
 
 namespace {
 
-// A caller that takes surfaces holds them for as long as it is showing them.
-constexpr size_t kHostOutputSlack = 2;
+// Pictures read back this many behind the newest, so vaSyncSurface finds the GPU done with them
+// instead of stalling on the picture just submitted (VP9, AV1 and non-reordering streams).
+constexpr size_t kReadbackLatency = 2;
+// Host output: the pictures waiting to be read back. A caller that takes surfaces holds them
+// for as long as it is showing them.
+constexpr size_t kHostOutputSlack = kReadbackLatency + 1;
 constexpr size_t kHardwareOutputSlack = 8;
+// How far past its stated reorder depth a stream that lies about it is followed.
+constexpr size_t kMaxReorderExtra = 16;
 
 // Frame (not field) zig-zag scans, 8.5.6: the H.264 parser keeps scaling lists
 // in coded order, VA-API wants them in raster order.
@@ -345,7 +352,7 @@ public:
     std::vector<Frame> output;
     if (packet.bytes.empty()) {
       output = reorder_.drain();
-      finishOutput(output);
+      finishOutput(output, true);
       return Ok(std::move(output));
     }
 
@@ -357,7 +364,7 @@ public:
       case OM_CODEC_AV1: error = decodeAV1(packet, output); break;
       default: error = OM_CODEC_NOT_SUPPORTED; break;
     }
-    finishOutput(output);
+    finishOutput(output, false);
     // Pictures that did come out are worth more than the error: the stream
     // goes on, and the error has been logged already.
     if (error != OM_SUCCESS && output.empty()) return Err(error);
@@ -367,8 +374,10 @@ public:
   void flush() override {
     resetReceiveState();
     reorder_.clear();
+    readback_.clear();
     resetReferences();
     h264_poc_.reset();
+    h264_recovery_poc_.reset();
     if (h265_) h265_->restart();
     if (vp9_) vp9_->reset();
     if (av1_) av1_->restart();
@@ -502,6 +511,9 @@ private:
     destroySession();
     resetReferences();
     reorder_.clear();
+    readback_.clear();
+    reorder_extra_ = 0;
+    h264_recovery_poc_.reset();
     // State is the better part of a megabyte; clearing it in place keeps a
     // temporary of that size off the stack.
     std::fill(std::begin(h264_.sps_valid), std::end(h264_.sps_valid), false);
@@ -564,12 +576,16 @@ private:
     return frame;
   }
 
-  // Copied only on leaving the decoder, when the GPU is long done, so read-back does not wait.
-  void finishOutput(std::vector<Frame>& frames) {
+  // Copied kReadbackLatency pictures behind the newest: without reordering a picture leaves the
+  // moment it is submitted, and reading it then serialises the GPU with the copy every frame.
+  void finishOutput(std::vector<Frame>& frames, bool drain) {
     if (hardware_output_) return;
+    for (auto& frame : frames) readback_.push_back(std::move(frame));
+    frames.clear();
     std::vector<Frame> ready;
-    ready.reserve(frames.size());
-    for (auto& frame : frames) {
+    while (!readback_.empty() && (drain || readback_.size() > kReadbackLatency)) {
+      Frame frame = std::move(readback_.front());
+      readback_.pop_front();
       auto* pic = std::get_if<Picture>(&frame.data);
       if (!pic) continue;
       auto* hardware = std::get_if<std::shared_ptr<HardwarePicture>>(&pic->buffer);
@@ -589,7 +605,19 @@ private:
 
   void emitReordered(std::optional<Frame> frame, int32_t poc, size_t depth, std::vector<Frame>& output) {
     if (!frame) return;
-    for (auto& ready : reorder_.push(std::move(*frame), poc, depth)) output.push_back(std::move(ready));
+    // The stream reorders deeper than its SPS says (a wrong num_reorder_frames, say). As ffmpeg
+    // does, the late picture is dropped rather than shown with time running backwards, and the
+    // queue holds one more from then on.
+    if (reorder_.isLate(poc)) {
+      if (reorder_extra_ < kMaxReorderExtra) {
+        ++reorder_extra_;
+        log(OM_CATEGORY_HARDWARE, OM_LEVEL_WARNING,
+            "[VAAPI] picture {} came after a later one was output; reordering {} deeper than the stream states", poc,
+            reorder_extra_);
+      }
+      return;
+    }
+    for (auto& ready : reorder_.push(std::move(*frame), poc, depth + reorder_extra_)) output.push_back(std::move(ready));
   }
 
   void drainReorder(std::vector<Frame>& output) {
@@ -647,7 +675,8 @@ private:
     params.width = static_cast<uint32_t>(sps.pic_width_in_mbs_minus1 + 1) * 16u;
     params.height = static_cast<uint32_t>(sps.pic_height_in_map_units_minus1 + 1) * 16u *
                     (sps.frame_mbs_only_flag ? 1u : 2u);
-    params.surfaces = static_cast<size_t>(std::max(sps.num_ref_frames, 1)) + dx_h264::reorderDepth(sps) + 1 + slack();
+    params.surfaces = static_cast<size_t>(std::max(sps.num_ref_frames, 1)) + dx_h264::reorderDepth(sps) +
+                      reorder_extra_ + 1 + slack();
     return params;
   }
 
@@ -771,10 +800,12 @@ private:
 
     // Anything before a random access point predicts from pictures never decoded. Open GOP
     // streams mark all-intra ones with a recovery point SEI.
+    bool starts_recovery = false;
     if (waiting_for_key_) {
       const bool intra = std::all_of(slices.begin(), slices.end(), [](const H264Slice& s) { return isIntraSlice(s.slice); });
       if (!is_idr && !intra) return OM_SUCCESS;
       waiting_for_key_ = false;
+      starts_recovery = !is_idr;
     }
 
     if (const OMError error = ensureSession(*params); error != OM_SUCCESS) return error;
@@ -905,8 +936,17 @@ private:
     // C.4.4: memory_management_control_operation 5 starts the counts over, so
     // everything before it goes out first.
     if (head.mmco5) drainReorder(output);
+
+    // Open GOP: the B pictures that follow a non-IDR entry point in decoding order but precede
+    // it in output predict from pictures never decoded, the H.264 counterpart of RASL. They
+    // stay decoded, so frame_num and the references stay right, but are not shown. Their count
+    // is only comparable until the next IDR or memory_management_control_operation 5.
+    if (is_idr || head.mmco5) h264_recovery_poc_.reset();
+    if (starts_recovery) h264_recovery_poc_ = order.poc();
+    if (h264_recovery_poc_ && order.poc() < *h264_recovery_poc_) return OM_SUCCESS;
+
     const auto [width, height] = h264DisplaySize(sps);
-    emitReordered(makeFrame(surface, width, height, packet.pts, packet.dts, is_idr), order.poc(),
+    emitReordered(makeFrame(surface, width, height, packet.pts, packet.dts, is_idr || starts_recovery), order.poc(),
                   dx_h264::reorderDepth(sps), output);
     return OM_SUCCESS;
   }
@@ -1036,7 +1076,7 @@ private:
     params.height = vaapi::alignUp(static_cast<uint32_t>(sps.pic_height_in_luma_samples), 16u);
     const int layer = std::clamp(sps.max_sub_layers_minus1, 0, 7);
     const size_t dpb = static_cast<size_t>(std::clamp(sps.sps_max_dec_pic_buffering_minus1[layer] + 1, 1, 16));
-    params.surfaces = dpb + dx_h265::reorderDepth(sps) + 1 + slack();
+    params.surfaces = dpb + dx_h265::reorderDepth(sps) + reorder_extra_ + 1 + slack();
     return params;
   }
 
@@ -2117,10 +2157,16 @@ private:
   // every flush -- pictures that predict from earlier ones are dropped.
   bool waiting_for_key_ = true;
   ReorderQueue reorder_;
+  // Added to the stated reorder depth once a stream has been caught reordering deeper.
+  size_t reorder_extra_ = 0;
+  // Host output: pictures decoded but not yet read back, see finishOutput().
+  std::deque<Frame> readback_;
 
   dx_h264::State h264_;
   h264_dpb::Dpb h264_dpb_;
   h264_dpb::PocState h264_poc_;
+  // The count of the non-IDR picture decoding started from; see decodeH264Picture().
+  std::optional<int32_t> h264_recovery_poc_;
 
   std::unique_ptr<video_parser::H265AccessUnitParser> h265_;
   std::vector<HevcRef> hevc_dpb_;
