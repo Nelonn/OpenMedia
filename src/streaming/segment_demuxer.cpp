@@ -6,6 +6,7 @@
 #include <bmff_fragment.hpp>
 #include <cctype>
 #include <cstddef>
+#include <deque>
 #include <map>
 #include <mpegts.hpp>
 #include <openmedia/io.hpp>
@@ -32,6 +33,10 @@ constexpr uint64_t MAX_SKIPPED_SEGMENTS = 4096;
 // Small enough that a 4K segment's first picture does not wait on megabytes, large enough
 // not to be a syscall per transport packet.
 constexpr size_t PULL_CHUNK = 64u << 10;
+
+// What a seek may hold while it looks for its sync sample: well over a GOP of 4K video,
+// and only reached when a stream never names one.
+constexpr size_t MAX_LANDING_BYTES = 128u << 20;
 
 auto percentDecode(std::string_view text) -> std::string {
   auto hex = [](char c) -> int {
@@ -201,6 +206,9 @@ public:
     metadata_ = Dictionary();
     source_ = SegmentSource();
     ready_ = false;
+    landing_.reset();
+    landed_.clear();
+    trim_until_ns_.clear();
   }
 
   auto tracks() const -> const std::vector<Track>& override { return tracks_; }
@@ -463,6 +471,268 @@ public:
 
   auto readPacket() -> Result<Packet, OMError> override {
     if (streams_.empty()) return Err(OM_COMMON_NOT_INITIALIZED);
+    if (landing_) {
+      const OMError error = land();
+      if (error != OM_SUCCESS && landed_.empty()) return Err(error);
+    }
+    for (;;) {
+      Result<Packet, OMError> packet = Err(OM_FORMAT_END_OF_FILE);
+      if (!landed_.empty()) {
+        packet = Ok(std::move(landed_.front()));
+        landed_.pop_front();
+      } else {
+        packet = readInterleaved();
+      }
+      if (packet.isErr() || keepAfterSeek(packet.unwrap())) return packet;
+    }
+  }
+
+  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
+    if (streams_.empty()) return OM_COMMON_NOT_INITIALIZED;
+    if (timestamp < 0) return OM_COMMON_INVALID_ARGUMENT;
+    if (stream_idx >= static_cast<int32_t>(tracks_.size())) return OM_FORMAT_STREAM_NOT_FOUND;
+
+    // Nanoseconds of presentation time is the one thing every stream can be
+    // positioned by: each has its own timescale and presentation offset.
+    int64_t target_ns = 0;
+    if (stream_idx < 0) {
+      target_ns = timestamp * INT64_C(1'000);
+    } else {
+      // In the track's time base, not the unit the manifest counted segments in; for HLS they
+      // never agree.
+      if (tracks_[static_cast<size_t>(stream_idx)].time_base.den <= 0) {
+        return OM_FORMAT_INVALID_TIMESTAMP;
+      }
+      target_ns = toNs(timestamp, tracks_[static_cast<size_t>(stream_idx)].time_base);
+    }
+
+    for (Stream& stream : streams_) {
+      const SegmentIndex& index = stream.index();
+      stream.reader->flushSegments();
+      stream.dropHeld();
+      stream.finished = false;
+      // What was half-read belonged to where the reader was; the pieces still coming
+      // will match nothing and be dropped.
+      stream.streaming = false;
+      stream.pulling.reset();
+      stream.last_read_ns = INT64_MIN;
+      stream.sample_key_uri.clear();
+      stream.read_ordinal = index.ordinalForTime(nsToScale(target_ns, index.timescale()));
+    }
+
+    // A manifest addresses only segments, and a segment is often several GOPs long: starting
+    // at its first sample put playback up to a whole segment early. Where inside it to start
+    // is settled by reading, on the next readPacket().
+    landed_.clear();
+    trim_until_ns_.clear();
+    landing_.emplace();
+    landing_->target_ns = target_ns;
+    landing_->mode = mode;
+    return OM_SUCCESS;
+  }
+
+private:
+  // A seek still finding, among the packets of the segment it landed in, the one to start at.
+  struct Landing {
+    int64_t target_ns = 0;
+    SeekMode mode = SeekMode::PREVIOUS_SYNC;
+    // The track whose sync samples decide: video when there is any, since audio can start
+    // anywhere and a picture cannot. -2 until the tracks are known.
+    int32_t reference = -2;
+    std::vector<Packet> held; // in the order they will be handed out
+    size_t held_bytes = 0;
+    // Sync samples of `reference` within `held`: the last at or before the target and the
+    // first at or after it.
+    std::optional<size_t> prev;
+    int64_t prev_ns = 0;
+    std::optional<size_t> next;
+    int64_t next_ns = 0;
+    bool past = false; // nothing still to come can be a better `prev`
+  };
+
+  static auto toNs(int64_t value, Rational time_base) -> int64_t {
+    if (time_base.den <= 0) return value;
+    const int64_t num = time_base.num > 0 ? time_base.num : 1;
+    return rescaleTime(value * num, time_base.den, 1'000'000'000);
+  }
+
+  auto packetNs(const Packet& packet, int64_t value) const -> int64_t {
+    const size_t track = static_cast<size_t>(packet.stream_index);
+    return track < tracks_.size() ? toNs(value, tracks_[track].time_base) : value;
+  }
+
+  auto packetEndNs(const Packet& packet) const -> int64_t {
+    const int64_t pts = packet.pts >= 0 ? packet.pts : packet.dts;
+    return packetNs(packet, pts + std::max<int64_t>(packet.duration, 0));
+  }
+
+  auto chooseReference() const -> int32_t {
+    for (const OMMediaType type : {OM_MEDIA_VIDEO, OM_MEDIA_AUDIO}) {
+      for (size_t i = 0; i < tracks_.size(); ++i) {
+        if (tracks_[i].format.type == type) return static_cast<int32_t>(i);
+      }
+    }
+    return tracks_.empty() ? -1 : 0;
+  }
+
+  auto landingDecided() const -> bool {
+    const Landing& l = *landing_;
+    switch (l.mode) {
+      case SeekMode::PREVIOUS_SYNC: return l.past || l.next.has_value();
+      case SeekMode::NEXT_SYNC: return l.next.has_value();
+      case SeekMode::CLOSEST_SYNC: return l.next.has_value() || (l.past && l.prev.has_value());
+      case SeekMode::DONT_SYNC: return l.past;
+    }
+    return true;
+  }
+
+  // Drops what can no longer be handed out, so a landing holds about one GOP at most:
+  // reference packets before `keep_from`, other tracks' packets over by `cut_ns`.
+  void compactLanding(size_t keep_from, int64_t cut_ns) {
+    Landing& l = *landing_;
+    std::vector<Packet> kept;
+    kept.reserve(l.held.size());
+    size_t kept_bytes = 0;
+    std::optional<size_t> prev;
+    std::optional<size_t> next;
+    for (size_t i = 0; i < l.held.size(); ++i) {
+      Packet& packet = l.held[i];
+      const bool reference = packet.stream_index == l.reference;
+      if (reference ? i < keep_from : packetEndNs(packet) <= cut_ns) continue;
+      if (l.prev == i) prev = kept.size();
+      if (l.next == i) next = kept.size();
+      kept_bytes += packet.bytes.size();
+      kept.push_back(std::move(packet));
+    }
+    l.prev = prev;
+    l.next = next;
+    l.held = std::move(kept);
+    l.held_bytes = kept_bytes;
+  }
+
+  void hold(Packet packet) {
+    landing_->held_bytes += packet.bytes.size();
+    landing_->held.push_back(std::move(packet));
+  }
+
+  void observeLanding(Packet packet) {
+    Landing& l = *landing_;
+    const bool reference = packet.stream_index == l.reference;
+    const int64_t pts_ns = packetNs(packet, packet.pts >= 0 ? packet.pts : packet.dts);
+    const int64_t dts_ns = packetNs(packet, packet.dts >= 0 ? packet.dts : packet.pts);
+
+    if (l.mode == SeekMode::DONT_SYNC) {
+      // Every track is cut at the target itself, sync sample or not.
+      if (reference && dts_ns >= l.target_ns) l.past = true;
+      if (packetEndNs(packet) > l.target_ns) hold(std::move(packet));
+      return;
+    }
+
+    if (!reference) {
+      hold(std::move(packet));
+      return;
+    }
+
+    const bool sync = packet.is_keyframe;
+    const size_t at = l.held.size();
+    hold(std::move(packet));
+
+    if (sync && pts_ns >= l.target_ns && !l.next) {
+      l.next = at;
+      l.next_ns = pts_ns;
+    }
+    if (sync && pts_ns <= l.target_ns) {
+      l.prev = at;
+      l.prev_ns = pts_ns;
+      // Nothing before a later starting point is ever handed out.
+      compactLanding(at, pts_ns);
+    }
+    // A sync sample is presented no earlier than it is decoded, so once decoding has passed
+    // the target none still to come is at or before it. For CLOSEST, one further from the
+    // target than `prev` is no better either.
+    if (dts_ns > l.target_ns) l.past = true;
+    if (l.mode == SeekMode::CLOSEST_SYNC && l.prev &&
+        dts_ns - l.target_ns > l.target_ns - l.prev_ns) {
+      l.past = true;
+    }
+  }
+
+  // Reads until it is clear where the seek lands, then queues from there. Waiting for data
+  // keeps what was read, so the next call carries on.
+  auto land() -> OMError {
+    if (!ready_) {
+      if (const OMError error = settleInits(); error != OM_SUCCESS) return error;
+    }
+    Landing& l = *landing_;
+    if (l.reference == -2) l.reference = chooseReference();
+
+    OMError stopped = OM_SUCCESS;
+    while (!landingDecided() && l.held_bytes < MAX_LANDING_BYTES) {
+      auto packet = readInterleaved();
+      if (packet.isErr()) {
+        stopped = std::move(packet).unwrapErr();
+        if (stopped == OM_IO_NOT_ENOUGH_DATA) return stopped;
+        break; // the end, or a failure: land on what there is
+      }
+      observeLanding(std::move(packet).unwrap());
+    }
+
+    // The chosen sync sample for the reference track; its presentation time for the rest.
+    std::optional<size_t> chosen;
+    int64_t cut_ns = INT64_MIN;
+    switch (l.mode) {
+      case SeekMode::PREVIOUS_SYNC:
+        chosen = l.prev ? l.prev : l.next;
+        break;
+      case SeekMode::NEXT_SYNC:
+        chosen = l.next ? l.next : l.prev;
+        break;
+      case SeekMode::CLOSEST_SYNC:
+        if (l.prev && l.next) {
+          chosen = (l.target_ns - l.prev_ns <= l.next_ns - l.target_ns) ? l.prev : l.next;
+        } else {
+          chosen = l.prev ? l.prev : l.next;
+        }
+        break;
+      case SeekMode::DONT_SYNC:
+        cut_ns = l.target_ns;
+        break;
+    }
+    if (chosen) {
+      cut_ns = chosen == l.prev ? l.prev_ns : l.next_ns;
+      compactLanding(*chosen, cut_ns);
+    }
+
+    // Other tracks' packets still to come can start before the cut: interleaving is by
+    // decode time, and a reordered picture is decoded ahead of when it is shown.
+    if (cut_ns != INT64_MIN) {
+      trim_until_ns_.assign(tracks_.size(), cut_ns);
+      if (l.mode != SeekMode::DONT_SYNC && l.reference >= 0 &&
+          static_cast<size_t>(l.reference) < trim_until_ns_.size()) {
+        trim_until_ns_[static_cast<size_t>(l.reference)] = INT64_MIN;
+      }
+    }
+
+    for (Packet& packet : l.held) landed_.push_back(std::move(packet));
+    landing_.reset();
+    return stopped;
+  }
+
+  // Drops what a seek cut off, until the track has passed the cut.
+  auto keepAfterSeek(const Packet& packet) -> bool {
+    const size_t track = static_cast<size_t>(packet.stream_index);
+    if (track >= trim_until_ns_.size() || trim_until_ns_[track] == INT64_MIN) return true;
+    if (packetEndNs(packet) <= trim_until_ns_[track]) return false;
+    trim_until_ns_[track] = INT64_MIN; // past the cut: everything after is kept
+    return true;
+  }
+
+  std::optional<Landing> landing_;
+  std::deque<Packet> landed_;
+  std::vector<int64_t> trim_until_ns_;
+
+  // The streams merged by decode time, with no regard to where a seek wanted to start.
+  auto readInterleaved() -> Result<Packet, OMError> {
     if (!ready_) {
       const OMError error = settleInits();
       if (error != OM_SUCCESS) return Err(error);
@@ -527,46 +797,6 @@ public:
       value.encryption = std::move(encryption);
     }
     return Ok(std::move(value));
-  }
-
-  auto seek(int32_t stream_idx, int64_t timestamp, SeekMode mode) -> OMError override {
-    (void) mode; // segment granularity is all a manifest offers; see below
-    if (streams_.empty()) return OM_COMMON_NOT_INITIALIZED;
-    if (timestamp < 0) return OM_COMMON_INVALID_ARGUMENT;
-    if (stream_idx >= static_cast<int32_t>(tracks_.size())) return OM_FORMAT_STREAM_NOT_FOUND;
-
-    // Nanoseconds of presentation time is the one thing every stream can be
-    // positioned by: each has its own timescale and presentation offset.
-    int64_t target_ns = 0;
-    if (stream_idx < 0) {
-      target_ns = timestamp * INT64_C(1'000);
-    } else {
-      // In the track's time base, not the unit the manifest counted segments in; for HLS they
-      // never agree.
-      if (tracks_[static_cast<size_t>(stream_idx)].time_base.den <= 0) {
-        return OM_FORMAT_INVALID_TIMESTAMP;
-      }
-      target_ns = scaleToNs(
-          timestamp, static_cast<uint32_t>(tracks_[static_cast<size_t>(stream_idx)].time_base.den));
-    }
-
-    for (Stream& stream : streams_) {
-      const SegmentIndex& index = stream.index();
-      stream.reader->flushSegments();
-      stream.dropHeld();
-      stream.finished = false;
-      // What was half-read belonged to where the reader was; the pieces still coming
-      // will match nothing and be dropped.
-      stream.streaming = false;
-      stream.pulling.reset();
-      stream.last_read_ns = INT64_MIN;
-      stream.sample_key_uri.clear();
-      stream.read_ordinal = index.ordinalForTime(nsToScale(target_ns, index.timescale()));
-    }
-
-    // Every segment starts at a sync sample, so this is PREVIOUS_SYNC already. Trimming to an
-    // exact frame is the caller's: only it knows what its decoder has been given.
-    return OM_SUCCESS;
   }
 
 private:
