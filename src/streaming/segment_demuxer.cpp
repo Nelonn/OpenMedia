@@ -6,7 +6,6 @@
 #include <bmff_fragment.hpp>
 #include <cctype>
 #include <cstddef>
-#include <deque>
 #include <map>
 #include <mpegts.hpp>
 #include <openmedia/io.hpp>
@@ -144,7 +143,28 @@ class SegmentDemuxer final : public SegmentedDemuxer {
       buffered_bytes = 0;
     }
 
+    // Keeps whole segments from `ordinal` on. A partial one goes: the rest of its pieces
+    // were bound for a reader that has since been flushed.
+    void keepHeldFrom(uint64_t ordinal) {
+      for (auto it = inbox.begin(); it != inbox.end();) {
+        if (it->first >= ordinal && it->second.complete) {
+          ++it;
+          continue;
+        }
+        buffered_bytes -= it->second.bytes.size();
+        it = inbox.erase(it);
+      }
+    }
     auto index() const -> const SegmentIndex& { return *track->alternatives[alternative]; }
+
+    // Where the last delivery was recognised. A segment read in pieces arrives as hundreds of
+    // them, and naming each candidate to compare against means building its URL.
+    struct Located {
+      SegmentRequest request;
+      uint64_t ordinal = 0;
+      bool encrypted = false;
+    };
+    std::optional<Located> located;
   };
 
   SegmentSource source_;
@@ -206,9 +226,11 @@ public:
     metadata_ = Dictionary();
     source_ = SegmentSource();
     ready_ = false;
-    landing_.reset();
-    landed_.clear();
+    landing_ = Landing {};
+    held_.clear();
+    landed_pos_ = 0;
     trim_until_ns_.clear();
+    trims_pending_ = 0;
   }
 
   auto tracks() const -> const std::vector<Track>& override { return tracks_; }
@@ -299,25 +321,19 @@ public:
     }
 
     for (Stream& stream : streams_) {
-      const SegmentIndex& index = stream.index();
-      const auto bound = index.segmentCount();
-      for (uint64_t ordinal = stream.read_ordinal;
-           ordinal < stream.read_ordinal + RECOGNITION_WINDOW; ++ordinal) {
-        if (bound && ordinal >= *bound) break;
-        const auto segment = index.segmentAt(ordinal);
-        if (!segment) break;
-        if (!(segment->request == request)) continue;
-        // One request, one delivery: the pieces still coming would have nowhere to go.
-        if (isPartlyDelivered(stream, ordinal)) return OM_COMMON_INVALID_ARGUMENT;
-        // Full is not unwanted: dropping these silently would leave the caller
-        // waiting forever for a segment it believes it delivered.
-        if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
-        stream.hold(ordinal, std::move(bytes), /*complete=*/true);
-        // These may be the bytes a stream with no initialization section was
-        // waiting on to describe itself.
-        if (stream.needs_init) settleInitsIfComplete();
-        return OM_SUCCESS;
-      }
+      const auto found = locate(stream, request);
+      if (!found) continue;
+      const uint64_t ordinal = found->ordinal;
+      // One request, one delivery: the pieces still coming would have nowhere to go.
+      if (isPartlyDelivered(stream, ordinal)) return OM_COMMON_INVALID_ARGUMENT;
+      // Full is not unwanted: dropping these silently would leave the caller
+      // waiting forever for a segment it believes it delivered.
+      if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
+      stream.hold(ordinal, std::move(bytes), /*complete=*/true);
+      // These may be the bytes a stream with no initialization section was
+      // waiting on to describe itself.
+      if (stream.needs_init) settleInitsIfComplete();
+      return OM_SUCCESS;
     }
 
     // Seeked past, or switched away from. The caller cannot always know that in
@@ -348,47 +364,64 @@ public:
     }
 
     for (Stream& stream : streams_) {
-      const SegmentIndex& index = stream.index();
-      const auto bound = index.segmentCount();
-      for (uint64_t ordinal = stream.read_ordinal;
-           ordinal < stream.read_ordinal + RECOGNITION_WINDOW; ++ordinal) {
-        if (bound && ordinal >= *bound) break;
-        const auto segment = index.segmentAt(ordinal);
-        if (!segment) break;
-        if (!(segment->request == request)) continue;
+      const auto found = locate(stream, request);
+      if (!found) continue;
+      const uint64_t ordinal = found->ordinal;
 
-        // A cipher over the whole segment has no answer for part of one, so it accumulates here,
-        // before the streaming branch.
-        if (segment->encryption) {
-          if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
-          stream.appendHeld(ordinal, bytes, last);
-          return OM_SUCCESS;
-        }
-
-        if (stream.streaming && ordinal == stream.read_ordinal) {
-          if (const OMError fed = stream.reader->feedSegment(bytes); fed != OM_SUCCESS) {
-            return fed;
-          }
-          // These may be the bytes a stream with no initialization section was
-          // waiting on to describe itself.
-          if (stream.needs_init) settleInitsIfComplete();
-          if (last) return closeStreamed(stream);
-          return OM_SUCCESS;
-        }
-
-        if (const auto held = stream.inbox.find(ordinal);
-            held != stream.inbox.end() && held->second.complete) {
-          return OM_COMMON_INVALID_ARGUMENT; // delivered whole already
-        }
-        // Not reached yet, so the pieces accumulate; the reader picks up however
-        // much has turned up once this track gets there.
+      // A cipher over the whole segment has no answer for part of one, so it accumulates here,
+      // before the streaming branch.
+      if (found->encrypted) {
         if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
         stream.appendHeld(ordinal, bytes, last);
-        if (stream.needs_init) settleInitsIfComplete();
         return OM_SUCCESS;
       }
+
+      if (stream.streaming && ordinal == stream.read_ordinal) {
+        if (const OMError fed = stream.reader->feedSegment(bytes); fed != OM_SUCCESS) {
+          return fed;
+        }
+        // These may be the bytes a stream with no initialization section was
+        // waiting on to describe itself.
+        if (stream.needs_init) settleInitsIfComplete();
+        if (last) return closeStreamed(stream);
+        return OM_SUCCESS;
+      }
+
+      if (const auto held = stream.inbox.find(ordinal);
+          held != stream.inbox.end() && held->second.complete) {
+        return OM_COMMON_INVALID_ARGUMENT; // delivered whole already
+      }
+      // Not reached yet, so the pieces accumulate; the reader picks up however
+      // much has turned up once this track gets there.
+      if (!fitsBudget(stream, bytes.size())) return OM_COMMON_OVERFLOW;
+      stream.appendHeld(ordinal, bytes, last);
+      if (stream.needs_init) settleInitsIfComplete();
+      return OM_SUCCESS;
     }
     return OM_SUCCESS;
+  }
+
+  // Which of the segments this stream is about to read `request` names, if any.
+  static auto locate(Stream& stream, const SegmentRequest& request)
+      -> std::optional<Stream::Located> {
+    const uint64_t from = stream.read_ordinal;
+    if (const auto& seen = stream.located; seen && seen->ordinal >= from &&
+                                           seen->ordinal < from + RECOGNITION_WINDOW &&
+                                           seen->request == request) {
+      return seen;
+    }
+    const SegmentIndex& index = stream.index();
+    const auto bound = index.segmentCount();
+    for (uint64_t ordinal = from; ordinal < from + RECOGNITION_WINDOW; ++ordinal) {
+      if (bound && ordinal >= *bound) break;
+      auto segment = index.segmentAt(ordinal);
+      if (!segment) break;
+      if (!(segment->request == request)) continue;
+      stream.located = Stream::Located {std::move(segment->request), ordinal,
+                                        segment->encryption != nullptr};
+      return stream.located;
+    }
+    return std::nullopt;
   }
 
   auto bufferedDurationNs(int32_t track_index) const -> int64_t override {
@@ -399,9 +432,9 @@ public:
     const SegmentIndex& index = stream->index();
     for (const auto& [ordinal, held] : stream->inbox) {
       if (ordinal < stream->read_ordinal) continue;
-      const auto segment = index.segmentAt(ordinal);
-      if (!segment) continue;
-      total += scaleToNs(static_cast<int64_t>(segment->duration), index.timescale());
+      const auto span = index.spanAt(ordinal);
+      if (!span) continue;
+      total += scaleToNs(static_cast<int64_t>(span->duration), index.timescale());
     }
     return total;
   }
@@ -437,12 +470,13 @@ public:
 
     // By start time, since alternatives number segments independently. Resuming from the time
     // being read would land inside a delivered segment and repeat its packets.
-    const auto boundary = stream->index().segmentAt(stream->read_ordinal);
+    const auto boundary = stream->index().spanAt(stream->read_ordinal);
     const int64_t resume_ns =
         boundary ? scaleToNs(boundary->time, stream->index().timescale()) : -1;
 
     // What is buffered decodes against the old initialization segment.
     stream->alternative = chosen;
+    stream->located.reset();
     stream->dropHeld();
     stream->init_inbox.reset();
     stream->init_complete = false;
@@ -471,19 +505,25 @@ public:
 
   auto readPacket() -> Result<Packet, OMError> override {
     if (streams_.empty()) return Err(OM_COMMON_NOT_INITIALIZED);
-    if (landing_) {
+    if (landing_.active) {
       const OMError error = land();
-      if (error != OM_SUCCESS && landed_.empty()) return Err(error);
+      // Still undecided: what is held is not to be handed out yet.
+      if (landing_.active || (error != OM_SUCCESS && held_.empty())) return Err(error);
     }
-    for (;;) {
-      Result<Packet, OMError> packet = Err(OM_FORMAT_END_OF_FILE);
-      if (!landed_.empty()) {
-        packet = Ok(std::move(landed_.front()));
-        landed_.pop_front();
-      } else {
-        packet = readInterleaved();
+
+    // What a seek read ahead to decide where to start, before anything new.
+    while (landed_pos_ < held_.size()) {
+      Packet packet = std::move(held_[landed_pos_++]);
+      if (landed_pos_ == held_.size()) {
+        held_.clear(); // keeps its capacity for the next seek
+        landed_pos_ = 0;
       }
-      if (packet.isErr() || keepAfterSeek(packet.unwrap())) return packet;
+      if (keepAfterSeek(packet)) return Ok(std::move(packet));
+    }
+
+    for (;;) {
+      auto packet = readInterleaved();
+      if (packet.isErr() || trims_pending_ == 0 || keepAfterSeek(packet.unwrap())) return packet;
     }
   }
 
@@ -506,10 +546,24 @@ public:
       target_ns = toNs(timestamp, tracks_[static_cast<size_t>(stream_idx)].time_base);
     }
 
+    // Where the cut lands is decided by the reference track's sync samples, and can be anywhere
+    // from the start of its segment on. Other tracks' segments need not line up with that one,
+    // so they start from the segment holding the earliest possible cut, or their first
+    // packets could come after the picture they belong with.
+    const int32_t reference = tracks_.empty() ? -1 : chooseReference();
+    const Stream* reference_stream = reference >= 0 ? streamOfTrack(reference) : nullptr;
+    int64_t others_ns = target_ns;
+    if (reference_stream && mode != SeekMode::NEXT_SYNC && mode != SeekMode::DONT_SYNC) {
+      const SegmentIndex& index = reference_stream->index();
+      const auto span =
+          index.spanAt(index.ordinalForTime(nsToScale(target_ns, index.timescale())));
+      if (span) others_ns = std::min(target_ns, scaleToNs(span->time, index.timescale()));
+    }
+
     for (Stream& stream : streams_) {
       const SegmentIndex& index = stream.index();
+      const int64_t start_ns = &stream == reference_stream ? target_ns : others_ns;
       stream.reader->flushSegments();
-      stream.dropHeld();
       stream.finished = false;
       // What was half-read belonged to where the reader was; the pieces still coming
       // will match nothing and be dropped.
@@ -517,37 +571,43 @@ public:
       stream.pulling.reset();
       stream.last_read_ns = INT64_MIN;
       stream.sample_key_uri.clear();
-      stream.read_ordinal = index.ordinalForTime(nsToScale(target_ns, index.timescale()));
+      stream.read_ordinal = index.ordinalForTime(nsToScale(start_ns, index.timescale()));
+      // A seek forward within what has been prefetched costs no download.
+      stream.keepHeldFrom(stream.read_ordinal);
     }
 
     // A manifest addresses only segments, and a segment is often several GOPs long: starting
     // at its first sample put playback up to a whole segment early. Where inside it to start
     // is settled by reading, on the next readPacket().
-    landed_.clear();
-    trim_until_ns_.clear();
-    landing_.emplace();
-    landing_->target_ns = target_ns;
-    landing_->mode = mode;
+    held_.clear();
+    landed_pos_ = 0;
+    trims_pending_ = 0;
+    landing_ = Landing {};
+    landing_.active = true;
+    landing_.target_ns = target_ns;
+    landing_.mode = mode;
+    if (reference >= 0) landing_.reference = reference;
     return OM_SUCCESS;
   }
 
 private:
-  // A seek still finding, among the packets of the segment it landed in, the one to start at.
+  // A seek still finding, among the packets of the segment it landed in, the one to start
+  // at. The packets themselves are in `held_`, in the order they will be handed out.
   struct Landing {
+    bool active = false;
     int64_t target_ns = 0;
     SeekMode mode = SeekMode::PREVIOUS_SYNC;
     // The track whose sync samples decide: video when there is any, since audio can start
     // anywhere and a picture cannot. -2 until the tracks are known.
     int32_t reference = -2;
-    std::vector<Packet> held; // in the order they will be handed out
     size_t held_bytes = 0;
-    // Sync samples of `reference` within `held`: the last at or before the target and the
+    // Sync samples of `reference` within `held_`: the last at or before the target and the
     // first at or after it.
-    std::optional<size_t> prev;
-    int64_t prev_ns = 0;
-    std::optional<size_t> next;
+    size_t prev = SIZE_MAX;
+    int64_t prev_ns = INT64_MIN;
+    size_t next = SIZE_MAX;
     int64_t next_ns = 0;
-    bool past = false; // nothing still to come can be a better `prev`
+    bool past = false;         // nothing still to come can be a better `prev`
     bool prev_closest = false; // nothing still to come is nearer the target than `prev`
   };
 
@@ -577,68 +637,72 @@ private:
   }
 
   auto landingDecided() const -> bool {
-    const Landing& l = *landing_;
+    const Landing& l = landing_;
     switch (l.mode) {
-      case SeekMode::PREVIOUS_SYNC: return l.past || l.next.has_value();
-      case SeekMode::NEXT_SYNC: return l.next.has_value();
-      case SeekMode::CLOSEST_SYNC: return l.next.has_value() || l.prev_closest;
+      case SeekMode::PREVIOUS_SYNC: return l.past || l.next != SIZE_MAX;
+      case SeekMode::NEXT_SYNC: return l.next != SIZE_MAX;
+      case SeekMode::CLOSEST_SYNC: return l.next != SIZE_MAX || l.prev_closest;
       case SeekMode::DONT_SYNC: return l.past;
     }
     return true;
   }
 
-  // Drops what can no longer be handed out, so a landing holds about one GOP at most:
-  // reference packets before `keep_from`, other tracks' packets over by `cut_ns`.
+  // Drops, in place, what can no longer be handed out: reference packets before `keep_from`,
+  // other tracks' packets over by `cut_ns`. A landing so holds about one GOP at most.
   void compactLanding(size_t keep_from, int64_t cut_ns) {
-    Landing& l = *landing_;
-    std::vector<Packet> kept;
-    kept.reserve(l.held.size());
+    Landing& l = landing_;
+    size_t kept = 0;
     size_t kept_bytes = 0;
-    std::optional<size_t> prev;
-    std::optional<size_t> next;
-    for (size_t i = 0; i < l.held.size(); ++i) {
-      Packet& packet = l.held[i];
+    size_t prev = SIZE_MAX;
+    size_t next = SIZE_MAX;
+    for (size_t i = 0; i < held_.size(); ++i) {
+      Packet& packet = held_[i];
       const bool reference = packet.stream_index == l.reference;
       if (reference ? i < keep_from : packetEndNs(packet) <= cut_ns) continue;
-      if (l.prev == i) prev = kept.size();
-      if (l.next == i) next = kept.size();
+      if (l.prev == i) prev = kept;
+      if (l.next == i) next = kept;
       kept_bytes += packet.bytes.size();
-      kept.push_back(std::move(packet));
+      if (kept != i) held_[kept] = std::move(packet);
+      ++kept;
     }
+    held_.resize(kept);
     l.prev = prev;
     l.next = next;
-    l.held = std::move(kept);
     l.held_bytes = kept_bytes;
   }
 
-  void hold(Packet packet) {
-    landing_->held_bytes += packet.bytes.size();
-    landing_->held.push_back(std::move(packet));
+  void hold(Packet&& packet) {
+    landing_.held_bytes += packet.bytes.size();
+    held_.push_back(std::move(packet));
   }
 
-  void observeLanding(Packet packet) {
-    Landing& l = *landing_;
+  void observeLanding(Packet&& packet) {
+    Landing& l = landing_;
     const bool reference = packet.stream_index == l.reference;
-    const int64_t pts_ns = packetNs(packet, packet.pts >= 0 ? packet.pts : packet.dts);
-    const int64_t dts_ns = packetNs(packet, packet.dts >= 0 ? packet.dts : packet.pts);
 
     if (l.mode == SeekMode::DONT_SYNC) {
       // Every track is cut at the target itself, sync sample or not.
-      if (reference && dts_ns >= l.target_ns) l.past = true;
+      if (reference &&
+          packetNs(packet, packet.dts >= 0 ? packet.dts : packet.pts) >= l.target_ns) {
+        l.past = true;
+      }
       if (packetEndNs(packet) > l.target_ns) hold(std::move(packet));
       return;
     }
 
     if (!reference) {
-      hold(std::move(packet));
+      // Wherever the cut ends up, it is at `prev` or after it.
+      if (packetEndNs(packet) > l.prev_ns) hold(std::move(packet));
       return;
     }
 
+    const int64_t pts_ns = packetNs(packet, packet.pts >= 0 ? packet.pts : packet.dts);
+    const int64_t dts_ns = packetNs(packet, packet.dts >= 0 ? packet.dts : packet.pts);
     const bool sync = packet.is_keyframe;
-    const size_t at = l.held.size();
+    const size_t at = held_.size();
     hold(std::move(packet));
 
-    if (sync && pts_ns >= l.target_ns && !l.next) {
+    if (sync && pts_ns >= l.target_ns && l.next == SIZE_MAX) {
       l.next = at;
       l.next_ns = pts_ns;
     }
@@ -646,22 +710,24 @@ private:
       l.prev = at;
       l.prev_ns = pts_ns;
       // Nothing before a later starting point is ever handed out.
-      compactLanding(at, pts_ns);
+      if (at != 0) compactLanding(at, pts_ns);
     }
     // A sync sample is presented no earlier than it is decoded, so once decoding has passed
     // the target none still to come is at or before it. For CLOSEST, one further from the
     // target than `prev` is no better either.
     if (dts_ns > l.target_ns) l.past = true;
-    if (l.prev && dts_ns - l.target_ns > l.target_ns - l.prev_ns) l.prev_closest = true;
+    if (l.prev != SIZE_MAX && dts_ns - l.target_ns > l.target_ns - l.prev_ns) {
+      l.prev_closest = true;
+    }
   }
 
-  // Reads until it is clear where the seek lands, then queues from there. Waiting for data
-  // keeps what was read, so the next call carries on.
+  // Reads until it is clear where the seek lands, then leaves `held_` starting there.
+  // Waiting for data keeps what was read, so the next call carries on.
   auto land() -> OMError {
     if (!ready_) {
       if (const OMError error = settleInits(); error != OM_SUCCESS) return error;
     }
-    Landing& l = *landing_;
+    Landing& l = landing_;
     if (l.reference == -2) l.reference = chooseReference();
 
     OMError stopped = OM_SUCCESS;
@@ -676,58 +742,62 @@ private:
     }
 
     // The chosen sync sample for the reference track; its presentation time for the rest.
-    std::optional<size_t> chosen;
-    int64_t cut_ns = INT64_MIN;
+    const bool has_prev = l.prev != SIZE_MAX;
+    const bool has_next = l.next != SIZE_MAX;
+    bool use_prev = has_prev;
     switch (l.mode) {
-      case SeekMode::PREVIOUS_SYNC:
-        chosen = l.prev ? l.prev : l.next;
-        break;
-      case SeekMode::NEXT_SYNC:
-        chosen = l.next ? l.next : l.prev;
-        break;
+      case SeekMode::PREVIOUS_SYNC: use_prev = has_prev; break;
+      case SeekMode::NEXT_SYNC: use_prev = !has_next && has_prev; break;
       case SeekMode::CLOSEST_SYNC:
-        if (l.prev && l.next) {
-          chosen = (l.target_ns - l.prev_ns <= l.next_ns - l.target_ns) ? l.prev : l.next;
-        } else {
-          chosen = l.prev ? l.prev : l.next;
-        }
+        use_prev = has_prev && (!has_next || l.target_ns - l.prev_ns <= l.next_ns - l.target_ns);
         break;
-      case SeekMode::DONT_SYNC:
-        cut_ns = l.target_ns;
-        break;
+      case SeekMode::DONT_SYNC: break;
     }
-    if (chosen) {
-      cut_ns = chosen == l.prev ? l.prev_ns : l.next_ns;
-      compactLanding(*chosen, cut_ns);
+
+    int64_t cut_ns = INT64_MIN;
+    if (l.mode == SeekMode::DONT_SYNC) {
+      cut_ns = l.target_ns;
+    } else if (use_prev || has_next) {
+      cut_ns = use_prev ? l.prev_ns : l.next_ns;
+      compactLanding(use_prev ? l.prev : l.next, cut_ns);
     }
 
     // Other tracks' packets still to come can start before the cut: interleaving is by
     // decode time, and a reordered picture is decoded ahead of when it is shown.
+    trims_pending_ = 0;
     if (cut_ns != INT64_MIN) {
       trim_until_ns_.assign(tracks_.size(), cut_ns);
+      trims_pending_ = trim_until_ns_.size();
       if (l.mode != SeekMode::DONT_SYNC && l.reference >= 0 &&
           static_cast<size_t>(l.reference) < trim_until_ns_.size()) {
         trim_until_ns_[static_cast<size_t>(l.reference)] = INT64_MIN;
+        --trims_pending_;
       }
     }
 
-    for (Packet& packet : l.held) landed_.push_back(std::move(packet));
-    landing_.reset();
+    l.active = false;
+    landed_pos_ = 0;
     return stopped;
   }
 
   // Drops what a seek cut off, until the track has passed the cut.
   auto keepAfterSeek(const Packet& packet) -> bool {
+    if (trims_pending_ == 0) return true;
     const size_t track = static_cast<size_t>(packet.stream_index);
     if (track >= trim_until_ns_.size() || trim_until_ns_[track] == INT64_MIN) return true;
     if (packetEndNs(packet) <= trim_until_ns_[track]) return false;
     trim_until_ns_[track] = INT64_MIN; // past the cut: everything after is kept
+    --trims_pending_;
     return true;
   }
 
-  std::optional<Landing> landing_;
-  std::deque<Packet> landed_;
+  Landing landing_;
+  // While landing, what has been read; after, what is still to be handed out from
+  // `landed_pos_` on.
+  std::vector<Packet> held_;
+  size_t landed_pos_ = 0;
   std::vector<int64_t> trim_until_ns_;
+  size_t trims_pending_ = 0; // tracks in `trim_until_ns_` not yet past their cut
 
   // The streams merged by decode time, with no regard to where a seek wanted to start.
   auto readInterleaved() -> Result<Packet, OMError> {
@@ -881,9 +951,9 @@ private:
     if (stream.needs_init) return INT64_MIN; // nothing can be read before this
     // Not the segment's start, which would stall every other track for a whole segment.
     if (stream.streaming && stream.last_read_ns != INT64_MIN) return stream.last_read_ns;
-    const auto segment = stream.index().segmentAt(stream.read_ordinal);
-    if (!segment) return INT64_MAX;
-    return scaleToNs(segment->time, stream.index().timescale());
+    const auto span = stream.index().spanAt(stream.read_ordinal);
+    if (!span) return INT64_MAX;
+    return scaleToNs(span->time, stream.index().timescale());
   }
 
   // Whether this ordinal's pieces are going in one at a time, so the whole of it
@@ -972,9 +1042,7 @@ private:
   // What the next segment decodes against, which a playlist may replace part-way through.
   // Nothing once the reader holds it, or where segments carry their own headers.
   auto initWantedBy(const Stream& stream) const -> std::optional<SegmentRequest> {
-    const auto segment = stream.index().segmentAt(stream.read_ordinal);
-    const std::optional<SegmentRequest> wanted =
-        segment ? segment->init : stream.index().initSegment();
+    const std::optional<SegmentRequest> wanted = stream.index().initAt(stream.read_ordinal);
     if (!wanted) return std::nullopt;
     if (stream.loaded_init && *stream.loaded_init == *wanted) return std::nullopt;
     return wanted;

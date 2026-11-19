@@ -79,8 +79,12 @@ public:
         if (known(plan.request)) continue;
         // Wanted whole: an initialization segment is where the track list comes from.
         const bool piecewise = i == 0 && !plan.initialization && stream_fetch_ && !piecewise_;
-        if (piecewise) piecewise_ = plan.request;
-        pending_.push_back({plan.request, piecewise});
+        const uint64_t id = ++last_job_;
+        if (piecewise) {
+          piecewise_ = plan.request;
+          piecewise_job_ = id;
+        }
+        pending_.push_back({plan.request, piecewise, id});
         in_flight_.push_back(plan.request);
         added = true;
       }
@@ -142,19 +146,21 @@ public:
     });
   }
 
-  /** Forgets everything queued and everything arrived. Called after a seek, when
-   * what was being fetched is no longer what is wanted. Downloads already running
-   * are allowed to finish and are then thrown away, which costs one segment's
-   * bandwidth and saves cancellation machinery nobody would exercise. */
+  /** Called after a seek. Forgets what is queued and not started, and stops the
+   * segment being read in pieces: those pieces were bound for a reader the seek
+   * flushed. Whole segments, fetched or still downloading, are kept -- a seek a few
+   * seconds on usually lands in them, and the demuxer drops the ones it no longer
+   * wants without anything having to be downloaded twice. */
   void reset() {
     {
       const std::lock_guard lock(mutex_);
+      for (const Job& job : pending_) retire(job.request);
       pending_.clear();
-      ready_.clear();
+      if (piecewise_) retire(*piecewise_);
       pieces_.clear();
-      in_flight_.clear();
       held_ = 0;
       piecewise_.reset();
+      piecewise_job_ = 0;
     }
     // A worker holding a piece back because the queue was full has to be told the
     // queue is gone, or it sits there until its own download times out.
@@ -169,6 +175,7 @@ private:
   struct Job {
     openmedia::SegmentRequest request;
     bool piecewise = false;
+    uint64_t id = 0;
   };
 
   struct Arrived {
@@ -221,7 +228,7 @@ private:
       }
 
       if (job.piecewise) {
-        readInPieces(job.request, stop);
+        readInPieces(job.request, job.id, stop);
         continue;
       }
 
@@ -239,15 +246,22 @@ private:
   }
 
   // A failure part way still ends the segment: the demuxer reads what arrived and moves on.
-  void readInPieces(const openmedia::SegmentRequest& request, std::stop_token stop) {
-    // A reset() may have moved on to another segment during this download.
+  void readInPieces(const openmedia::SegmentRequest& request, uint64_t id, std::stop_token stop) {
+    // A reset() may have moved on during this download -- possibly to this same segment,
+    // read afresh by another job, which is why the job and not the request is compared.
+    const auto current = [&] { return piecewise_job_ == id && wanted(request); };
     const auto release = [&] {
-      if (piecewise_ && *piecewise_ == request) piecewise_.reset();
+      if (piecewise_job_ == id) {
+        piecewise_.reset();
+        piecewise_job_ = 0;
+      }
     };
     const auto finish = [&](bool send_last) {
       const std::lock_guard lock(mutex_);
+      // Another job's entry for the same request is not this one's to retire.
+      const bool mine = piecewise_job_ == id;
       release();
-      if (retire(request) && send_last) {
+      if (mine && retire(request) && send_last) {
         pieces_.push_back({request, {}, true});
         arrived_.notify_all();
       }
@@ -269,7 +283,7 @@ private:
       const size_t read = source->read(buffer);
       {
         std::unique_lock lock(mutex_);
-        if (stop.stop_requested() || !wanted(request)) {
+        if (stop.stop_requested() || !current()) {
           release();
           return;
         }
@@ -279,9 +293,9 @@ private:
         arrived_.notify_all();
 
         drained_.wait(lock, [&] {
-          return held_ < PIECE_WATERMARK || stop.stop_requested() || !wanted(request);
+          return held_ < PIECE_WATERMARK || stop.stop_requested() || !current();
         });
-        if (stop.stop_requested() || !wanted(request)) {
+        if (stop.stop_requested() || !current()) {
           release();
           return;
         }
@@ -304,6 +318,8 @@ private:
   // The one segment being read in pieces, if any. One at a time: it is the segment
   // readPacket() is waiting on, and there is only ever one of those.
   std::optional<openmedia::SegmentRequest> piecewise_;
+  uint64_t piecewise_job_ = 0; // the Job::id reading it
+  uint64_t last_job_ = 0;
   std::vector<std::jthread> workers_;
 };
 

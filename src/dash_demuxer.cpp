@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <dash/mpd.hpp>
 #include <formats.hpp>
 #include <memory>
@@ -15,25 +16,95 @@ namespace {
 // Holds the representation by value: the manifest is a local in openDashManifest().
 class DashSegmentIndex final : public SegmentIndex {
   dash::Representation rep_;
+  std::optional<uint64_t> count_;
+  std::optional<SegmentRequest> init_;
 
-public:
-  explicit DashSegmentIndex(dash::Representation rep) : rep_(std::move(rep)) {}
+  // A SegmentTimeline is walked run by run, and an encoder that varies its segment
+  // lengths writes one run per segment: thousands of them for a film, walked on every
+  // lookup. With each run's first ordinal at hand, a lookup is a binary search.
+  std::vector<uint64_t> run_first_;
+  bool timeline_indexed_ = false;
 
-  auto initSegment() const -> std::optional<SegmentRequest> override {
-    return rep_.initSegment();
+  void indexTimeline() {
+    if (rep_.addressing != dash::Addressing::Timeline) return;
+    uint64_t ordinal = 0;
+    int64_t last_start = INT64_MIN;
+    run_first_.reserve(rep_.timeline.size());
+    for (const dash::TimelineRun& run : rep_.timeline) {
+      // What the run-by-run walk does with these is not worth reproducing here.
+      if (run.duration == 0 || run.start < last_start) {
+        run_first_.clear();
+        return;
+      }
+      last_start = run.start;
+      run_first_.push_back(ordinal);
+      if (run.repeat < 0) break; // nothing after an open run is reachable
+      ordinal += static_cast<uint64_t>(run.repeat) + 1;
+    }
+    timeline_indexed_ = !run_first_.empty();
   }
 
-  auto segmentCount() const -> std::optional<uint64_t> override { return rep_.segmentCount(); }
+  // The run holding `ordinal` and how far into it, or nothing past the end.
+  auto runOf(uint64_t ordinal) const -> std::optional<std::pair<size_t, uint64_t>> {
+    if (count_ && ordinal >= *count_) return std::nullopt;
+    const auto after = std::upper_bound(run_first_.begin(), run_first_.end(), ordinal);
+    const auto run = static_cast<size_t>(after - run_first_.begin()) - 1;
+    return std::pair {run, ordinal - run_first_[run]};
+  }
+
+public:
+  explicit DashSegmentIndex(dash::Representation rep)
+      : rep_(std::move(rep)), count_(rep_.segmentCount()), init_(rep_.initSegment()) {
+    indexTimeline();
+  }
+
+  auto initSegment() const -> std::optional<SegmentRequest> override { return init_; }
+  auto initAt(uint64_t) const -> std::optional<SegmentRequest> override { return init_; }
+
+  auto segmentCount() const -> std::optional<uint64_t> override { return count_; }
+
+  auto spanAt(uint64_t ordinal) const -> std::optional<Span> override {
+    if (count_ && ordinal >= *count_) return std::nullopt;
+    switch (rep_.addressing) {
+      case dash::Addressing::Number:
+      case dash::Addressing::List:
+        return Span {rep_.presentation_time_offset +
+                         static_cast<int64_t>(ordinal * rep_.segment_duration),
+                     rep_.segment_duration};
+      case dash::Addressing::Timeline: {
+        if (!timeline_indexed_) break;
+        const auto at = runOf(ordinal);
+        if (!at) return std::nullopt;
+        const dash::TimelineRun& run = rep_.timeline[at->first];
+        return Span {run.start + static_cast<int64_t>(at->second * run.duration), run.duration};
+      }
+      default: break;
+    }
+    return SegmentIndex::spanAt(ordinal);
+  }
 
   auto segmentAt(uint64_t ordinal) const -> std::optional<Segment> override {
-    const auto segment = rep_.segmentAt(ordinal);
+    std::optional<dash::Segment> segment;
+    if (timeline_indexed_) {
+      const auto at = runOf(ordinal);
+      if (!at) return std::nullopt;
+      const dash::TimelineRun& run = rep_.timeline[at->first];
+      const int64_t time = run.start + static_cast<int64_t>(at->second * run.duration);
+      segment = dash::Segment {
+          SegmentRequest {dash::expandTemplate(rep_.media_template, rep_.id, rep_.bandwidth,
+                                               rep_.start_number + ordinal, time),
+                          0, -1},
+          time, run.duration};
+    } else {
+      segment = rep_.segmentAt(ordinal);
+    }
     if (!segment) return std::nullopt;
 
     Segment out;
-    out.request = segment->request;
+    out.request = std::move(segment->request);
     out.time = segment->time;
     out.duration = segment->duration;
-    out.init = rep_.initSegment();
+    out.init = init_;
     // A period starts the timeline over; the first segment of a representation is
     // where the reader is handed a clock it has not been following.
     out.discontinuity = ordinal == 0;
@@ -41,7 +112,23 @@ public:
   }
 
   auto ordinalForTime(int64_t media_time) const -> uint64_t override {
-    return rep_.ordinalForTime(media_time);
+    if (!timeline_indexed_) return rep_.ordinalForTime(media_time);
+    const auto& runs = rep_.timeline;
+    const size_t used = run_first_.size();
+    // The last run starting at or before the target.
+    const auto after = std::upper_bound(
+        runs.begin(), runs.begin() + static_cast<ptrdiff_t>(used), media_time,
+        [](int64_t time, const dash::TimelineRun& run) { return time < run.start; });
+    if (after == runs.begin()) return 0;
+    const auto r = static_cast<size_t>(after - runs.begin()) - 1;
+    const dash::TimelineRun& run = runs[r];
+    const uint64_t within = static_cast<uint64_t>(media_time - run.start) / run.duration;
+    if (run.repeat < 0) return run_first_[r] + within;
+    const uint64_t in_run = static_cast<uint64_t>(run.repeat) + 1;
+    if (within < in_run) return run_first_[r] + within;
+    // In the gap before the next run, which is where it is read from; or past the end.
+    if (r + 1 < used) return run_first_[r + 1];
+    return run_first_[r] + in_run - 1;
   }
 
   auto timescale() const -> uint32_t override { return rep_.timescale; }

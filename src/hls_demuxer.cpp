@@ -111,6 +111,17 @@ public:
     return out;
   }
 
+  auto spanAt(uint64_t ordinal) const -> std::optional<Span> override {
+    if (ordinal >= playlist_->segments.size()) return std::nullopt;
+    const auto at = static_cast<size_t>(ordinal);
+    return Span {starts_[at], static_cast<uint64_t>(starts_[at + 1] - starts_[at])};
+  }
+
+  auto initAt(uint64_t ordinal) const -> std::optional<SegmentRequest> override {
+    if (ordinal >= playlist_->segments.size()) return initSegment();
+    return initOf(playlist_->segments[static_cast<size_t>(ordinal)]);
+  }
+
   auto ordinalForTime(int64_t media_time) const -> uint64_t override {
     const size_t count = playlist_->segments.size();
     if (count == 0 || media_time <= 0) return 0;

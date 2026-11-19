@@ -52,6 +52,24 @@ public:
 
   virtual auto segmentAt(uint64_t ordinal) const -> std::optional<Segment> = 0;
 
+  // segmentAt() without naming the bytes, which for a template means building a URL. For
+  // the questions asked often -- how much is buffered, when the next segment starts.
+  struct Span {
+    int64_t time = 0;
+    uint64_t duration = 0;
+  };
+  virtual auto spanAt(uint64_t ordinal) const -> std::optional<Span> {
+    const auto segment = segmentAt(ordinal);
+    if (!segment) return std::nullopt;
+    return Span {segment->time, segment->duration};
+  }
+
+  // Segment::init of that segment, or initSegment() past the end.
+  virtual auto initAt(uint64_t ordinal) const -> std::optional<SegmentRequest> {
+    const auto segment = segmentAt(ordinal);
+    return segment ? segment->init : initSegment();
+  }
+
   // The last segment when `media_time` is past the end.
   virtual auto ordinalForTime(int64_t media_time) const -> uint64_t = 0;
 
