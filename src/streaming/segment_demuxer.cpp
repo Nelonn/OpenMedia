@@ -548,6 +548,7 @@ private:
     std::optional<size_t> next;
     int64_t next_ns = 0;
     bool past = false; // nothing still to come can be a better `prev`
+    bool prev_closest = false; // nothing still to come is nearer the target than `prev`
   };
 
   static auto toNs(int64_t value, Rational time_base) -> int64_t {
@@ -580,7 +581,7 @@ private:
     switch (l.mode) {
       case SeekMode::PREVIOUS_SYNC: return l.past || l.next.has_value();
       case SeekMode::NEXT_SYNC: return l.next.has_value();
-      case SeekMode::CLOSEST_SYNC: return l.next.has_value() || (l.past && l.prev.has_value());
+      case SeekMode::CLOSEST_SYNC: return l.next.has_value() || l.prev_closest;
       case SeekMode::DONT_SYNC: return l.past;
     }
     return true;
@@ -651,10 +652,7 @@ private:
     // the target none still to come is at or before it. For CLOSEST, one further from the
     // target than `prev` is no better either.
     if (dts_ns > l.target_ns) l.past = true;
-    if (l.mode == SeekMode::CLOSEST_SYNC && l.prev &&
-        dts_ns - l.target_ns > l.target_ns - l.prev_ns) {
-      l.past = true;
-    }
+    if (l.prev && dts_ns - l.target_ns > l.target_ns - l.prev_ns) l.prev_closest = true;
   }
 
   // Reads until it is clear where the seek lands, then queues from there. Waiting for data
