@@ -27,6 +27,7 @@ class OpusDecoder final : public Decoder {
   int channels_ = 0;
   int sample_rate_ = 0;
   AudioFormat output_format_;
+  Rational time_base_ = {}; // What Packet::duration is counted in, for concealment.
 
   using DecodeFn = fn_ptr<int(void*, const uint8_t*, opus_int32, float*, int, int)>;
   using CtlFn = fn_ptr<int(void*, int, ...)>;
@@ -91,6 +92,7 @@ public:
     if (options.format.codec_id != OM_CODEC_OPUS) {
       return OM_CODEC_INVALID_PARAMS;
     }
+    time_base_ = options.time_base;
     if (!options.extradata.empty() && isHeadMagic(options.extradata)) {
       OMError err = handleHead(options.extradata);
       if (err != OM_SUCCESS) {
@@ -113,8 +115,35 @@ public:
   }
 
   auto decode(const Packet& packet) -> Result<std::vector<Frame>, OMError> override {
-    // To libopus no data means a lost packet, which it conceals with invented audio.
-    if (packet.bytes.empty()) return Ok(std::vector<Frame> {});
+    // To libopus no data means a lost packet, which it conceals with invented
+    // audio (packet loss concealment): an empty packet whose duration says how
+    // much went missing gets that much, continuing the sound smoothly instead
+    // of a click and a gap. Without a duration there is nothing to invent.
+    if (packet.bytes.empty()) {
+      if (!raw_ptr_ || packet.duration <= 0 || time_base_.den <= 0 || time_base_.num <= 0) {
+        return Ok(std::vector<Frame> {});
+      }
+      constexpr int MAX_SAMPLES = 5760; // 120 ms at 48 kHz, the most one call makes.
+      const int64_t wanted = packet.duration * sample_rate_ * time_base_.num / time_base_.den;
+      // libopus conceals in multiples of 2.5 ms.
+      const int step = sample_rate_ / 400;
+      const int samples_wanted = static_cast<int>(std::min<int64_t>(wanted, MAX_SAMPLES)) / step * step;
+      if (samples_wanted <= 0) return Ok(std::vector<Frame> {});
+      output_format_.sample_rate = static_cast<uint32_t>(sample_rate_);
+      output_format_.channels = static_cast<uint32_t>(channels_);
+      AudioSamples concealed(output_format_, MAX_SAMPLES);
+      const int samples = decode_fn_(raw_ptr_, nullptr, 0, reinterpret_cast<float*>(concealed.planes.data[0]),
+                                     samples_wanted, 0);
+      if (samples <= 0) return Ok(std::vector<Frame> {});
+      concealed.nb_samples = static_cast<uint32_t>(samples);
+      Frame frame;
+      frame.pts = packet.pts;
+      frame.dts = packet.dts;
+      frame.data = std::move(concealed);
+      std::vector<Frame> frames;
+      frames.push_back(std::move(frame));
+      return Ok(std::move(frames));
+    }
 
     if (isHeadMagic(packet.bytes)) {
       OMError err = handleHead(packet.bytes);
