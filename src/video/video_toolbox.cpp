@@ -5,6 +5,8 @@
 #include <VideoToolbox/VideoToolbox.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <format>
 #include <openmedia/hw_videotoolbox.hpp>
@@ -1038,6 +1040,22 @@ struct EncoderCallbackContext {
   int32_t timescale;
   OMError error = OM_SUCCESS;
   std::unordered_map<uintptr_t, std::shared_ptr<HardwarePicture>> in_flight;
+  // Frames VideoToolbox has called back for, encoded or dropped. A
+  // low-latency encode() waits on `completed_changed` for its own frame.
+  uint64_t completed = 0;
+  std::condition_variable completed_changed;
+};
+
+// Counts the callback as done however it returns.
+struct CompletionMark {
+  EncoderCallbackContext* context;
+  ~CompletionMark() {
+    {
+      std::lock_guard<std::mutex> lock(context->mutex);
+      ++context->completed;
+    }
+    context->completed_changed.notify_all();
+  }
 };
 
 void compressionCallback(void* compression_output_ref_con,
@@ -1047,6 +1065,7 @@ void compressionCallback(void* compression_output_ref_con,
                          CMSampleBufferRef sample_buffer) {
   auto* context = static_cast<EncoderCallbackContext*>(compression_output_ref_con);
   if (!context) return;
+  const CompletionMark mark {context};
   {
     std::lock_guard<std::mutex> lock(context->mutex);
     context->in_flight.erase(reinterpret_cast<uintptr_t>(source_frame_ref_con));
@@ -1145,12 +1164,26 @@ public:
     timescale_ = kDefaultTimeScale;
 
     const bool require_hardware = options.extra.getBool("videotoolbox.require_hardware", false);
-    const void* specification_keys[] = {kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
-                                        kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder};
-    const void* specification_values[] = {kCFBooleanTrue, kCFBooleanTrue};
-    CFPtr<CFDictionaryRef> specification(CFDictionaryCreate(kCFAllocatorDefault, specification_keys,
-                                                            specification_values, require_hardware ? 2 : 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    low_latency_ = options.extra.getBool("low_latency", false);
+    CFPtr<CFMutableDictionaryRef> specification(CFDictionaryCreateMutable(kCFAllocatorDefault, 3, &kCFTypeDictionaryKeyCallBacks,
+                                                                          &kCFTypeDictionaryValueCallBacks));
     if (!specification) return OM_COMMON_OUT_OF_MEMORY;
+    CFDictionarySetValue(specification.get(), kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
+    if (require_hardware) {
+      CFDictionarySetValue(specification.get(), kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
+    }
+    // The rate control made for conferencing and game streaming (macOS 11.3+):
+    // every frame near its share of the bitrate instead of a smoothed average
+    // that lets a scene change burst, no frame reordering, and an encoder that
+    // returns each frame before taking the next. Not every codec and machine
+    // has it; the session is made without it when it is refused.
+    bool low_latency_rate_control = false;
+    if (low_latency_) {
+      if (__builtin_available(macOS 11.3, iOS 14.5, *)) {
+        CFDictionarySetValue(specification.get(), kVTVideoEncoderSpecification_EnableLowLatencyRateControl, kCFBooleanTrue);
+        low_latency_rate_control = true;
+      }
+    }
     // Chosen at creation: an unspecified 8-bit session first can make Main10 unavailable.
     OSType source_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     switch (input_format_.format) {
@@ -1186,6 +1219,17 @@ public:
                                         &session_);
     };
     OSStatus status = create_session(specification.get());
+    if ((status != noErr || !session_) && low_latency_rate_control) {
+      if (__builtin_available(macOS 11.3, iOS 14.5, *)) {
+        CFDictionaryRemoveValue(specification.get(), kVTVideoEncoderSpecification_EnableLowLatencyRateControl);
+      }
+      if (session_) {
+        CFRelease(session_);
+        session_ = nullptr;
+      }
+      log(OM_CATEGORY_ENCODER, OM_LEVEL_INFO, "VideoToolbox: no low-latency rate control for this codec, using the regular one");
+      status = create_session(specification.get());
+    }
     if (status != noErr || !session_) {
       return OM_CODEC_OPEN_FAILED;
     }
@@ -1236,6 +1280,13 @@ public:
 
     if (options.extra.getBool("low_latency", false)) {
       VTSessionSetProperty(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    }
+    // gop_size, as the other encoders take it: the most frames between two key
+    // frames. Without it VideoToolbox picks its own interval.
+    if (const int64_t gop = options.extra.getInt64("gop_size", 0); gop > 0) {
+      const int32_t frames = static_cast<int32_t>(std::min<int64_t>(gop, INT32_MAX));
+      CFPtr<CFNumberRef> interval(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &frames));
+      if (interval) VTSessionSetProperty(session_, kVTCompressionPropertyKey_MaxKeyFrameInterval, interval.get());
     }
     CFStringRef primaries = nullptr;
     switch (input_format_.color_primaries) {
@@ -1460,9 +1511,19 @@ public:
       return Err(OM_CODEC_ENCODE_FAILED);
     }
     force_keyframe_ = false;
+    ++submitted_;
 
     {
-      std::lock_guard<std::mutex> lock(callback_context_.mutex);
+      std::unique_lock<std::mutex> lock(callback_context_.mutex);
+      // VideoToolbox calls back on a thread of its own. A low-latency caller
+      // wants this frame's packet now, not with the next frame -- which, on a
+      // still screen, may never come. Bounded, so a stuck encoder costs a
+      // frame rather than the caller.
+      if (low_latency_) {
+        callback_context_.completed_changed.wait_for(lock, std::chrono::milliseconds(200), [&] {
+          return callback_context_.completed >= submitted_;
+        });
+      }
       packets = std::move(callback_context_.packets);
       callback_context_.packets.clear();
       if (callback_context_.error != OM_SUCCESS) return Err(callback_context_.error);
@@ -1559,6 +1620,9 @@ private:
     callback_context_.packets.clear();
     callback_context_.in_flight.clear();
     callback_context_.error = OM_SUCCESS;
+    // CompleteFrames above has called back for everything submitted.
+    callback_context_.completed = 0;
+    submitted_ = 0;
   }
 
   OMCodecId codec_id_;
@@ -1572,6 +1636,8 @@ private:
   bool initialized_ = false;
   bool force_keyframe_ = false;
   bool finished_ = false;
+  bool low_latency_ = false;
+  uint64_t submitted_ = 0; // Frames handed to VideoToolbox; see EncoderCallbackContext::completed.
   uintptr_t next_source_id_ = 1;
 };
 
