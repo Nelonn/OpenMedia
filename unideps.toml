@@ -112,13 +112,13 @@ enabled_if = "OPENMEDIA_TGA"
 
 [dependencies.dav1d]
 git = "https://github.com/Nelonn/dav1d"
-commit = "2ec676cc7e9f4c25d1831ca5fb6fb5455b3d055c"
+commit = "97cf1af365f41bf9921f2a7427f1ce6f61639c22"
 strategy = "cmake-install"
 enabled_if = "OPENMEDIA_DAV1D"
 
 [dependencies.vpx]
 git = "https://github.com/Nelonn/libvpx-cmake"
-commit = "2216dd6647a283b794543a8257009c1ba712ef65"
+commit = "6e5055774f8304656101e7ccabd4d53ca958ebd0"
 strategy = "cmake-install"
 enabled_if = "OPENMEDIA_VPX"
 
