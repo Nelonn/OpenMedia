@@ -1209,40 +1209,36 @@ public:
       h264_.parseExtradata(options.extradata);
       padded_width_ = dx_h264::alignUp(width_, 16u);
       padded_height_ = dx_h264::alignUp(height_, 16u);
-      if (h264_.has_sps) {
-        for (uint32_t i = 0; i < 32; ++i) {
-          if (!h264_.sps_valid[i]) continue;
-          padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
-          padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-          // One extra so a non-reference picture has somewhere to go that no reference occupies.
-          dpb_slot_count_ =
-              std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 2, 3, 17);
-          h264_dpb_.configure(dpb_slot_count_,
-                              static_cast<uint32_t>(h264_.sps[i].num_ref_frames),
-                              1u << (h264_.sps[i].log2_max_frame_num_minus4 + 4));
-          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-          // 4:2:0 profiles only: a 4:2:2 stream would come back wrong instead of failing to software.
-          if (h264_.sps[i].chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
-          // A live elementary stream has no container to state the size.
-          if (width_ == 0 || height_ == 0) {
-            const auto& sps = h264_.sps[i];
-            const uint32_t coded_width = padded_width_;
-            const uint32_t coded_height =
-                static_cast<uint32_t>(sps.pic_height_in_map_units_minus1 + 1) * 16u *
-                (sps.frame_mbs_only_flag ? 1u : 2u);
-            uint32_t crop_x = 0;
-            uint32_t crop_y = 0;
-            if (sps.frame_cropping_flag != 0) {
-              // Offsets are in chroma units: 4:2:0 doubles them horizontally,
-              // and vertically as well in a frame-only stream.
-              crop_x = static_cast<uint32_t>(sps.frame_crop_left_offset + sps.frame_crop_right_offset) * 2u;
-              crop_y = static_cast<uint32_t>(sps.frame_crop_top_offset + sps.frame_crop_bottom_offset) * 2u *
-                       (sps.frame_mbs_only_flag ? 1u : 2u);
-            }
-            width_ = coded_width > crop_x ? coded_width - crop_x : coded_width;
-            height_ = coded_height > crop_y ? coded_height - crop_y : coded_height;
+      if (const h264::SPS* first_sps = h264_.sps.first()) {
+        padded_width_ = static_cast<uint32_t>((first_sps->pic_width_in_mbs_minus1 + 1) * 16);
+        padded_height_ = static_cast<uint32_t>((first_sps->pic_height_in_map_units_minus1 + 1) * 16);
+        // One extra so a non-reference picture has somewhere to go that no reference occupies.
+        dpb_slot_count_ =
+            std::clamp<uint32_t>(first_sps->num_ref_frames + 2, 3, 17);
+        h264_dpb_.configure(dpb_slot_count_,
+                            static_cast<uint32_t>(first_sps->num_ref_frames),
+                            1u << (first_sps->log2_max_frame_num_minus4 + 4));
+        bit_depth = static_cast<uint8_t>(first_sps->bit_depth_luma_minus8 + 8);
+        // 4:2:0 profiles only: a 4:2:2 stream would come back wrong instead of failing to software.
+        if (first_sps->chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
+        // A live elementary stream has no container to state the size.
+        if (width_ == 0 || height_ == 0) {
+          const auto& sps = *first_sps;
+          const uint32_t coded_width = padded_width_;
+          const uint32_t coded_height =
+              static_cast<uint32_t>(sps.pic_height_in_map_units_minus1 + 1) * 16u *
+              (sps.frame_mbs_only_flag ? 1u : 2u);
+          uint32_t crop_x = 0;
+          uint32_t crop_y = 0;
+          if (sps.frame_cropping_flag != 0) {
+            // Offsets are in chroma units: 4:2:0 doubles them horizontally,
+            // and vertically as well in a frame-only stream.
+            crop_x = static_cast<uint32_t>(sps.frame_crop_left_offset + sps.frame_crop_right_offset) * 2u;
+            crop_y = static_cast<uint32_t>(sps.frame_crop_top_offset + sps.frame_crop_bottom_offset) * 2u *
+                     (sps.frame_mbs_only_flag ? 1u : 2u);
           }
-          break;
+          width_ = coded_width > crop_x ? coded_width - crop_x : coded_width;
+          height_ = coded_height > crop_y ? coded_height - crop_y : coded_height;
         }
       }
     } else if (codec_id_ == OM_CODEC_VP9) {
@@ -1468,7 +1464,7 @@ private:
     auto parsed = h264_.parseFrame(packet.bytes);
     if (parsed.slice_offsets.empty()) {
       // Only parameter sets and SEI is normal; an unparsable slice header silently costs a picture.
-      if (h264_.has_sps && h264_.has_pps) {
+      if (h264_.hasParameterSets()) {
         rejectFrame(OM_CODEC_DECODE_FAILED, "H.264 packet of {} bytes carried no decodable slice",
                     packet.bytes.size());
       }

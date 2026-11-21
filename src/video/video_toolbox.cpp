@@ -532,20 +532,15 @@ public:
     if (codec_id_ == OM_CODEC_H264 && !options.extradata.empty()) {
       video_parser::H264AccessUnitParser parser;
       parser.parseExtradata(options.extradata);
-      const auto& state = parser.state();
-      if (state.has_sps) {
-        for (uint32_t i = 0; i < 32; ++i) {
-          if (!state.sps_valid[i]) continue;
-          const auto& s = state.sps[i];
-          if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
-            output_format_.color_primaries = color_codes::primariesFromCode(s.vui.colour_primaries);
-            output_format_.transfer_char = color_codes::transferFromCode(s.vui.transfer_characteristics);
-            output_format_.color_space = color_codes::colorSpaceFromMatrix(s.vui.matrix_coefficients);
-          }
-          if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
-            output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
-          }
-          break;
+      if (const auto* sps = parser.state().sps.first()) {
+        const auto& s = *sps;
+        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+          output_format_.color_primaries = color_codes::primariesFromCode(s.vui.colour_primaries);
+          output_format_.transfer_char = color_codes::transferFromCode(s.vui.transfer_characteristics);
+          output_format_.color_space = color_codes::colorSpaceFromMatrix(s.vui.matrix_coefficients);
+        }
+        if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
+          output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
         }
       }
     } else if (codec_id_ == OM_CODEC_H265 && !options.extradata.empty()) {

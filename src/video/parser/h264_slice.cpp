@@ -153,8 +153,8 @@ static auto read_dec_ref_pic_marking(BitReader& br, const NALHeader& nal, SliceH
   return false; // ran past the cap without reaching the terminating 0
 }
 
-static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256],
-                                   const SPS sps_table[32], BitReader& br) -> SliceParse {
+static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, const PpsTable& pps_table,
+                                   const SpsTable& sps_table, BitReader& br) -> SliceParse {
   const auto fail = [&br]() { return br.ok() ? SliceParse::invalid : SliceParse::truncated; };
 
   slice.first_mb_in_slice = static_cast<int>(br.readUE());
@@ -162,11 +162,12 @@ static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, con
   if (slice.slice_type < 0 || slice.slice_type > 9) return fail();
   slice.pic_parameter_set_id = static_cast<int>(br.readUE());
   if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256) return fail();
-  const PPS& pps = pps_table[slice.pic_parameter_set_id];
-  if (pps.pic_parameter_set_id != slice.pic_parameter_set_id) return fail();
-  if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32) return fail();
-  const SPS& sps = sps_table[pps.seq_parameter_set_id];
-  if (sps.seq_parameter_set_id != pps.seq_parameter_set_id) return fail();
+  const PPS* pps_ptr = pps_table.find(slice.pic_parameter_set_id);
+  if (!pps_ptr) return fail();
+  const SPS* sps_ptr = sps_table.find(pps_ptr->seq_parameter_set_id);
+  if (!sps_ptr) return fail();
+  const PPS& pps = *pps_ptr;
+  const SPS& sps = *sps_ptr;
 
   // Against the frame size, so field pictures are not rejected.
   const int64_t pic_size_in_mbs = static_cast<int64_t>(sps.pic_width_in_mbs_minus1 + 1) *
@@ -261,8 +262,8 @@ static auto read_slice_header_rbsp(SliceHeader& slice, const NALHeader& nal, con
   return SliceParse::ok;
 }
 
-auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256],
-                       const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool {
+auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PpsTable& pps_table,
+                       const SpsTable& sps_table, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool {
   if (!bs.valid() || bs.remaining() == 0) return false;
   const std::span<const uint8_t> nal_body {bs.current(), bs.remaining()};
   bs.finish();

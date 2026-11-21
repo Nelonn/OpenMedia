@@ -45,12 +45,8 @@ struct ParsedFrame {
 };
 
 struct State {
-  h264::SPS sps[32] = {};
-  h264::PPS pps[256] = {};
-  bool sps_valid[32] = {};
-  bool pps_valid[256] = {};
-  bool has_sps = false;
-  bool has_pps = false;
+  h264::SpsTable sps;
+  h264::PpsTable pps;
   int prev_pic_order_cnt_lsb = 0;
   int prev_pic_order_cnt_msb = 0;
   // pic_order_cnt_type 1 and 2 derive the count from frame_num instead, and
@@ -59,6 +55,14 @@ struct State {
   int prev_frame_num_offset = 0;
   bool have_prev_poc = false;
   openmedia::RbspBuffer rbsp_scratch;
+
+  auto hasParameterSets() const noexcept -> bool { return !sps.empty() && !pps.empty(); }
+
+  // Keeps the POC state; a new stream calls resetPoc() as well.
+  void clearParameterSets() noexcept {
+    sps.clear();
+    pps.clear();
+  }
 
   void resetPoc() {
     prev_pic_order_cnt_lsb = 0;
@@ -78,15 +82,11 @@ struct State {
     if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
       h264::SPS parsed = {};
       if (!h264::read_sps(parsed, bs, rbsp_scratch)) return;
-      sps[parsed.seq_parameter_set_id] = parsed;
-      sps_valid[parsed.seq_parameter_set_id] = true;
-      has_sps = true;
+      sps.store(parsed.seq_parameter_set_id, parsed);
     } else if (nal.type == h264::NAL_UNIT_TYPE_PPS) {
       h264::PPS parsed = {};
       if (!h264::read_pps(parsed, sps, bs, rbsp_scratch)) return;
-      pps[parsed.pic_parameter_set_id] = parsed;
-      pps_valid[parsed.pic_parameter_set_id] = true;
-      has_pps = true;
+      pps.store(parsed.pic_parameter_set_id, parsed);
     }
   }
 
@@ -138,14 +138,11 @@ struct State {
   // 8.2.1. Types 1 and 2 derive it from frame_num; returning pic_order_cnt_lsb gave them a
   // constant 0, and DXVA tells DPB pictures apart by POC. NVENC and game capture emit type 2.
   auto computePoc(const h264::SliceHeader& slice, bool is_idr, bool is_reference) -> int32_t {
-    if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !pps_valid[slice.pic_parameter_set_id]) {
-      return slice.pic_order_cnt_lsb;
-    }
-    const auto& p = pps[slice.pic_parameter_set_id];
-    if (p.seq_parameter_set_id < 0 || p.seq_parameter_set_id >= 32 || !sps_valid[p.seq_parameter_set_id]) {
-      return slice.pic_order_cnt_lsb;
-    }
-    const auto& s = sps[p.seq_parameter_set_id];
+    const h264::PPS* p = pps.find(slice.pic_parameter_set_id);
+    if (!p) return slice.pic_order_cnt_lsb;
+    const h264::SPS* s_ptr = sps.find(p->seq_parameter_set_id);
+    if (!s_ptr) return slice.pic_order_cnt_lsb;
+    const auto& s = *s_ptr;
 
     // 8.2.1.2/8.2.1.3: frame_num wraps, so both derived types carry an offset
     // that steps by MaxFrameNum every time it does.
@@ -244,7 +241,7 @@ struct State {
       if (nal.type == h264::NAL_UNIT_TYPE_SPS || nal.type == h264::NAL_UNIT_TYPE_PPS) {
         storeNal(nal_unit);
       } else if (nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR || nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR) {
-        if (!has_sps || !has_pps) continue;
+        if (!hasParameterSets()) continue;
         if (!h264::read_slice_header(frame.slice, nal, pps, sps, bs, rbsp_scratch)) continue;
         frame.slice_offsets.push_back(static_cast<uint32_t>(header_pos) - 3);
         frame.nal = nal;
@@ -291,16 +288,13 @@ struct ActiveParameterSets {
 
 inline auto activeParameterSets(const State& state, const h264::SliceHeader& slice) -> ActiveParameterSets {
   const int pps_id = slice.pic_parameter_set_id;
-  if (pps_id < 0 || pps_id >= 256 || !state.pps_valid[pps_id]) {
-    return {.status = ParameterSetStatus::unknown_pps};
-  }
-  const h264::PPS& pps = state.pps[pps_id];
+  const h264::PPS* pps_ptr = state.pps.find(pps_id);
+  if (!pps_ptr) return {.status = ParameterSetStatus::unknown_pps};
+  const h264::PPS& pps = *pps_ptr;
 
-  const int sps_id = pps.seq_parameter_set_id;
-  if (sps_id < 0 || sps_id >= 32 || !state.sps_valid[sps_id]) {
-    return {.status = ParameterSetStatus::unknown_sps};
-  }
-  const h264::SPS& sps = state.sps[sps_id];
+  const h264::SPS* sps_ptr = state.sps.find(pps.seq_parameter_set_id);
+  if (!sps_ptr) return {.status = ParameterSetStatus::unknown_sps};
+  const h264::SPS& sps = *sps_ptr;
 
   if (sps.bit_depth_luma_minus8 != 0 || sps.bit_depth_chroma_minus8 != 0 ||
       pps.num_slice_groups_minus1 != 0) {
@@ -336,9 +330,8 @@ inline auto maxDpbMbsForLevel(int level_idc) -> uint32_t {
 // Containers often say nothing and hardware reports nothing. A silent stream leaves what
 // the container described.
 inline auto applyColorDescription(const State& state, VideoFormat& format) -> bool {
-  for (uint32_t i = 0; i < 32; ++i) {
-    if (!state.sps_valid[i]) continue;
-    const h264::SPS& sps = state.sps[i];
+  if (const h264::SPS* sps_ptr = state.sps.first()) {
+    const h264::SPS& sps = *sps_ptr;
     if (!sps.vui_parameters_present_flag) return true;
     if (sps.vui.colour_description_present_flag) {
       format.color_primaries = color_codes::primariesFromCode(sps.vui.colour_primaries);
@@ -354,9 +347,8 @@ inline auto applyColorDescription(const State& state, VideoFormat& format) -> bo
 
 // Needed before opening: 10-bit content needs a 10-bit surface.
 inline auto lumaBitDepth(const State& state) -> uint8_t {
-  for (uint32_t i = 0; i < 32; ++i)
-    if (state.sps_valid[i]) return static_cast<uint8_t>(state.sps[i].bit_depth_luma_minus8 + 8);
-  return 0;
+  const h264::SPS* sps = state.sps.first();
+  return sps ? static_cast<uint8_t>(sps->bit_depth_luma_minus8 + 8) : 0;
 }
 
 // Falls back to the DPB capacity the stream's level guarantees. Returning 0 emitted B-frame

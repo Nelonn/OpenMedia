@@ -26,7 +26,7 @@ static auto readScalingLists(BitReader& br, PPS& pps, const SPS& sps) -> bool {
   return true;
 }
 
-auto read_pps(PPS& pps, const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool {
+auto read_pps(PPS& pps, const SpsTable& sps_table, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool {
   if (!bs.valid() || bs.remaining() == 0) return false;
   pps = {};
   h264FillFlatScaling(pps);
@@ -41,8 +41,9 @@ auto read_pps(PPS& pps, const SPS sps_table[32], Bitstream& bs, openmedia::RbspB
   pps.seq_parameter_set_id = static_cast<int>(br.readUE());
   if (pps.pic_parameter_set_id < 0 || pps.pic_parameter_set_id >= 256) return false;
   if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32) return false;
-  const SPS& sps = sps_table[pps.seq_parameter_set_id];
-  if (sps.seq_parameter_set_id != pps.seq_parameter_set_id) return false;
+  const SPS* sps_ptr = sps_table.find(pps.seq_parameter_set_id);
+  if (!sps_ptr) return false;
+  const SPS& sps = *sps_ptr;
 
   pps.entropy_coding_mode_flag = static_cast<int>(br.readBit());
   pps.pic_order_present_flag = static_cast<int>(br.readBit());

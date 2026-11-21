@@ -94,22 +94,18 @@ public:
       h264_.parseExtradata(options.extradata);
       padded_width_ = dx_h264::alignUp(width_, 16u);
       padded_height_ = dx_h264::alignUp(height_, 16u);
-      if (h264_.has_sps) {
-        for (uint32_t i = 0; i < 32; ++i) {
-          if (!h264_.sps_valid[i]) continue;
-          padded_width_ = static_cast<uint32_t>((h264_.sps[i].pic_width_in_mbs_minus1 + 1) * 16);
-          padded_height_ = static_cast<uint32_t>((h264_.sps[i].pic_height_in_map_units_minus1 + 1) * 16);
-          // One extra so a non-reference picture has somewhere to go that no reference occupies.
-          dpb_slot_count_ = std::clamp<uint32_t>(h264_.sps[i].num_ref_frames + 2, 3, 17);
-          h264_dpb_.configure(dpb_slot_count_,
-                              static_cast<uint32_t>(h264_.sps[i].num_ref_frames),
-                              1u << (h264_.sps[i].log2_max_frame_num_minus4 + 4));
-          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-          // The D3D12 decode profiles used here are 4:2:0 only; taking a 4:2:2
-          // or 4:4:4 stream would silently produce a wrong picture.
-          if (h264_.sps[i].chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
-          break;
-        }
+      if (const h264::SPS* first_sps = h264_.sps.first()) {
+        padded_width_ = static_cast<uint32_t>((first_sps->pic_width_in_mbs_minus1 + 1) * 16);
+        padded_height_ = static_cast<uint32_t>((first_sps->pic_height_in_map_units_minus1 + 1) * 16);
+        // One extra so a non-reference picture has somewhere to go that no reference occupies.
+        dpb_slot_count_ = std::clamp<uint32_t>(first_sps->num_ref_frames + 2, 3, 17);
+        h264_dpb_.configure(dpb_slot_count_,
+                            static_cast<uint32_t>(first_sps->num_ref_frames),
+                            1u << (first_sps->log2_max_frame_num_minus4 + 4));
+        bit_depth = static_cast<uint8_t>(first_sps->bit_depth_luma_minus8 + 8);
+        // The D3D12 decode profiles used here are 4:2:0 only; taking a 4:2:2
+        // or 4:4:4 stream would silently produce a wrong picture.
+        if (first_sps->chroma_format_idc != 1) return OM_CODEC_NOT_SUPPORTED;
       }
     } else {
       h265_ = std::make_unique<video_parser::H265AccessUnitParser>();
@@ -153,19 +149,15 @@ public:
     output_format_.transfer_char = options.format.video.transfer_char;
     output_format_.color_primaries = options.format.video.color_primaries;
     output_format_.color_range = OM_COLOR_RANGE_UNSPECIFIED;
-    if (codec_id_ == OM_CODEC_H264 && h264_.has_sps) {
-      for (uint32_t i = 0; i < 32; ++i) {
-        if (!h264_.sps_valid[i]) continue;
-        const auto& s = h264_.sps[i];
-        if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
-          output_format_.color_primaries = color_codes::primariesFromCode(s.vui.colour_primaries);
-          output_format_.transfer_char = color_codes::transferFromCode(s.vui.transfer_characteristics);
-          output_format_.color_space = color_codes::colorSpaceFromMatrix(s.vui.matrix_coefficients);
-        }
-        if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
-          output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
-        }
-        break;
+    if (const h264::SPS* first_sps = codec_id_ == OM_CODEC_H264 ? h264_.sps.first() : nullptr) {
+      const auto& s = *first_sps;
+      if (s.vui_parameters_present_flag && s.vui.colour_description_present_flag) {
+        output_format_.color_primaries = color_codes::primariesFromCode(s.vui.colour_primaries);
+        output_format_.transfer_char = color_codes::transferFromCode(s.vui.transfer_characteristics);
+        output_format_.color_space = color_codes::colorSpaceFromMatrix(s.vui.matrix_coefficients);
+      }
+      if (s.vui_parameters_present_flag && s.vui.video_signal_type_present_flag) {
+        output_format_.color_range = s.vui.video_full_range_flag ? OM_COLOR_RANGE_FULL : OM_COLOR_RANGE_LIMITED;
       }
     } else if (codec_id_ == OM_CODEC_H265 && h265_ && h265_->hasSps()) {
       for (int i = 0; i < 16; ++i) {
@@ -433,12 +425,8 @@ private:
     D3D12_FEATURE_DATA_VIDEO_DECODE_SUPPORT support = {};
     uint8_t bit_depth = 8;
     if (codec_id_ == OM_CODEC_H264) {
-      if (h264_.has_sps) {
-        for (uint32_t i = 0; i < 32; ++i) {
-          if (!h264_.sps_valid[i]) continue;
-          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-          break;
-        }
+      if (const h264::SPS* first_sps = h264_.sps.first()) {
+        bit_depth = static_cast<uint8_t>(first_sps->bit_depth_luma_minus8 + 8);
       }
     } else {
       bit_depth = bit_depth_;
@@ -496,12 +484,8 @@ private:
 
     uint8_t bit_depth = bit_depth_;
     if (codec_id_ == OM_CODEC_H264) {
-      if (h264_.has_sps) {
-        for (uint32_t i = 0; i < 32; ++i) {
-          if (!h264_.sps_valid[i]) continue;
-          bit_depth = static_cast<uint8_t>(h264_.sps[i].bit_depth_luma_minus8 + 8);
-          break;
-        }
+      if (const h264::SPS* first_sps = h264_.sps.first()) {
+        bit_depth = static_cast<uint8_t>(first_sps->bit_depth_luma_minus8 + 8);
       }
     }
     const DXGI_FORMAT fmt = surfaceFormat(bit_depth);

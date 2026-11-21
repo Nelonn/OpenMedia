@@ -514,12 +514,7 @@ private:
     readback_.clear();
     reorder_extra_ = 0;
     h264_recovery_poc_.reset();
-    // State is the better part of a megabyte; clearing it in place keeps a
-    // temporary of that size off the stack.
-    std::fill(std::begin(h264_.sps_valid), std::end(h264_.sps_valid), false);
-    std::fill(std::begin(h264_.pps_valid), std::end(h264_.pps_valid), false);
-    h264_.has_sps = false;
-    h264_.has_pps = false;
+    h264_.clearParameterSets();
     h264_poc_.reset();
     h265_.reset();
     vp9_.reset();
@@ -626,12 +621,7 @@ private:
 
   // --- H.264 ---
 
-  auto firstH264Sps() const -> const h264::SPS* {
-    for (uint32_t i = 0; i < 32; ++i) {
-      if (h264_.sps_valid[i]) return &h264_.sps[i];
-    }
-    return nullptr;
-  }
+  auto firstH264Sps() const -> const h264::SPS* { return h264_.sps.first(); }
 
   void updateH264Format(const h264::SPS& sps) {
     const auto [width, height] = h264DisplaySize(sps);
@@ -725,7 +715,7 @@ private:
         }
         case h264::NAL_UNIT_TYPE_CODED_SLICE_IDR:
         case h264::NAL_UNIT_TYPE_CODED_SLICE_NON_IDR: {
-          if (!h264_.has_sps || !h264_.has_pps) break;
+          if (!h264_.hasParameterSets()) break;
           H264Slice slice;
           slice.nal = nal;
           slice.header = header;
@@ -736,7 +726,9 @@ private:
           // Redundant pictures only matter to a decoder that lost the primary.
           if (slice.slice.redundant_pic_cnt > 0) break;
           if (!slices.empty()) {
-            const auto& sps = h264_.sps[h264_.pps[slice.slice.pic_parameter_set_id].seq_parameter_set_id];
+            // read_slice_header() succeeded, so both sets it named are present.
+            const h264::PPS& pps = *h264_.pps.find(slice.slice.pic_parameter_set_id);
+            const h264::SPS& sps = *h264_.sps.find(pps.seq_parameter_set_id);
             if (startsNewPicture(slices.back(), slice, sps)) flushPicture();
           }
           slices.push_back(std::move(slice));
@@ -780,8 +772,9 @@ private:
       -> OMError {
     const H264Slice& first = slices.front();
     const h264::SliceHeader& head = first.slice;
-    const h264::PPS& pps = h264_.pps[head.pic_parameter_set_id];
-    const h264::SPS& sps = h264_.sps[pps.seq_parameter_set_id];
+    // Every slice here passed read_slice_header(), so both sets are present.
+    const h264::PPS& pps = *h264_.pps.find(head.pic_parameter_set_id);
+    const h264::SPS& sps = *h264_.sps.find(pps.seq_parameter_set_id);
 
     if (head.field_pic_flag) {
       return rejectFrame(OM_CODEC_NOT_SUPPORTED, "H.264 field pictures (PAFF) are not supported; MBAFF is");

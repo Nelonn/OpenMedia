@@ -1,5 +1,6 @@
 #pragma once
 
+#include "parameter_set_table.hpp"
 #include "start_code.hpp"
 
 #include <util/bit_reader.hpp>
@@ -202,9 +203,9 @@ public:
   void parseExtradata(std::span<const uint8_t> extradata);
   auto parse(std::span<const uint8_t> packet, bool end_of_packet = true) -> std::vector<H265ParsedFrame>;
 
-  auto hasVps() const noexcept -> bool { return has_vps_; }
-  auto hasSps() const noexcept -> bool { return has_sps_; }
-  auto hasPps() const noexcept -> bool { return has_pps_; }
+  auto hasVps() const noexcept -> bool { return !vps_.empty(); }
+  auto hasSps() const noexcept -> bool { return !sps_.empty(); }
+  auto hasPps() const noexcept -> bool { return !pps_.empty(); }
 
   struct Vps {
     bool valid = false;
@@ -373,9 +374,10 @@ public:
     int log2_sao_offset_scale_chroma = 0;
   };
 
-  auto vps(int id) const noexcept -> const Vps& { return vps_[id & 0xf]; }
-  auto sps(int id) const noexcept -> const Sps& { return sps_[id & 0xf]; }
-  auto pps(int id) const noexcept -> const Pps& { return pps_[id & 0x3f]; }
+  // A set never sent comes back default constructed, with valid == false.
+  auto vps(int id) const noexcept -> const Vps& { return orEmpty(vps_.find(id & 0xf)); }
+  auto sps(int id) const noexcept -> const Sps& { return orEmpty(sps_.find(id & 0xf)); }
+  auto pps(int id) const noexcept -> const Pps& { return orEmpty(pps_.find(id & 0x3f)); }
 
 private:
   struct NalUnit {
@@ -384,16 +386,19 @@ private:
     size_t end = 0;
   };
 
-  Vps vps_[16] = {};
-  Sps sps_[16] = {};
-  Pps pps_[64] = {};
+  template <typename T>
+  static auto orEmpty(const T* set) noexcept -> const T& {
+    static const T empty = {};
+    return set ? *set : empty;
+  }
+
+  ParameterSetTable<Vps, 16> vps_;
+  ParameterSetTable<Sps, 16> sps_;
+  ParameterSetTable<Pps, 64> pps_;
   StartCodeScanner scanner_;
   H265ParsedFrame current_ = {};
   bool current_has_vcl_ = false;
   bool current_parameter_sets_changed_ = false;
-  bool has_vps_ = false;
-  bool has_sps_ = false;
-  bool has_pps_ = false;
   uint8_t nal_length_size_ = 0;
   bool have_previous_slice_ = false;
   int nal_unit_type_ = 0;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "parameter_set_table.hpp"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -281,13 +283,18 @@ struct Bitstream {
   void finish() { offset = size; }
 };
 
+inline constexpr int MAX_SPS_COUNT = 32;
+inline constexpr int MAX_PPS_COUNT = 256;
+using SpsTable = openmedia::video_parser::ParameterSetTable<SPS, MAX_SPS_COUNT>;
+using PpsTable = openmedia::video_parser::ParameterSetTable<PPS, MAX_PPS_COUNT>;
+
 auto find_next_nal(Bitstream& bs) -> bool;
 auto read_nal_header(NALHeader& nal, Bitstream& bs) -> bool;
 
 // `scratch` is the caller's reusable NAL -> RBSP buffer; see openmedia::RbspBuffer.
 auto read_sps(SPS& sps, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
 // The SPS table is needed for the Table 7-2 fallback rule B scaling lists.
-auto read_pps(PPS& pps, const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
-auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PPS pps_table[256], const SPS sps_table[32], Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
+auto read_pps(PPS& pps, const SpsTable& sps_table, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
+auto read_slice_header(SliceHeader& slice, const NALHeader& nal, const PpsTable& pps_table, const SpsTable& sps_table, Bitstream& bs, openmedia::RbspBuffer& scratch) -> bool;
 
 } // namespace h264

@@ -78,16 +78,13 @@ static auto skipProfileTierLevel(openmedia::BitReader& br, int max_sub_layers_mi
 }
 
 void H265AccessUnitParser::reset() {
-  std::memset(vps_, 0, sizeof(vps_));
-  std::memset(sps_, 0, sizeof(sps_));
-  std::memset(pps_, 0, sizeof(pps_));
+  vps_.clear();
+  sps_.clear();
+  pps_.clear();
   scanner_.reset();
   current_ = {};
   current_has_vcl_ = false;
   current_parameter_sets_changed_ = false;
-  has_vps_ = false;
-  has_sps_ = false;
-  has_pps_ = false;
   nal_length_size_ = 0;
   have_previous_slice_ = false;
   nal_unit_type_ = 0;
@@ -197,10 +194,10 @@ auto H265AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
       if (!current_has_vcl_) {
         // POC is a per-picture value and computePoc advances the prevTid0Pic
         // state, so derive it once, from the first slice of the picture.
-        const auto& pps = pps_[slice.pps_id];
+        const auto& pps = this->pps(slice.pps_id);
         current_.no_rasl_output_flag =
             current_.is_irap && ((nal_type >= NAL_BLA_W_LP && nal_type <= NAL_IDR_N_LP) || first_picture_);
-        current_.poc = computePoc(sps_[pps.sps_id], slice, nal_type);
+        current_.poc = computePoc(sps(pps.sps_id), slice, nal_type);
       }
       current_has_vcl_ = true;
       have_previous_slice_ = true;
@@ -769,8 +766,7 @@ auto H265AccessUnitParser::parseVui(openmedia::BitReader& br, Sps& sps) -> bool 
 auto H265AccessUnitParser::parseVps(openmedia::BitReader& br) -> bool {
   const int vps_id = static_cast<int>(br.readBits(4));
   if (vps_id < 0 || vps_id >= 16) return false;
-  auto& vps = vps_[vps_id];
-  vps = {};
+  Vps vps = {};
   vps.valid = true;
   vps.id = vps_id;
   br.readBit();
@@ -778,8 +774,7 @@ auto H265AccessUnitParser::parseVps(openmedia::BitReader& br) -> bool {
   vps.max_sub_layers_minus1 = static_cast<int>(br.readBits(3));
   vps.temporal_id_nesting_flag = br.readBit() != 0;
   if (!br.ok()) return false;
-  has_vps_ = true;
-  return true;
+  return vps_.store(vps_id, vps);
 }
 
 auto H265AccessUnitParser::parseSps(openmedia::BitReader& br) -> bool {
@@ -906,9 +901,7 @@ auto H265AccessUnitParser::parseSps(openmedia::BitReader& br) -> bool {
     }
   }
   if (!br.ok()) return false;
-  sps_[sps_id] = sps;
-  has_sps_ = true;
-  return true;
+  return sps_.store(sps_id, sps);
 }
 
 auto H265AccessUnitParser::parsePps(openmedia::BitReader& br) -> bool {
@@ -916,8 +909,9 @@ auto H265AccessUnitParser::parsePps(openmedia::BitReader& br) -> bool {
   const int sps_id = static_cast<int>(br.readUE());
   if (pps_id < 0 || pps_id >= 64) return false;
   if (sps_id < 0 || sps_id >= 16) return false;
-  if (!sps_[sps_id].valid) return false;
-  const Sps& sps = sps_[sps_id];
+  const Sps* sps_ptr = sps_.find(sps_id);
+  if (!sps_ptr) return false;
+  const Sps& sps = *sps_ptr;
 
   Pps pps = {};
   pps.valid = true;
@@ -1033,9 +1027,7 @@ auto H265AccessUnitParser::parsePps(openmedia::BitReader& br) -> bool {
     }
   }
   if (!br.ok()) return false;
-  pps_[pps_id] = pps;
-  has_pps_ = true;
-  return true;
+  return pps_.store(pps_id, pps);
 }
 
 auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceHeader& sh) -> int {
@@ -1044,11 +1036,13 @@ auto H265AccessUnitParser::parseSliceHeader(openmedia::BitReader& br, H265SliceH
   first_slice_segment_in_pic_flag_ = br.readBit() != 0;
   if (isIrapNal(nal_unit_type_)) br.readBit(); // no_output_of_prior_pics_flag
   const int pps_id = static_cast<int>(br.readUE());
-  if (pps_id < 0 || pps_id >= 64 || !pps_[pps_id].valid) return fail();
+  const Pps* pps_ptr = pps_.find(pps_id);
+  if (!pps_ptr) return fail();
   sh.pps_id = pps_id;
-  const auto& pps = pps_[pps_id];
-  if (pps.sps_id < 0 || pps.sps_id >= 16 || !sps_[pps.sps_id].valid) return fail();
-  const auto& sps = sps_[pps.sps_id];
+  const auto& pps = *pps_ptr;
+  const Sps* sps_ptr = sps_.find(pps.sps_id);
+  if (!sps_ptr) return fail();
+  const auto& sps = *sps_ptr;
 
   const int ctb_log2_size_y = sps.log2_min_luma_coding_block_size_minus3 + 3 + sps.log2_diff_max_min_luma_coding_block_size;
   const int ctb_size_y = 1 << ctb_log2_size_y;
@@ -1260,7 +1254,7 @@ auto H265AccessUnitParser::parseNal(std::span<const uint8_t> nal_data, H265Slice
   }
 
   if (!isVclNal(nal_unit_type_)) return true;
-  if (!has_sps_ || !has_pps_) return false;
+  if (!hasSps() || !hasPps()) return false;
 
   // The header is a few hundred bytes, the payload megabytes; only a long header pays twice.
   for (size_t limit = 256;; limit *= 8) {

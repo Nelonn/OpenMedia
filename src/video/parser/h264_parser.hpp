@@ -24,12 +24,8 @@ struct H264ParsedFrame {
 };
 
 struct H264ParserState {
-  h264::SPS sps[32] = {};
-  h264::PPS pps[256] = {};
-  bool sps_valid[32] = {};
-  bool pps_valid[256] = {};
-  bool has_sps = false;
-  bool has_pps = false;
+  h264::SpsTable sps;
+  h264::PpsTable pps;
   uint8_t nal_length_size = 0;
   int prev_pic_order_cnt_lsb = 0;
   int prev_pic_order_cnt_msb = 0;

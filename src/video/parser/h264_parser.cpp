@@ -141,7 +141,7 @@ auto H264AccessUnitParser::parse(std::span<const uint8_t> packet, bool end_of_pa
     current_.bitstream.insert(current_.bitstream.end(), work_.begin() + static_cast<ptrdiff_t>(unit.start), work_.begin() + static_cast<ptrdiff_t>(unit.end));
 
     if (storeParameterSet(nal_data, nal)) current_parameter_sets_changed_ = true;
-    if (is_vcl && state_.has_sps && state_.has_pps) {
+    if (is_vcl && !state_.sps.empty() && !state_.pps.empty()) {
       current_.slice_offsets.push_back(output_offset);
       if (!current_has_vcl_) {
         // Keep the first slice of the picture: all slices agree on the fields
@@ -210,7 +210,7 @@ auto H264AccessUnitParser::parseNal(std::span<const uint8_t> nal_data, h264::NAL
   h264::Bitstream bs;
   bs.init(nal_data.data(), nal_data.size());
   if (!h264::read_nal_header(nal, bs)) return false;
-  if (isVclNalType(nal.type) && state_.has_sps && state_.has_pps) {
+  if (isVclNalType(nal.type) && !state_.sps.empty() && !state_.pps.empty()) {
     return h264::read_slice_header(slice, nal, state_.pps, state_.sps, bs, rbsp_scratch_);
   }
   return true;
@@ -233,17 +233,11 @@ auto H264AccessUnitParser::storeParameterSet(std::span<const uint8_t> nal_data, 
   if (nal.type == h264::NAL_UNIT_TYPE_SPS) {
     h264::SPS parsed = {};
     if (!h264::read_sps(parsed, bs, rbsp_scratch_)) return false;
-    state_.sps[parsed.seq_parameter_set_id] = parsed;
-    state_.sps_valid[parsed.seq_parameter_set_id] = true;
-    state_.has_sps = true;
-    return true;
+    return state_.sps.store(parsed.seq_parameter_set_id, parsed);
   }
   h264::PPS parsed = {};
   if (!h264::read_pps(parsed, state_.sps, bs, rbsp_scratch_)) return false;
-  state_.pps[parsed.pic_parameter_set_id] = parsed;
-  state_.pps_valid[parsed.pic_parameter_set_id] = true;
-  state_.has_pps = true;
-  return true;
+  return state_.pps.store(parsed.pic_parameter_set_id, parsed);
 }
 
 auto H264AccessUnitParser::startsNewAccessUnit(const h264::NALHeader& nal, const h264::SliceHeader& slice, bool is_vcl) const -> bool {
@@ -265,10 +259,11 @@ auto H264AccessUnitParser::startsNewAccessUnit(const h264::NALHeader& nal, const
 }
 
 auto H264AccessUnitParser::computePoc(const h264::SliceHeader& slice) -> int32_t {
-  if (slice.pic_parameter_set_id < 0 || slice.pic_parameter_set_id >= 256 || !state_.pps_valid[slice.pic_parameter_set_id]) return slice.pic_order_cnt_lsb;
-  const auto& pps = state_.pps[slice.pic_parameter_set_id];
-  if (pps.seq_parameter_set_id < 0 || pps.seq_parameter_set_id >= 32 || !state_.sps_valid[pps.seq_parameter_set_id]) return slice.pic_order_cnt_lsb;
-  const auto& sps = state_.sps[pps.seq_parameter_set_id];
+  const h264::PPS* pps = state_.pps.find(slice.pic_parameter_set_id);
+  if (!pps) return slice.pic_order_cnt_lsb;
+  const h264::SPS* sps_ptr = state_.sps.find(pps->seq_parameter_set_id);
+  if (!sps_ptr) return slice.pic_order_cnt_lsb;
+  const auto& sps = *sps_ptr;
 
   const bool is_idr = current_.nal.type == h264::NAL_UNIT_TYPE_CODED_SLICE_IDR;
   int32_t poc = 0;
