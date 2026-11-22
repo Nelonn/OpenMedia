@@ -30,9 +30,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 
 // No B frames: pictures go out as encoded, so DTS equals PTS and one reconstructed reference
 // is all the state between frames. Our packed headers put VUI colour and timing in the stream.
@@ -40,26 +37,6 @@
 namespace openmedia {
 
 namespace {
-
-// TEMPORARY: per-stage timing, OM_VAAPI_TRACE=1. Remove once the latency is understood.
-struct Trace {
-  bool on = std::getenv("OM_VAAPI_TRACE") != nullptr;
-  double input = 0, submit = 0, wait = 0, total = 0, interval = 0, bytes = 0, max_total = 0, max_wait = 0;
-  int frames = 0, keys = 0;
-  double last_call = 0;
-  static auto now() -> double {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-  }
-  void report() {
-    if (!on || ++frames < 60) return;
-    std::fprintf(stderr,
-                 "[VAAPI trace] avg over %d: input %.2f submit %.2f wait %.2f total %.2f (max %.2f, wait max %.2f) "
-                 "ms | call interval %.2f ms | %.1f KB/frame, %d key\n",
-                 frames, input / frames, submit / frames, wait / frames, total / frames, max_total, max_wait,
-                 interval / frames, bytes / frames / 1024.0, keys);
-    *this = Trace();
-  }
-};
 
 // VA_TIMEOUT_INFINITE, spelled out: the header built against may predate VA-API 1.9.
 constexpr uint64_t kWaitForever = 0xffffffffffffffffull;
@@ -1101,9 +1078,6 @@ public:
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
-    const double trace_start = Trace::now();
-    if (trace_.last_call > 0) trace_.interval += trace_start - trace_.last_call;
-    trace_.last_call = trace_start;
     // One picture in flight, so the GPU encodes while the caller prepares the next.
     std::optional<InFlight> previous = std::exchange(in_flight_, std::nullopt);
     std::vector<Packet> packets = std::exchange(pending_, {});
@@ -1128,18 +1102,6 @@ public:
       // The caller must hear of the dropped frame, and may treat an error as returning nothing.
       pending_ = std::move(packets);
       return Err(OM_CODEC_ENCODE_FAILED);
-    }
-    if (trace_.on) {
-      const double t = Trace::now() - trace_start;
-      trace_.total += t;
-      trace_.max_total = std::max(trace_.max_total, t);
-      for (const auto& p : packets) {
-        trace_.bytes += static_cast<double>(p.bytes.size());
-        trace_.keys += p.is_keyframe ? 1 : 0;
-      }
-      const double last = trace_.last_call;
-      trace_.report();
-      trace_.last_call = last;
     }
     return Ok(std::move(packets));
   }
@@ -2079,9 +2041,7 @@ private:
   };
 
   auto submit(const Frame& frame, const Picture& pic, bool key) -> bool {
-    const double trace_input = Trace::now();
     const VASurfaceID input = inputSurface(pic);
-    if (trace_.on) trace_.input += Trace::now() - trace_input;
     if (input == VA_INVALID_SURFACE) return false;
 
     const int recon_index = have_reference_ ? 1 - current_recon_ : current_recon_;
@@ -2109,9 +2069,7 @@ private:
     }
 
     // execute() waits for what reached the hardware, so these are free for the next picture.
-    const double trace_submit = Trace::now();
     const VAStatus status = buffers.execute(input);
-    if (trace_.on) trace_.submit += Trace::now() - trace_submit;
     if (status != VA_STATUS_SUCCESS) {
       fail(OM_CODEC_ENCODE_FAILED, "submitting the picture failed: {}", vaapi::describe(status));
       // The reference chain has a hole now; the next frame starts over.
@@ -2141,17 +2099,6 @@ private:
   auto collect(const InFlight& job) -> std::optional<Packet> {
     auto& libva = LibVA::getInstance();
     // The input surface's fence covers the coded buffer only by the driver's accident.
-    const double trace_wait = Trace::now();
-    struct WaitTrace {
-      Trace& trace;
-      double start;
-      ~WaitTrace() {
-        if (!trace.on) return;
-        const double t = Trace::now() - start;
-        trace.wait += t;
-        trace.max_wait = std::max(trace.max_wait, t);
-      }
-    } wait_trace {trace_, trace_wait};
     VAStatus status = libva.vaSyncBuffer ? libva.vaSyncBuffer(display_, job.coded, kWaitForever)
                                          : libva.vaSyncSurface(display_, job.input);
     if (status != VA_STATUS_SUCCESS) {
@@ -2780,7 +2727,6 @@ private:
   uint32_t idr_pic_id_ = 0;
 
   std::vector<uint8_t> extradata_;
-  Trace trace_;
 };
 
 } // namespace
