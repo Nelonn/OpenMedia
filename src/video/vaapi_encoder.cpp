@@ -1017,13 +1017,21 @@ public:
     content_light_level_ = video.content_light_level.has_value ? video.content_light_level : input_format_.content_light_level;
 
     // 1 is a driver's best quality, so the 1-7 scale maps backwards. vaapi.quality_level wins.
+    mesa_quality_bits_ = queryMesaQualityBits();
     quality_level_ = 0;
+    send_quality_ = false;
     if (const auto* value = options.extra.get(VAAPI_ENC_QUALITY_LEVEL)) {
-      if (const auto n = value->getInt64()) quality_level_ = static_cast<uint32_t>(std::max<int64_t>(*n, 0));
+      if (const auto n = value->getInt64()) {
+        quality_level_ = static_cast<uint32_t>(std::max<int64_t>(*n, 0));
+        send_quality_ = quality_level_ > 0 || mesa_quality_bits_;
+      }
     } else if (const auto preset = enc_preset::requested(options.extra); preset && quality_range_ > 0) {
-      quality_level_ =
-          static_cast<uint32_t>(enc_preset::scaleTo(*preset, static_cast<int32_t>(quality_range_), 1));
+      quality_level_ = mesa_quality_bits_
+                           ? mesaQualityLevel(*preset)
+                           : static_cast<uint32_t>(enc_preset::scaleTo(*preset, static_cast<int32_t>(quality_range_), 1));
+      send_quality_ = true;
     }
+    low_latency_ = options.extra.getBool("low_latency", false);
 
     gop_ = 0;
     if (const auto* value = options.extra.get("gop_size")) {
@@ -1041,9 +1049,9 @@ public:
     setupHeaders(options.format.level);
 
     log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO,
-        "[VAAPI] encoding {} {}x{} {}-bit, {}, {} rate control, quality level {} of {}, key frame every {} frames, packed headers 0x{:x}",
+        "[VAAPI] encoding {} {}x{} {}-bit, {}, {} rate control, quality level {} of {}, key frame every {} frames, packed headers 0x{:x}{}",
         codecName(), width_, height_, bit_depth_, entrypoint_ == VAEntrypointEncSliceLP ? "low power" : "full",
-        rcName(rc_.va_mode), quality_level_, quality_range_, gop_, packed_headers_);
+        rcName(rc_.va_mode), quality_level_, quality_range_, gop_, packed_headers_, low_latency_ ? ", low latency" : "");
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -1072,10 +1080,26 @@ public:
     if (previous) {
       if (auto packet = collect(*previous)) packets.push_back(std::move(*packet));
     }
+    // Low latency gives up the overlap: the caller waits for the hardware, but gets this
+    // picture's packet now instead of a frame interval later.
+    if (low_latency_ && in_flight_) {
+      const InFlight current = *std::exchange(in_flight_, std::nullopt);
+      if (auto packet = collect(current)) packets.push_back(std::move(*packet));
+    }
     if (!submitted) {
       // The caller must hear of the dropped frame, and may treat an error as returning nothing.
       pending_ = std::move(packets);
       return Err(OM_CODEC_ENCODE_FAILED);
+    }
+    return Ok(std::move(packets));
+  }
+
+  // The picture still in flight is the only one left to come out.
+  auto finish() -> Result<std::vector<Packet>, OMError> override {
+    if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
+    std::vector<Packet> packets = std::exchange(pending_, {});
+    if (auto job = std::exchange(in_flight_, std::nullopt)) {
+      if (auto packet = collect(*job)) packets.push_back(std::move(*packet));
     }
     return Ok(std::move(packets));
   }
@@ -1221,6 +1245,35 @@ private:
     hevc_features_ = codec_id_ == OM_CODEC_H265 ? attribute(VAConfigAttribEncHEVCFeatures) : VA_ATTRIB_NOT_SUPPORTED;
     hevc_block_sizes_ = codec_id_ == OM_CODEC_H265 ? attribute(VAConfigAttribEncHEVCBlockSizes) : VA_ATTRIB_NOT_SUPPORTED;
     av1_ext2_ = codec_id_ == OM_CODEC_AV1 ? attribute(VAConfigAttribEncAV1Ext2) : VA_ATTRIB_NOT_SUPPORTED;
+  }
+
+  // Mesa's Gallium frontend reads the quality level as flags rather than a scale: bit 0 marks
+  // them valid, bits 1-2 pick the preset (speed, balance, quality, high quality), bit 3 turns
+  // on a pre-encode pass and bit 4 VBAQ. 0 is the fastest setting and 1 Mesa's default
+  // (balance, pre-encode, VBAQ). Spread evenly, the 1-7 scale would land on arbitrary flags.
+  auto queryMesaQualityBits() const -> bool {
+    auto& libva = LibVA::getInstance();
+    if (!libva.vaQueryVendorString) return false;
+    const char* vendor = libva.vaQueryVendorString(display_);
+    return vendor && std::string_view(vendor).find("Mesa Gallium") != std::string_view::npos;
+  }
+
+  static auto mesaQualityLevel(int32_t preset) -> uint32_t {
+    static constexpr uint32_t kValid = 0x01;
+    static constexpr uint32_t kBalance = 1u << 1;
+    static constexpr uint32_t kQuality = 2u << 1;
+    static constexpr uint32_t kHighQuality = 3u << 1;
+    static constexpr uint32_t kPreEncode = 0x08;
+    static constexpr uint32_t kVbaq = 0x10;
+    switch (std::clamp(preset, enc_preset::kFastest, enc_preset::kBest)) {
+      case 1: return 0;
+      case 2: return kValid | kVbaq;
+      case 3: return kValid | kBalance | kVbaq;
+      case 4: return kValid | kBalance | kPreEncode | kVbaq;
+      case 5: return kValid | kQuality | kVbaq;
+      case 6: return kValid | kQuality | kPreEncode | kVbaq;
+      default: return kValid | kHighQuality | kPreEncode | kVbaq;
+    }
   }
 
   // Maps the generic rate control onto what the driver offers, falling back
@@ -1779,9 +1832,10 @@ private:
     }
     buffers.addMisc(VAEncMiscParameterTypeFrameRate, fr);
 
-    if (quality_level_ > 0 && quality_range_ > 0) {
+    if (send_quality_ && quality_range_ > 0) {
       VAEncMiscParameterBufferQualityLevel quality = {};
-      quality.quality_level = std::min(quality_level_, quality_range_);
+      // Mesa's value is a set of flags, not a position in the range.
+      quality.quality_level = mesa_quality_bits_ ? quality_level_ : std::min(quality_level_, quality_range_);
       buffers.addMisc(VAEncMiscParameterTypeQualityLevel, quality);
     }
   }
@@ -2428,6 +2482,9 @@ private:
   std::vector<Packet> pending_;
   uint32_t quality_range_ = 0;
   uint32_t quality_level_ = 0;
+  bool send_quality_ = false; // a level was asked for; 0 is a real setting on Mesa
+  bool low_latency_ = false;
+  bool mesa_quality_bits_ = false;
   std::shared_ptr<vaapi::SurfacePool> recon_;
   std::shared_ptr<vaapi::SurfacePool> input_;
   VAImage upload_image_ = {VA_INVALID_ID};
