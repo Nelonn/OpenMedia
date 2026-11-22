@@ -35,6 +35,23 @@ int HWVAAPIContext_copyToHost(OMVAAPIContext* context,
                               uint32_t width,
                               uint32_t height);
 
+// The DRM format modifiers a DMA-BUF of `drm_fourcc` (DRM_FORMAT_NV12 or
+// DRM_FORMAT_P010) at about width x height should be laid out in for this
+// display's encoders to read it without a copy: the layout the driver gives
+// its own surfaces first, then linear. Both planes belong in one buffer --
+// Mesa's encoders read the chroma through the luma plane's buffer -- so a
+// producer that cannot allocate the format itself (GBM has no NV12 on AMD)
+// lays out one linear buffer as NV12: luma rows, then chroma rows, one pitch. Writes up to `capacity` of them to
+// `modifiers` and returns how many there were; 0 when the driver cannot say
+// (no vaExportSurfaceHandle, or no such surfaces at all).
+OPENMEDIA_ABI
+int HWVAAPIContext_queryDmaBufModifiers(OMVAAPIContext* context,
+                                        uint32_t drm_fourcc,
+                                        uint32_t width,
+                                        uint32_t height,
+                                        uint64_t* modifiers,
+                                        int capacity);
+
 #if defined(__cplusplus)
 }
 

@@ -363,6 +363,7 @@ enum class HWDeviceType : uint8_t {
   CUDA,
   QSV,
   VIDEOTOOLBOX,
+  DRM_PRIME, // Linux DMA-BUF planes (DrmPrimePicture)
 };
 
 struct OPENMEDIA_ABI HWDevice {

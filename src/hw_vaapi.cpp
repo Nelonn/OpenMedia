@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <va/va_drmcommon.h>
 
 using namespace openmedia;
 
@@ -111,4 +112,49 @@ int HWVAAPIContext_copyToHost(OMVAAPIContext* context,
   libva.vaUnmapBuffer(display, image.buf);
   libva.vaDestroyImage(display, image.image_id);
   return 1;
+}
+
+int HWVAAPIContext_queryDmaBufModifiers(OMVAAPIContext* context,
+                                        uint32_t drm_fourcc,
+                                        uint32_t width,
+                                        uint32_t height,
+                                        uint64_t* modifiers,
+                                        int capacity) {
+  if (!context || !context->display || !modifiers || capacity <= 0 || width == 0 || height == 0) return 0;
+  auto& libva = openmedia::LibVA::getInstance();
+  if (!libva.isLoaded() && !libva.load()) return 0;
+  if (!libva.vaExportSurfaceHandle) return 0;
+
+  constexpr uint32_t kNv12 = 0x3231564e; // DRM_FORMAT_NV12, 'NV12'
+  constexpr uint32_t kP010 = 0x30313050; // DRM_FORMAT_P010, 'P010'
+  if (drm_fourcc != kNv12 && drm_fourcc != kP010) return 0;
+  const bool high = drm_fourcc == kP010;
+
+  // A surface of the driver's own, exported: whatever layout it was given is
+  // the one the driver reads best.
+  VASurfaceAttrib attrib = {};
+  attrib.type = VASurfaceAttribPixelFormat;
+  attrib.flags = VA_SURFACE_ATTRIB_SETTABLE;
+  attrib.value.type = VAGenericValueTypeInteger;
+  attrib.value.value.i = static_cast<int>(high ? VA_FOURCC_P010 : VA_FOURCC_NV12);
+  VASurfaceID surface = VA_INVALID_SURFACE;
+  if (libva.vaCreateSurfaces(context->display, high ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420, width, height,
+                             &surface, 1, &attrib, 1) != VA_STATUS_SUCCESS) {
+    return 0;
+  }
+  VADRMPRIMESurfaceDescriptor descriptor = {};
+  const VAStatus status =
+      libva.vaExportSurfaceHandle(context->display, surface, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                                  VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &descriptor);
+  libva.vaDestroySurfaces(context->display, &surface, 1);
+  if (status != VA_STATUS_SUCCESS) return 0;
+  for (uint32_t i = 0; i < descriptor.num_objects; ++i) close(descriptor.objects[i].fd);
+  if (descriptor.num_objects == 0) return 0;
+
+  int count = 0;
+  const uint64_t native = descriptor.objects[0].drm_format_modifier;
+  modifiers[count++] = native;
+  constexpr uint64_t kLinear = 0;
+  if (native != kLinear && count < capacity) modifiers[count++] = kLinear;
+  return count;
 }

@@ -5,6 +5,7 @@
 #include "vaapi_common.hpp"
 
 #include <openmedia/codec_extra.hpp>
+#include <openmedia/hw_drm.hpp>
 #include <util/bit_writer.hpp>
 #include <util/color_codes.hpp>
 
@@ -13,6 +14,10 @@
 #include <va/va_enc_h264.h>
 #include <va/va_enc_hevc.h>
 #include <va/va_enc_vp9.h>
+#include <va/va_drmcommon.h>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <bit>
@@ -25,6 +30,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 // No B frames: pictures go out as encoded, so DTS equals PTS and one reconstructed reference
 // is all the state between frames. Our packed headers put VUI colour and timing in the stream.
@@ -32,6 +40,26 @@
 namespace openmedia {
 
 namespace {
+
+// TEMPORARY: per-stage timing, OM_VAAPI_TRACE=1. Remove once the latency is understood.
+struct Trace {
+  bool on = std::getenv("OM_VAAPI_TRACE") != nullptr;
+  double input = 0, submit = 0, wait = 0, total = 0, interval = 0, bytes = 0, max_total = 0, max_wait = 0;
+  int frames = 0, keys = 0;
+  double last_call = 0;
+  static auto now() -> double {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  void report() {
+    if (!on || ++frames < 60) return;
+    std::fprintf(stderr,
+                 "[VAAPI trace] avg over %d: input %.2f submit %.2f wait %.2f total %.2f (max %.2f, wait max %.2f) "
+                 "ms | call interval %.2f ms | %.1f KB/frame, %d key\n",
+                 frames, input / frames, submit / frames, wait / frames, total / frames, max_total, max_wait,
+                 interval / frames, bytes / frames / 1024.0, keys);
+    *this = Trace();
+  }
+};
 
 // VA_TIMEOUT_INFINITE, spelled out: the header built against may predate VA-API 1.9.
 constexpr uint64_t kWaitForever = 0xffffffffffffffffull;
@@ -1032,6 +1060,10 @@ public:
       send_quality_ = true;
     }
     low_latency_ = options.extra.getBool("low_latency", false);
+    max_frame_bytes_ = 0;
+    if (const auto* value = options.extra.get(CODEC_ENC_MAX_FRAME_SIZE)) {
+      if (const auto n = value->getInt64()) max_frame_bytes_ = static_cast<uint64_t>(std::max<int64_t>(*n, 0));
+    }
 
     gop_ = 0;
     if (const auto* value = options.extra.get("gop_size")) {
@@ -1049,9 +1081,12 @@ public:
     setupHeaders(options.format.level);
 
     log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO,
-        "[VAAPI] encoding {} {}x{} {}-bit, {}, {} rate control, quality level {} of {}, key frame every {} frames, packed headers 0x{:x}{}",
+        "[VAAPI] encoding {} {}x{} {}-bit, {}, {} rate control, quality level {} of {}, key frame every {} frames, packed headers 0x{:x}{}{}",
         codecName(), width_, height_, bit_depth_, entrypoint_ == VAEntrypointEncSliceLP ? "low power" : "full",
-        rcName(rc_.va_mode), quality_level_, quality_range_, gop_, packed_headers_, low_latency_ ? ", low latency" : "");
+        rcName(rc_.va_mode), quality_level_, quality_range_, gop_, packed_headers_, low_latency_ ? ", low latency" : "",
+        max_frame_bytes_ == 0           ? std::string()
+        : max_frame_size_supported_ ? std::format(", frames capped at {} KB", max_frame_bytes_ / 1024)
+                                    : std::string(", no frame size cap on this driver"));
     initialized_ = true;
     return OM_SUCCESS;
   }
@@ -1066,6 +1101,9 @@ public:
 
   auto encode(const Frame& frame) -> Result<std::vector<Packet>, OMError> override {
     if (!initialized_) return Err(OM_COMMON_NOT_INITIALIZED);
+    const double trace_start = Trace::now();
+    if (trace_.last_call > 0) trace_.interval += trace_start - trace_.last_call;
+    trace_.last_call = trace_start;
     // One picture in flight, so the GPU encodes while the caller prepares the next.
     std::optional<InFlight> previous = std::exchange(in_flight_, std::nullopt);
     std::vector<Packet> packets = std::exchange(pending_, {});
@@ -1090,6 +1128,18 @@ public:
       // The caller must hear of the dropped frame, and may treat an error as returning nothing.
       pending_ = std::move(packets);
       return Err(OM_CODEC_ENCODE_FAILED);
+    }
+    if (trace_.on) {
+      const double t = Trace::now() - trace_start;
+      trace_.total += t;
+      trace_.max_total = std::max(trace_.max_total, t);
+      for (const auto& p : packets) {
+        trace_.bytes += static_cast<double>(p.bytes.size());
+        trace_.keys += p.is_keyframe ? 1 : 0;
+      }
+      const double last = trace_.last_call;
+      trace_.report();
+      trace_.last_call = last;
     }
     return Ok(std::move(packets));
   }
@@ -1225,6 +1275,9 @@ private:
       }
       default: break;
     }
+
+    const uint32_t max_frame = attribute(VAConfigAttribMaxFrameSize);
+    max_frame_size_supported_ = max_frame != VA_ATTRIB_NOT_SUPPORTED && (max_frame & 1) != 0;
 
     quality_range_ = attribute(VAConfigAttribEncQualityRange);
     if (quality_range_ == VA_ATTRIB_NOT_SUPPORTED) quality_range_ = 0;
@@ -1453,10 +1506,12 @@ private:
         if (buffer != VA_INVALID_ID) libva.vaDestroyBuffer(display_, buffer);
       }
       if (upload_image_.image_id != VA_INVALID_ID) libva.vaDestroyImage(display_, upload_image_.image_id);
+      releaseImports();
       if (context_ != VA_INVALID_ID) libva.vaDestroyContext(display_, context_);
       if (config_ != VA_INVALID_ID) libva.vaDestroyConfig(display_, config_);
     }
     in_flight_.reset();
+    imports_.clear();
     pending_.clear();
     coded_buffers_[0] = coded_buffers_[1] = VA_INVALID_ID;
     coded_buffer_ = VA_INVALID_ID;
@@ -1599,18 +1654,178 @@ private:
   // --- Input ---
 
   // The surface to encode from: a VA-API picture on our own display as it is,
-  // anything else copied into our input surface.
+  // DMA-BUFs imported, anything else copied into our input surface.
   auto inputSurface(const Picture& pic) -> VASurfaceID {
     if (const auto* hardware = std::get_if<std::shared_ptr<HardwarePicture>>(&pic.buffer)) {
       if (*hardware && (*hardware)->getType() == HWDeviceType::VAAPI) {
         const auto va = std::static_pointer_cast<VAAPIHardwarePicture>(*hardware);
         if (va->display() == display_) return va->surface();
       }
-      fail(OM_CODEC_INVALID_PARAMS, "hardware input must be a VA-API surface on the encoder's display");
+      if (*hardware && (*hardware)->getType() == HWDeviceType::DRM_PRIME) {
+        return importDmaBuf(static_cast<const DrmPrimePicture&>(**hardware));
+      }
+      fail(OM_CODEC_INVALID_PARAMS, "hardware input must be a VA-API surface on the encoder's display or DMA-BUFs");
       return VA_INVALID_SURFACE;
     }
     const VASurfaceID surface = input_->surface(next_slot_);
     return upload(pic, surface) ? surface : VA_INVALID_SURFACE;
+  }
+
+  // --- DMA-BUF input ---
+
+  static constexpr auto drmFourcc(char a, char b, char c, char d) -> uint32_t {
+    return static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) | (static_cast<uint32_t>(c) << 16) |
+           (static_cast<uint32_t>(d) << 24);
+  }
+
+  // A DMA-BUF picture as a surface of ours: imported the first time its buffers are seen, the
+  // same surface after that. A capture cycles through a few buffers, so the imports settle at
+  // that many. A buffer is recognised by its DMA-BUF's inode, which cannot be handed to another
+  // buffer while our import holds a reference to this one.
+  auto importDmaBuf(const DrmPrimePicture& pic) -> VASurfaceID {
+    auto& libva = LibVA::getInstance();
+    const uint32_t nv12 = drmFourcc('N', 'V', '1', '2');
+    const uint32_t p010 = drmFourcc('P', '0', '1', '0');
+    if ((pic.fourcc != nv12 && pic.fourcc != p010) || (pic.fourcc == p010) != (bit_depth_ > 8)) {
+      fail(OM_CODEC_INVALID_PARAMS, "a DMA-BUF picture must be {} for this encoder", bit_depth_ > 8 ? "P010" : "NV12");
+      return VA_INVALID_SURFACE;
+    }
+    if (pic.width != width_ || pic.height != height_) {
+      fail(OM_CODEC_INVALID_PARAMS, "picture is {}x{}, the encoder was configured for {}x{}", pic.width, pic.height,
+           width_, height_);
+      return VA_INVALID_SURFACE;
+    }
+    if (pic.plane_count == 0 || pic.plane_count > 4) {
+      fail(OM_CODEC_INVALID_PARAMS, "a DMA-BUF picture needs one to four planes, not {}", pic.plane_count);
+      return VA_INVALID_SURFACE;
+    }
+
+    Import key;
+    key.plane_count = pic.plane_count;
+    key.fourcc = pic.fourcc;
+    key.modifier = pic.modifier;
+    for (uint32_t i = 0; i < pic.plane_count; ++i) {
+      struct stat st = {};
+      if (pic.planes[i].fd < 0 || fstat(pic.planes[i].fd, &st) != 0) {
+        fail(OM_CODEC_INVALID_PARAMS, "DMA-BUF plane {} has no valid file descriptor", i);
+        return VA_INVALID_SURFACE;
+      }
+      key.inodes[i] = static_cast<uint64_t>(st.st_ino);
+      key.offsets[i] = pic.planes[i].offset;
+      key.pitches[i] = pic.planes[i].pitch;
+    }
+    ++import_clock_;
+    for (auto& import : imports_) {
+      if (import.sameBuffers(key)) {
+        import.last_used = import_clock_;
+        return import.surface;
+      }
+    }
+
+    // NV12 is a luma layer and an interleaved chroma layer, P010 the same in 16 bits, however
+    // many objects the planes are spread over.
+    const bool high = pic.fourcc == p010;
+    VADRMPRIMESurfaceDescriptor descriptor = {};
+    descriptor.fourcc = high ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    // The whole padded buffer when it covers our surfaces, so the hardware reads the producer's
+    // padding rather than past the end of the buffer.
+    const uint32_t buffer_width = std::max(pic.buffer_width, pic.width);
+    const uint32_t buffer_height = std::max(pic.buffer_height, pic.height);
+    descriptor.width = buffer_width >= surface_width_ ? surface_width_ : width_;
+    descriptor.height = buffer_height >= surface_height_ ? surface_height_ : height_;
+    uint32_t object_of_plane[4] = {};
+    for (uint32_t i = 0; i < pic.plane_count; ++i) {
+      uint32_t object = descriptor.num_objects;
+      for (uint32_t j = 0; j < i; ++j) {
+        if (key.inodes[j] == key.inodes[i]) object = object_of_plane[j];
+      }
+      object_of_plane[i] = object;
+      if (object == descriptor.num_objects) {
+        const off_t size = lseek(pic.planes[i].fd, 0, SEEK_END);
+        auto& o = descriptor.objects[descriptor.num_objects++];
+        o.fd = pic.planes[i].fd;
+        o.size = size > 0 ? static_cast<uint32_t>(size) : 0;
+        o.drm_format_modifier = pic.modifier;
+      }
+    }
+    // Mesa's encoders address both planes through the first one's buffer: chroma from another
+    // object would be read out of the luma buffer, with no error to say so.
+    if (descriptor.num_objects > 1 && mesa_quality_bits_) {
+      fail(OM_CODEC_INVALID_PARAMS, "Mesa encodes only DMA-BUFs with both planes in one buffer");
+      return VA_INVALID_SURFACE;
+    }
+    const uint32_t layer_formats[2] = {high ? drmFourcc('R', '1', '6', ' ') : drmFourcc('R', '8', ' ', ' '),
+                                       high ? drmFourcc('G', 'R', '3', '2') : drmFourcc('G', 'R', '8', '8')};
+    if (pic.plane_count == 1) {
+      // Both planes in one: chroma after the luma rows, at the same pitch.
+      descriptor.num_layers = 2;
+      for (uint32_t l = 0; l < 2; ++l) {
+        descriptor.layers[l].drm_format = layer_formats[l];
+        descriptor.layers[l].num_planes = 1;
+        descriptor.layers[l].object_index[0] = 0;
+        descriptor.layers[l].offset[0] = pic.planes[0].offset + (l == 0 ? 0 : pic.planes[0].pitch * buffer_height);
+        descriptor.layers[l].pitch[0] = pic.planes[0].pitch;
+      }
+    } else {
+      descriptor.num_layers = 2;
+      for (uint32_t l = 0; l < 2; ++l) {
+        descriptor.layers[l].drm_format = layer_formats[l];
+        descriptor.layers[l].num_planes = 1;
+        descriptor.layers[l].object_index[0] = object_of_plane[l];
+        descriptor.layers[l].offset[0] = pic.planes[l].offset;
+        descriptor.layers[l].pitch[0] = pic.planes[l].pitch;
+      }
+    }
+
+    VASurfaceAttrib attribs[2] = {};
+    attribs[0].type = VASurfaceAttribMemoryType;
+    attribs[0].flags = VA_SURFACE_ATTRIB_SETTABLE;
+    attribs[0].value.type = VAGenericValueTypeInteger;
+    attribs[0].value.value.i = static_cast<int>(VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
+    attribs[1].type = VASurfaceAttribExternalBufferDescriptor;
+    attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
+    attribs[1].value.type = VAGenericValueTypePointer;
+    attribs[1].value.value.p = &descriptor;
+    VASurfaceID surface = VA_INVALID_SURFACE;
+    const VAStatus status = libva.vaCreateSurfaces(display_, high ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420,
+                                                   descriptor.width, descriptor.height, &surface, 1, attribs, 2);
+    if (status != VA_STATUS_SUCCESS) {
+      fail(OM_CODEC_ENCODE_FAILED, "could not import a {}x{} DMA-BUF with modifier 0x{:x}: {}", descriptor.width,
+           descriptor.height, pic.modifier, vaapi::describe(status));
+      return VA_INVALID_SURFACE;
+    }
+    if (imports_.empty()) {
+      log(OM_CATEGORY_HARDWARE, OM_LEVEL_INFO, "[VAAPI] encoding from DMA-BUFs ({} object(s), modifier 0x{:x}, {}x{}{})",
+          descriptor.num_objects, pic.modifier, descriptor.width, descriptor.height,
+          descriptor.height < surface_height_ || descriptor.width < surface_width_ ? ", unpadded" : "");
+    }
+
+    // The least recently used import goes once there are more than a capture's ring holds;
+    // never the one still being encoded.
+    if (imports_.size() >= kMaxImports) {
+      auto victim = imports_.end();
+      for (auto it = imports_.begin(); it != imports_.end(); ++it) {
+        if (in_flight_ && in_flight_->input == it->surface) continue;
+        if (victim == imports_.end() || it->last_used < victim->last_used) victim = it;
+      }
+      if (victim != imports_.end()) {
+        libva.vaDestroySurfaces(display_, &victim->surface, 1);
+        imports_.erase(victim);
+      }
+    }
+    key.surface = surface;
+    key.last_used = import_clock_;
+    imports_.push_back(key);
+    return surface;
+  }
+
+  void releaseImports() {
+    auto& libva = LibVA::getInstance();
+    for (auto& import : imports_) {
+      if (libva.isLoaded() && display_ && import.surface != VA_INVALID_SURFACE)
+        libva.vaDestroySurfaces(display_, &import.surface, 1);
+    }
+    imports_.clear();
   }
 
   auto upload(const Picture& pic, VASurfaceID surface) -> bool {
@@ -1816,6 +2031,9 @@ private:
       // One packet per frame and a reference chain that stays intact: a
       // skipped frame would break both, so the rate control may not drop one.
       rc.rc_flags.bits.disable_frame_skip = 1;
+      // CBR pads every frame up to its share of the bitrate. A stream wants an unchanged desktop
+      // to cost nothing, and each byte of padding is a byte the frame waits behind on the link.
+      rc.rc_flags.bits.disable_bit_stuffing = low_latency_ ? 1 : 0;
       buffers.addMisc(VAEncMiscParameterTypeRateControl, rc);
       if (rc_.hasBitrate()) {
         VAEncMiscParameterHRD hrd = {};
@@ -1831,6 +2049,13 @@ private:
       fr.framerate = static_cast<uint32_t>(std::lround(static_cast<double>(timing_.num) / timing_.den));
     }
     buffers.addMisc(VAEncMiscParameterTypeFrameRate, fr);
+
+    if (max_frame_bytes_ > 0 && max_frame_size_supported_) {
+      VAEncMiscParameterBufferMaxFrameSize cap = {};
+      cap.type = VAEncMiscParameterTypeMaxFrameSize;
+      cap.max_frame_size = static_cast<uint32_t>(std::min<uint64_t>(max_frame_bytes_ * 8, UINT32_MAX));
+      buffers.addMisc(VAEncMiscParameterTypeMaxFrameSize, cap);
+    }
 
     if (send_quality_ && quality_range_ > 0) {
       VAEncMiscParameterBufferQualityLevel quality = {};
@@ -1854,7 +2079,9 @@ private:
   };
 
   auto submit(const Frame& frame, const Picture& pic, bool key) -> bool {
+    const double trace_input = Trace::now();
     const VASurfaceID input = inputSurface(pic);
+    if (trace_.on) trace_.input += Trace::now() - trace_input;
     if (input == VA_INVALID_SURFACE) return false;
 
     const int recon_index = have_reference_ ? 1 - current_recon_ : current_recon_;
@@ -1882,7 +2109,9 @@ private:
     }
 
     // execute() waits for what reached the hardware, so these are free for the next picture.
+    const double trace_submit = Trace::now();
     const VAStatus status = buffers.execute(input);
+    if (trace_.on) trace_.submit += Trace::now() - trace_submit;
     if (status != VA_STATUS_SUCCESS) {
       fail(OM_CODEC_ENCODE_FAILED, "submitting the picture failed: {}", vaapi::describe(status));
       // The reference chain has a hole now; the next frame starts over.
@@ -1912,6 +2141,17 @@ private:
   auto collect(const InFlight& job) -> std::optional<Packet> {
     auto& libva = LibVA::getInstance();
     // The input surface's fence covers the coded buffer only by the driver's accident.
+    const double trace_wait = Trace::now();
+    struct WaitTrace {
+      Trace& trace;
+      double start;
+      ~WaitTrace() {
+        if (!trace.on) return;
+        const double t = Trace::now() - start;
+        trace.wait += t;
+        trace.max_wait = std::max(trace.max_wait, t);
+      }
+    } wait_trace {trace_, trace_wait};
     VAStatus status = libva.vaSyncBuffer ? libva.vaSyncBuffer(display_, job.coded, kWaitForever)
                                          : libva.vaSyncSurface(display_, job.input);
     if (status != VA_STATUS_SUCCESS) {
@@ -2484,11 +2724,37 @@ private:
   uint32_t quality_level_ = 0;
   bool send_quality_ = false; // a level was asked for; 0 is a real setting on Mesa
   bool low_latency_ = false;
+  uint64_t max_frame_bytes_ = 0; // CODEC_ENC_MAX_FRAME_SIZE, 0 for none
+  bool max_frame_size_supported_ = false;
   bool mesa_quality_bits_ = false;
   std::shared_ptr<vaapi::SurfacePool> recon_;
   std::shared_ptr<vaapi::SurfacePool> input_;
   VAImage upload_image_ = {VA_INVALID_ID};
   bool derive_works_ = true;
+
+  // DMA-BUF inputs imported as surfaces, by the identity of their buffers.
+  struct Import {
+    uint64_t inodes[4] = {};
+    uint32_t offsets[4] = {};
+    uint32_t pitches[4] = {};
+    uint32_t plane_count = 0;
+    uint32_t fourcc = 0;
+    uint64_t modifier = 0;
+    VASurfaceID surface = VA_INVALID_SURFACE;
+    uint64_t last_used = 0;
+
+    auto sameBuffers(const Import& other) const -> bool {
+      if (plane_count != other.plane_count || fourcc != other.fourcc || modifier != other.modifier) return false;
+      for (uint32_t i = 0; i < plane_count; ++i) {
+        if (inodes[i] != other.inodes[i] || offsets[i] != other.offsets[i] || pitches[i] != other.pitches[i])
+          return false;
+      }
+      return true;
+    }
+  };
+  static constexpr size_t kMaxImports = 8;
+  std::vector<Import> imports_;
+  uint64_t import_clock_ = 0;
 
   uint32_t rc_modes_ = VA_RC_CQP;
   uint32_t packed_headers_ = 0;
@@ -2514,6 +2780,7 @@ private:
   uint32_t idr_pic_id_ = 0;
 
   std::vector<uint8_t> extradata_;
+  Trace trace_;
 };
 
 } // namespace

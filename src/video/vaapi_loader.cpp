@@ -62,8 +62,10 @@ auto LibVA::load() -> bool {
   vaMaxNumImageFormats = libva_.getProcAddress<PFN<int(VADisplay)>>("vaMaxNumImageFormats");
   vaQueryVendorString = libva_.getProcAddress<PFN<const char*(VADisplay)>>("vaQueryVendorString");
   vaQuerySurfaceAttributes = libva_.getProcAddress<PFN<VAStatus(VADisplay, VAConfigID, VASurfaceAttrib*, unsigned int*)>>("vaQuerySurfaceAttributes");
+  vaExportSurfaceHandle = libva_.getProcAddress<PFN<VAStatus(VADisplay, VASurfaceID, uint32_t, uint32_t, void*)>>("vaExportSurfaceHandle");
 
-  // vaSyncBuffer is not listed: VA-API 1.9 only, with a fallback to syncing the surface.
+  // Not listed: vaSyncBuffer (VA-API 1.9, which falls back to syncing the surface) and
+  // vaExportSurfaceHandle (1.1, only needed to learn the layout DMA-BUF inputs should take).
   if (!vaInitialize || !vaTerminate || !vaErrorStr || !vaCreateConfig || !vaDestroyConfig || !vaCreateSurfaces ||
       !vaDestroySurfaces || !vaCreateContext || !vaDestroyContext || !vaCreateBuffer || !vaDestroyBuffer ||
       !vaMapBuffer || !vaUnmapBuffer || !vaBeginPicture || !vaRenderPicture || !vaEndPicture || !vaSyncSurface ||

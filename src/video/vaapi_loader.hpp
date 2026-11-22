@@ -50,6 +50,8 @@ public:
   PFN<int(VADisplay)> vaMaxNumImageFormats = nullptr;
   PFN<const char*(VADisplay)> vaQueryVendorString = nullptr;
   PFN<VAStatus(VADisplay, VAConfigID, VASurfaceAttrib*, unsigned int*)> vaQuerySurfaceAttributes = nullptr;
+  // VA-API 1.1+.
+  PFN<VAStatus(VADisplay, VASurfaceID, uint32_t, uint32_t, void*)> vaExportSurfaceHandle = nullptr;
 
 private:
   LibVA() = default;

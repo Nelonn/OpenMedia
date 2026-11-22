@@ -24,6 +24,12 @@ constexpr Key CODEC_DEC_APPLY_FILM_GRAIN = "apply_film_grain";
 // lets a real-time sender on a discrete GPU spend the headroom it has on the
 // picture
 constexpr Key CODEC_ENC_PRESET = "preset";
+// int64 - Largest coded frame, in bytes, that the encoder's rate control may
+// produce; 0 or absent for no cap beyond what the rate control does anyway. A
+// real-time sender uses it to bound how long one frame (a key frame most of
+// all) holds the link. Encoders without such a control ignore it (VA-API: where
+// the driver reports VAConfigAttribMaxFrameSize).
+constexpr Key CODEC_ENC_MAX_FRAME_SIZE = "max_frame_size";
 
 // VideoToolbox encoder: refuse a software component when the requested profile
 // is unavailable in hardware. Native CVPixelBuffer input works with either.
