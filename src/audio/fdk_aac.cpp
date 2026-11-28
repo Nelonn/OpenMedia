@@ -373,11 +373,18 @@ public:
       return Err(OM_CODEC_DECODE_FAILED);
     }
 
-    const INT channels = stream_info_->channelConfig;
+    // The decoded PCM, not the AAC core: with SBR (HE-AAC) the output runs at twice the core rate
+    // with twice the samples per frame, and parametric stereo makes two channels out of one.
+    // aacSampleRate and channelConfig describe the core and would mislabel those frames.
+    const INT channels = stream_info_->numChannels;
     const INT samples_per_frame = stream_info_->frameSize;
+    if (channels <= 0 || samples_per_frame <= 0 ||
+        static_cast<size_t>(channels) * static_cast<size_t>(samples_per_frame) > decode_buffer_.size()) {
+      return Err(OM_CODEC_DECODE_FAILED);
+    }
 
     AudioFormat fmt = {};
-    fmt.sample_rate = static_cast<uint32_t>(stream_info_->aacSampleRate);
+    fmt.sample_rate = static_cast<uint32_t>(stream_info_->sampleRate);
     fmt.channels = static_cast<uint32_t>(channels);
     fmt.planar = false;
     fmt.sample_format = OM_SAMPLE_S16;
