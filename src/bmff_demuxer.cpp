@@ -774,7 +774,12 @@ inline void parseMdhd(std::span<const uint8_t> body, BMFFTrack& track) {
 
 inline void parseHdlr(std::span<const uint8_t> body, BMFFTrack& track) {
   ByteReader r(body);
-  r.skip(8); // version + flags + pre_defined
+  r.skip(4); // version + flags
+  // ISO's pre_defined is QuickTime's component type. QuickTime also puts a
+  // data-handler `hdlr` (`dhlr`, subtype `alis`/`url `) in `minf`; it must not
+  // overwrite the media handler from `mdia`.
+  const auto component_bytes = r.bytes(4);
+  if (component_bytes.size() < 4 || load_u32(component_bytes.data()) == ATOM('d', 'h', 'l', 'r')) return;
   // ATOM() packs four-CCs in native order, so the raw bytes must be loaded the
   // same way; a fixed-endian read only matches on little-endian hosts.
   const auto handler_bytes = r.bytes(4);
@@ -1918,6 +1923,7 @@ class BMFFDemuxer final : public BaseDemuxer {
   bool pcm_little_endian_ = false;
   bool in_udta_ = false;
   bool in_ilst_ = false;
+  bool in_meta_ = false;
   uint32_t movie_timescale_ = 0;
 
   // Parsing stops but decoded data stays offered: a file truncated mid-mdat usually has a
@@ -2011,6 +2017,7 @@ public:
     current_entry_kind_ = SampleEntryKind::None;
     in_udta_ = false;
     in_ilst_ = false;
+    in_meta_ = false;
     current_sample_index_ = 0;
     current_moof_offset_ = 0;
     segment_open_ = false;
@@ -3401,7 +3408,10 @@ private:
             load_u32(head + 4) == ATOM('h', 'd', 'l', 'r')) {
           children = pos;
         }
+        const bool saved = in_meta_;
+        in_meta_ = true;
         parseBoxes(children, pos + size);
+        in_meta_ = saved;
         return;
       }
       default:
@@ -3493,7 +3503,10 @@ private:
       // Track structure
       case ATOM('t', 'k', 'h', 'd'): parseTkhd(body, track); break;
       case ATOM('m', 'd', 'h', 'd'): parseMdhd(body, track); break;
-      case ATOM('h', 'd', 'l', 'r'): parseHdlr(body, track); break;
+      // A `meta` box's `hdlr` (`mdir`, `ID32`, ...) describes the metadata, not the track.
+      case ATOM('h', 'd', 'l', 'r'):
+        if (!in_meta_) parseHdlr(body, track);
+        break;
       case ATOM('e', 'l', 's', 't'): parseElst(body, track); break;
 
       // Sample table
